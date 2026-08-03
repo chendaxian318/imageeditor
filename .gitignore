@@ -1,0 +1,17 @@
+.venv/
+build/
+dist/
+release/
+__pycache__/
+*.py[cod]
+*.spec
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+*.log
+.env
+*.pfx
+*.p12
