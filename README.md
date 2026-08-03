@@ -38,6 +38,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
 - `ImageEditor.exe`：直接运行版
 - `ImageEditorSetup.exe`：当前用户安装版，会创建桌面和开始菜单快捷方式
+- `LICENSE`、`NOTICE.md`、`THIRD_PARTY_LICENSES.md`：随发布物和安装程序提供的权属及第三方许可说明
 - `SHA256SUMS.txt`：本次构建产物的 SHA-256 校验值
 
 安装程序可在完成后直接打开 Windows“默认应用”设置。选择“轻量图片编辑器”，再为希望使用的图片格式确认默认关联即可。Windows 10/11 要求默认应用由用户在系统设置中确认，安装程序不会静默覆盖现有选择。

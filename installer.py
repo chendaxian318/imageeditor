@@ -27,6 +27,7 @@ CAPABILITIES_KEY = rf"Software\{APP_REGISTRY_NAME}\Capabilities"
 REGISTERED_APPLICATIONS_KEY = r"Software\RegisteredApplications"
 PROG_ID_KEY = rf"Software\Classes\{PROG_ID}"
 APPLICATION_KEY = rf"Software\Classes\Applications\{EXE_NAME}"
+LEGAL_DOCUMENTS = ("LICENSE", "NOTICE.md", "THIRD_PARTY_LICENSES.md")
 
 
 def resource_path(name: str) -> Path:
@@ -192,6 +193,11 @@ def install_app() -> Path:
     target = install_dir / EXE_NAME
     stop_running_app()
     shutil.copy2(source, target)
+    for filename in LEGAL_DOCUMENTS:
+        source_document = resource_path(filename)
+        if not source_document.exists():
+            raise FileNotFoundError(f"安装包缺少 {filename}")
+        shutil.copy2(source_document, install_dir / filename)
 
     start_menu = (
         Path(os.environ["APPDATA"])

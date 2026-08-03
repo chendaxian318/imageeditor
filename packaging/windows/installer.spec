@@ -13,7 +13,11 @@ a = Analysis(
     [str(ROOT / "installer.py")],
     pathex=[str(ROOT)],
     binaries=[(str(APPLICATION_EXE), ".")],
-    datas=[],
+    datas=[
+        (str(ROOT / "LICENSE"), "."),
+        (str(ROOT / "NOTICE.md"), "."),
+        (str(ROOT / "THIRD_PARTY_LICENSES.md"), "."),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

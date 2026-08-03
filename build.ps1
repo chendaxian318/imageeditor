@@ -16,6 +16,7 @@ $Release = Join-Path $Root "release"
 $Icon = Join-Path $Root "resources\icons\app.ico"
 $AppSpec = Join-Path $Root "packaging\windows\image_editor.spec"
 $InstallerSpec = Join-Path $Root "packaging\windows\installer.spec"
+$LegalDocuments = @("LICENSE", "NOTICE.md", "THIRD_PARTY_LICENSES.md")
 
 function Invoke-Checked {
     param(
@@ -206,6 +207,14 @@ try {
     }
     Copy-Item -LiteralPath $installerExecutable -Destination (Join-Path $Release "ImageEditorSetup.exe")
 
+    foreach ($legalDocument in $LegalDocuments) {
+        $legalSource = Join-Path $Root $legalDocument
+        if (-not (Test-Path -LiteralPath $legalSource -PathType Leaf)) {
+            throw "Required legal document is missing: $legalSource"
+        }
+        Copy-Item -LiteralPath $legalSource -Destination (Join-Path $Release $legalDocument)
+    }
+
     $version = Invoke-CheckedCapture $Python @(
         "-c", "from light_image_editor.version import __version__; print(__version__)"
     )
@@ -218,7 +227,8 @@ try {
     }
 
     $checksumPath = Join-Path $Release "SHA256SUMS.txt"
-    $checksumLines = Get-ChildItem -LiteralPath $Release -Filter "*.exe" |
+    $checksumLines = Get-ChildItem -LiteralPath $Release -File |
+        Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
         Sort-Object Name |
         ForEach-Object {
             $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
