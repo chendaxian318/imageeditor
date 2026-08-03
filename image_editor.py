@@ -19,4 +19,4 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

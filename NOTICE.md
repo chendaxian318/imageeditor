@@ -15,9 +15,9 @@ written redistribution grant have been recorded.
 ## Third-party software
 
 This application is built with and/or distributes third-party software,
-including Python, Tcl/Tk, Pillow, PyInstaller and image codec libraries shipped
-with the Pillow Windows wheel. Those components retain their own copyright and
-licence terms. The audited component inventory is in
+including Python, Tcl/Tk, Pillow, PyInstaller, Inno Setup and image codec
+libraries shipped with the Pillow Windows wheel. Those components retain their
+own copyright and licence terms. The audited component inventory is in
 `THIRD_PARTY_LICENSES.md`.
 
 Required or important acknowledgements include:
@@ -30,6 +30,8 @@ Required or important acknowledgements include:
 - PyInstaller is copyright the PyInstaller Development Team and others. Its
   compiled bootloader is distributed under the GPL-2.0-or-later bootloader
   exception; PyInstaller runtime hooks use Apache-2.0 terms.
+- Inno Setup 7 is free for non-commercial use; commercial builds require its
+  separate commercial licence.
 - Tcl and Tk are distributed under the Tcl/Tk licence.
 
 The complete, authoritative terms supplied by each installed package must be
@@ -43,6 +45,7 @@ the build environment changes.
 拥有全部导入源码的著作权，也不对上游材料进行重新许可。完成权属链和书面再分发
 授权确认之前，不应公开或商业发布。
 
-软件使用或随包分发 Python、Tcl/Tk、Pillow、PyInstaller 及 Pillow Windows
-wheel 中的图像编解码库；这些组件分别遵循自身许可证。每次依赖或构建环境发生
-变化，都必须重新生成并核对第三方许可清单。
+软件使用或随包分发 Python、Tcl/Tk、Pillow、PyInstaller、Inno Setup 及 Pillow
+Windows wheel 中的图像编解码库；这些组件分别遵循自身许可证。Inno Setup 7 的
+商业构建需要另行购买许可证。每次依赖或构建环境发生变化，都必须重新生成并核对
+第三方许可清单。

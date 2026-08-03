@@ -15,8 +15,12 @@ $Dist = Join-Path $Root "dist"
 $Release = Join-Path $Root "release"
 $Icon = Join-Path $Root "resources\icons\app.ico"
 $AppSpec = Join-Path $Root "packaging\windows\image_editor.spec"
-$InstallerSpec = Join-Path $Root "packaging\windows\installer.spec"
+$PortableSpec = Join-Path $Root "packaging\windows\image_editor_portable.spec"
+$InnoScript = Join-Path $Root "packaging\windows\LightImageEditor.iss"
 $LegalDocuments = @("LICENSE", "NOTICE.md", "THIRD_PARTY_LICENSES.md")
+$InnoVersion = "7.0.2"
+$InnoInstallerUrl = "https://github.com/jrsoftware/issrc/releases/download/is-7_0_2/innosetup-7.0.2-x64.exe"
+$InnoInstallerSha256 = "5ad54ca3def786f8f4212552e54cc6d8d61329e2d24a1cfee0571d42c2684ff1"
 
 function Invoke-Checked {
     param(
@@ -90,6 +94,59 @@ function Remove-GeneratedDirectory {
     }
 }
 
+function Get-InnoCompiler {
+    $localInno = Join-Path $Root ".tools\inno"
+    $candidates = @(
+        (Join-Path $localInno "ISCC.exe"),
+        (Join-Path ${env:ProgramFiles} "Inno Setup 7\ISCC.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 7\ISCC.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            return $candidate
+        }
+    }
+
+    $downloads = Join-Path $Root ".tools\downloads"
+    New-Item -ItemType Directory -Path $downloads -Force | Out-Null
+    New-Item -ItemType Directory -Path $localInno -Force | Out-Null
+    $installer = Join-Path $downloads "innosetup-$InnoVersion-x64.exe"
+    if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+        Write-Host "Downloading pinned Inno Setup $InnoVersion..."
+        Invoke-WebRequest -UseBasicParsing -Uri $InnoInstallerUrl -OutFile $installer
+    }
+    $actualHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne $InnoInstallerSha256) {
+        throw "Inno Setup hash mismatch: expected $InnoInstallerSha256, got $actualHash"
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $installer
+    if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notlike "*Pyrsys B.V.*") {
+        throw "The pinned Inno Setup installer does not have a valid Pyrsys B.V. signature."
+    }
+    Write-Host "Installing the verified Inno Setup compiler into .tools..."
+    $innoInstallArguments = @(
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        "/CURRENTUSER",
+        "/DIR=$localInno"
+    )
+    $innoInstallProcess = Start-Process `
+        -FilePath $installer `
+        -ArgumentList $innoInstallArguments `
+        -WindowStyle Hidden `
+        -Wait `
+        -PassThru
+    if ($innoInstallProcess.ExitCode -ne 0) {
+        throw "Inno Setup installation failed with exit code $($innoInstallProcess.ExitCode)."
+    }
+    $compiler = Join-Path $localInno "ISCC.exe"
+    if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+        throw "Inno Setup installation did not create $compiler"
+    }
+    return $compiler
+}
+
 Push-Location $Root
 try {
     if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
@@ -147,7 +204,7 @@ try {
         "image_editor.py", "image_ops.py", "installer.py",
         "light_image_editor", "scripts", "benchmarks",
         "test_architecture.py", "test_build_metadata.py", "test_identity_resources.py",
-        "test_image_ops.py", "test_installer.py"
+        "test_image_ops.py", "test_installer.py", "test_viewer_services.py"
     )
 
     if (-not $SkipTests) {
@@ -166,16 +223,15 @@ try {
     New-Item -ItemType Directory -Path $Release -Force | Out-Null
 
     $appVersionInfo = Join-Path $Build "version\ImageEditor.version.txt"
-    $installerVersionInfo = Join-Path $Build "version\ImageEditorSetup.version.txt"
     Invoke-Checked $Python @(
         "-m", "scripts.generate_version_info", "--kind", "app", "--output", $appVersionInfo
     )
-    Invoke-Checked $Python @(
-        "-m", "scripts.generate_version_info", "--kind", "installer", "--output", $installerVersionInfo
+    $version = Invoke-CheckedCapture $Python @(
+        "-c", "from light_image_editor.version import __version__; print(__version__)"
     )
 
     $env:PYTHONHASHSEED = "0"
-    Write-Host "Building the application..."
+    Write-Host "Building the installed onedir application..."
     Invoke-Checked $Python @(
         "-m", "PyInstaller",
         "--noconfirm",
@@ -185,27 +241,45 @@ try {
         $AppSpec
     )
 
-    $appExecutable = Join-Path $Dist "app\ImageEditor.exe"
+    $appDirectory = Join-Path $Dist "app\LightImageEditor"
+    $appExecutable = Join-Path $appDirectory "ImageEditor.exe"
     if (-not (Test-Path -LiteralPath $appExecutable -PathType Leaf)) {
         throw "PyInstaller did not create $appExecutable"
     }
-    Copy-Item -LiteralPath $appExecutable -Destination (Join-Path $Release "ImageEditor.exe")
+    Copy-Item -LiteralPath $appDirectory -Destination (Join-Path $Release "LightImageEditor") -Recurse
 
-    Write-Host "Building the installer..."
+    Write-Host "Building the portable onefile application..."
     Invoke-Checked $Python @(
         "-m", "PyInstaller",
         "--noconfirm",
         "--clean",
-        "--distpath", (Join-Path $Dist "installer"),
-        "--workpath", (Join-Path $Build "pyinstaller\installer"),
-        $InstallerSpec
+        "--distpath", (Join-Path $Dist "portable"),
+        "--workpath", (Join-Path $Build "pyinstaller\portable"),
+        $PortableSpec
     )
 
-    $installerExecutable = Join-Path $Dist "installer\ImageEditorSetup.exe"
-    if (-not (Test-Path -LiteralPath $installerExecutable -PathType Leaf)) {
-        throw "PyInstaller did not create $installerExecutable"
+    $portableSource = Join-Path $Dist "portable\LightImageEditorPortable.exe"
+    $portableName = "LightImageEditor-Portable-x64-$version.exe"
+    $portableExecutable = Join-Path $Release $portableName
+    if (-not (Test-Path -LiteralPath $portableSource -PathType Leaf)) {
+        throw "PyInstaller did not create $portableSource"
     }
-    Copy-Item -LiteralPath $installerExecutable -Destination (Join-Path $Release "ImageEditorSetup.exe")
+    Copy-Item -LiteralPath $portableSource -Destination $portableExecutable
+
+    Write-Host "Building the standard per-user installer..."
+    $innoCompiler = Get-InnoCompiler
+    Invoke-Checked $innoCompiler @(
+        "/Qp",
+        "/DMyAppVersion=$version",
+        "/DSourceDir=$appDirectory",
+        "/DOutputDir=$Release",
+        $InnoScript
+    )
+    $setupName = "LightImageEditor-Setup-x64-$version.exe"
+    $installerExecutable = Join-Path $Release $setupName
+    if (-not (Test-Path -LiteralPath $installerExecutable -PathType Leaf)) {
+        throw "Inno Setup did not create $installerExecutable"
+    }
 
     foreach ($legalDocument in $LegalDocuments) {
         $legalSource = Join-Path $Root $legalDocument
@@ -215,24 +289,26 @@ try {
         Copy-Item -LiteralPath $legalSource -Destination (Join-Path $Release $legalDocument)
     }
 
-    $version = Invoke-CheckedCapture $Python @(
-        "-c", "from light_image_editor.version import __version__; print(__version__)"
-    )
-    foreach ($binaryName in @("ImageEditor.exe", "ImageEditorSetup.exe")) {
-        $binaryPath = Join-Path $Release $binaryName
+    foreach ($binaryPath in @($appExecutable, $portableExecutable, $installerExecutable)) {
         $productVersion = (Get-Item -LiteralPath $binaryPath).VersionInfo.ProductVersion
-        if ($productVersion -ne $version) {
-            throw "$binaryName contains product version '$productVersion'; expected '$version'."
+        if (-not $productVersion.StartsWith($version)) {
+            throw "$(Split-Path -Leaf $binaryPath) contains product version '$productVersion'; expected '$version'."
         }
     }
 
     $checksumPath = Join-Path $Release "SHA256SUMS.txt"
-    $checksumLines = Get-ChildItem -LiteralPath $Release -File |
+    $releasePrefix = [System.IO.Path]::GetFullPath($Release).TrimEnd("\") + "\"
+    $checksumLines = Get-ChildItem -LiteralPath $Release -File -Recurse |
         Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
-        Sort-Object Name |
+        Sort-Object FullName |
         ForEach-Object {
             $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $($_.Name)"
+            $fullName = [System.IO.Path]::GetFullPath($_.FullName)
+            if (-not $fullName.StartsWith($releasePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Release file escaped the release directory: $fullName"
+            }
+            $relative = $fullName.Substring($releasePrefix.Length).Replace("\", "/")
+            "$hash  $relative"
         }
     [System.IO.File]::WriteAllLines(
         $checksumPath,
@@ -241,8 +317,9 @@ try {
     )
 
     Write-Host "Build complete (version $version):"
-    Write-Host "  $Release\ImageEditor.exe"
-    Write-Host "  $Release\ImageEditorSetup.exe"
+    Write-Host "  $Release\LightImageEditor\ImageEditor.exe"
+    Write-Host "  $Release\$portableName"
+    Write-Host "  $Release\$setupName"
     Write-Host "  $Release\SHA256SUMS.txt"
 }
 finally {

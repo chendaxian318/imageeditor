@@ -1,23 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""Deterministic PyInstaller recipe for the bootstrap installer executable."""
+"""Deterministic PyInstaller recipe for the portable one-file executable."""
 
 from pathlib import Path
 
 
 ROOT = Path(SPECPATH).resolve().parents[1]
 ICON = ROOT / "resources" / "icons" / "app.ico"
-VERSION_INFO = ROOT / "build" / "version" / "ImageEditorSetup.version.txt"
-APPLICATION_EXE = ROOT / "release" / "ImageEditor.exe"
+VERSION_INFO = ROOT / "build" / "version" / "ImageEditor.version.txt"
 
 a = Analysis(
-    [str(ROOT / "installer.py")],
+    [str(ROOT / "image_editor.py")],
     pathex=[str(ROOT)],
-    binaries=[(str(APPLICATION_EXE), ".")],
-    datas=[
-        (str(ROOT / "LICENSE"), "."),
-        (str(ROOT / "NOTICE.md"), "."),
-        (str(ROOT / "THIRD_PARTY_LICENSES.md"), "."),
-    ],
+    binaries=[],
+    datas=[],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -34,7 +29,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="ImageEditorSetup",
+    name="LightImageEditorPortable",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

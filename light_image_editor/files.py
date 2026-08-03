@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ctypes
+import os
+import shutil
 import subprocess
 from io import BytesIO
 from pathlib import Path
@@ -15,6 +17,24 @@ from image_ops import SUPPORTED_INPUTS, natural_sort_key
 CF_DIB: Final = 8
 GMEM_MOVEABLE: Final = 0x0002
 INVALID_FILENAME_CHARS: Final = '<>:"/\\|?*'
+FO_DELETE: Final = 0x0003
+FOF_ALLOWUNDO: Final = 0x0040
+FOF_NOCONFIRMATION: Final = 0x0010
+FOF_NOERRORUI: Final = 0x0400
+FOF_SILENT: Final = 0x0004
+
+
+class SHFILEOPSTRUCTW(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", ctypes.c_void_p),
+        ("wFunc", ctypes.c_uint),
+        ("pFrom", ctypes.c_wchar_p),
+        ("pTo", ctypes.c_wchar_p),
+        ("fFlags", ctypes.c_ushort),
+        ("fAnyOperationsAborted", ctypes.c_int),
+        ("hNameMappings", ctypes.c_void_p),
+        ("lpszProgressTitle", ctypes.c_wchar_p),
+    ]
 
 
 def validate_filename_affix(label: str, value: str) -> str:
@@ -89,6 +109,72 @@ def open_folder(path: str | Path) -> None:
     """Open a folder in Windows Explorer."""
 
     subprocess.Popen(["explorer", str(path)])
+
+
+def open_recycle_bin() -> None:
+    """Open the user's Recycle Bin."""
+
+    subprocess.Popen(["explorer", "shell:RecycleBinFolder"])
+
+
+def rename_file(path: str | Path, new_name: str) -> Path:
+    """Rename a file in place without overwriting another file."""
+
+    source = Path(path)
+    cleaned = new_name.strip()
+    if not cleaned or cleaned in {".", ".."}:
+        raise ValueError("新文件名不能为空。")
+    if any(character in INVALID_FILENAME_CHARS or ord(character) < 32 for character in cleaned):
+        raise ValueError("文件名包含 Windows 不允许的字符。")
+    target = source.with_name(cleaned)
+    if target.exists() and target.resolve() != source.resolve():
+        raise FileExistsError(f"目标文件已存在：{target.name}")
+    source.rename(target)
+    return target
+
+
+def copy_file(path: str | Path, destination_folder: str | Path) -> Path:
+    """Copy a file with metadata, rejecting accidental overwrite."""
+
+    source = Path(path)
+    folder = Path(destination_folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / source.name
+    if target.exists():
+        raise FileExistsError(f"目标文件已存在：{target}")
+    shutil.copy2(source, target)
+    return target
+
+
+def move_file(path: str | Path, destination_folder: str | Path) -> Path:
+    """Move a file, rejecting accidental overwrite."""
+
+    source = Path(path)
+    folder = Path(destination_folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / source.name
+    if target.exists():
+        raise FileExistsError(f"目标文件已存在：{target}")
+    return Path(shutil.move(str(source), str(target)))
+
+
+def send_to_recycle_bin(path: str | Path) -> None:
+    """Move a file to the Windows Recycle Bin; never permanently delete it."""
+
+    if os.name != "nt":
+        raise OSError("回收站删除仅支持 Windows。")
+    source = Path(path).resolve()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    operation = SHFILEOPSTRUCTW()
+    operation.wFunc = FO_DELETE
+    operation.pFrom = str(source) + "\0\0"
+    operation.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT
+    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+    if result != 0:
+        raise OSError(result, "Windows 无法将文件移入回收站。")
+    if operation.fAnyOperationsAborted:
+        raise OSError("移入回收站操作已取消。")
 
 
 def copy_image_to_clipboard(image: Image.Image) -> None:

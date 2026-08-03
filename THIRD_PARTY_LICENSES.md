@@ -11,8 +11,9 @@ substitute for the authoritative licence text distributed by each component.
 - Pillow: 11.3.0
 - PyInstaller: 6.17.0
 - Source of version data: installed metadata in `.venv` plus `pip freeze --all`
-- Application artifacts checked: `release/ImageEditor.exe` and
-  `release/ImageEditorSetup.exe`
+- Application artifacts checked: `release/LightImageEditor/ImageEditor.exe`,
+  `release/LightImageEditor-Portable-x64-0.2.0.exe` and
+  `release/LightImageEditor-Setup-x64-0.2.0.exe`
 
 The virtual environment is not a release artifact. Paths below identify the
 authoritative files in the audited local installation so that the release
@@ -27,11 +28,17 @@ process can copy them into a distributable notice bundle.
 | Pillow | 11.3.0 | Image decode, processing and encode | MIT-CMU, plus bundled native-library terms | `.venv/Lib/site-packages/pillow-11.3.0.dist-info/licenses/LICENSE` |
 | PyInstaller | 6.17.0 | Build tool and embedded bootloader/runtime hooks | GPL-2.0-or-later WITH Bootloader-exception; runtime hooks Apache-2.0 | `.venv/Lib/site-packages/pyinstaller-6.17.0.dist-info/licenses/COPYING.txt` |
 | pyinstaller-hooks-contrib | 2026.6 | PyInstaller hook set | Standard hooks GPL-2.0-or-later; runtime hooks Apache-2.0 | `.venv/Lib/site-packages/pyinstaller_hooks_contrib-2026.6.dist-info/licenses/LICENSE` |
+| Inno Setup | 7.0.2 | Windows installer compiler | Free for non-commercial use; commercial use requires a licence | Verified compiler under `.tools/inno`; authoritative terms at `jrsoftware.org` |
 
 The PyInstaller exception permits linking or embedding its compiled bootloader
 and related files into another program and distributing that combination
 without GPL restrictions arising solely from those files. This statement is a
 summary; the package-supplied `COPYING.txt` controls.
+
+Inno Setup 7 is a build-time tool with separate commercial licensing. The
+current build is suitable only for non-commercial development/testing unless
+the publisher obtains the required Inno Setup commercial licence. Its terms
+are independent of the unresolved first-party source-code rights below.
 
 ## Installed build dependency closure
 
@@ -130,4 +137,5 @@ Useful upstream sources:
 - Python licence: <https://docs.python.org/3/license.html>
 - Pillow source and licence: <https://github.com/python-pillow/Pillow>
 - PyInstaller licence: <https://pyinstaller.org/en/stable/license.html>
+- Inno Setup licence/download information: <https://jrsoftware.org/isdl.php>
 - Tcl/Tk licence: <https://www.tcl-lang.org/software/tcltk/license.html>

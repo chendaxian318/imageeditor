@@ -17,6 +17,7 @@ from light_image_editor.identity import (
     PROG_ID,
     REGISTRY_NAME,
 )
+from light_image_editor.single_instance import request_running_app_exit
 
 APP_NAME = PRODUCT_NAME_ZH
 EXE_NAME = EXECUTABLE_NAME
@@ -50,13 +51,12 @@ $shortcut.Save()
     )
 
 
-def stop_running_app() -> None:
-    subprocess.run(
-        ["taskkill", "/IM", EXE_NAME, "/F"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+def request_app_shutdown() -> None:
+    """Ask the running application to save/cancel/exit through its IPC channel."""
+
+    response = request_running_app_exit()
+    if not response.get("ok") or not response.get("accepted", True):
+        raise RuntimeError("主程序仍在运行或用户取消退出；安装已安全取消。")
 
 
 def register_context_menu(target: Path) -> None:
@@ -191,7 +191,7 @@ def install_app() -> Path:
     install_dir = Path(os.environ["LOCALAPPDATA"]) / "LightImageEditor"
     install_dir.mkdir(parents=True, exist_ok=True)
     target = install_dir / EXE_NAME
-    stop_running_app()
+    request_app_shutdown()
     shutil.copy2(source, target)
     for filename in LEGAL_DOCUMENTS:
         source_document = resource_path(filename)

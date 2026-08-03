@@ -58,5 +58,36 @@ class DependencyLockTests(unittest.TestCase):
         )
 
 
+class ReleaseRecipeTests(unittest.TestCase):
+    def test_installed_build_is_onedir_and_portable_build_is_onefile(self) -> None:
+        installed = Path("packaging/windows/image_editor.spec").read_text(encoding="utf-8")
+        portable = Path("packaging/windows/image_editor_portable.spec").read_text(encoding="utf-8")
+
+        self.assertIn("exclude_binaries=True", installed)
+        self.assertIn("COLLECT(", installed)
+        self.assertNotIn("COLLECT(", portable)
+        self.assertIn("a.binaries", portable)
+        self.assertIn("a.datas", portable)
+
+    def test_standard_installer_registers_apps_and_uses_safe_ipc_exit(self) -> None:
+        script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
+
+        self.assertIn("PrivilegesRequired=lowest", script)
+        self.assertIn(r"Software\RegisteredApplications", script)
+        self.assertIn("UninstallDisplayName", script)
+        self.assertIn("--request-exit-for-upgrade", script)
+        self.assertIn("PrepareToInstall", script)
+        self.assertIn("InitializeUninstall", script)
+        self.assertIn("uninsdeletekeyifempty", script)
+        self.assertNotIn("taskkill", script.casefold())
+
+    def test_build_stops_on_failures_and_pins_installer_download(self) -> None:
+        script = Path("build.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("$LASTEXITCODE", script)
+        self.assertIn("InnoInstallerSha256", script)
+        self.assertIn("innosetup-7.0.2-x64.exe", script)
+
+
 if __name__ == "__main__":
     unittest.main()

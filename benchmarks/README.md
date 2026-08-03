@@ -6,7 +6,7 @@ application source or retaining generated images:
 1. **Startup** — a new Python process imports the application, creates the real
    Tk window and reports when the window has completed idle layout work.
 2. **Open a large image** — the real `ImageEditorApp.open_path` path loads and
-   renders a generated image into the preview.
+   asynchronously renders a generated image until the preview is visible.
 3. **Switch images** — a real editor window opens the first image and then
    switches through the remaining files in the generated folder.
 4. **Batch process** — production `open_image`/`save_image` functions decode,
@@ -51,9 +51,9 @@ version, platform, fixture configuration, raw samples and summary statistics.
 - Investigate regressions before defining hard gates. A useful initial review
   threshold is a median increase over 15%, followed by confirmation with at
   least five repetitions on controlled hardware.
-- The benchmark intentionally measures current synchronous behaviour. When
-  asynchronous decode/rendering is introduced, add a real "preview ready"
-  signal rather than redefining the existing metric silently.
+- UI open and switching measurements wait for the application's explicit
+  preview-ready generation, so background work is included instead of only
+  measuring how quickly `open_path` returns.
 
 ## Limitations
 

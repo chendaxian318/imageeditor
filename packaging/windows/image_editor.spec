@@ -26,10 +26,9 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
     name="ImageEditor",
+    exclude_binaries=True,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -42,4 +41,14 @@ exe = EXE(
     version=str(VERSION_INFO),
     codesign_identity=None,
     entitlements_file=None,
+)
+
+collect = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="LightImageEditor",
 )

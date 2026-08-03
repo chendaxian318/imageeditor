@@ -146,7 +146,9 @@ def _benchmark_large_open(image_path: Path, repetitions: int) -> dict[str, Any]:
         payload, _ = _read_worker(_worker_command("open", str(image_path)))
         samples.append(float(payload["open_and_render_ms"]))
     return {
-        "definition": "ImageEditorApp.open_path through synchronous preview render",
+        "definition": (
+            "ImageEditorApp.open_path until the asynchronously rendered preview is visible"
+        ),
         "open_and_render": _metric(samples),
         "fixture_bytes": image_path.stat().st_size,
     }
@@ -307,6 +309,32 @@ def _create_ui_application() -> Any:
     return app
 
 
+def _wait_for_preview(
+    app: Any,
+    previous_generation: int,
+    *,
+    started: float | None = None,
+    timeout: float = 30.0,
+) -> float:
+    """Pump Tk until async decode and preview rendering reach the canvas."""
+
+    started = started or time.perf_counter()
+    deadline = started + timeout
+    while time.perf_counter() < deadline:
+        app.update()
+        if app.original is not None and app.preview_ready_generation > previous_generation:
+            return (time.perf_counter() - started) * 1000.0
+        time.sleep(0.002)
+    raise TimeoutError("preview did not become ready before the benchmark timeout")
+
+
+def _destroy_ui_application(app: Any) -> None:
+    app.image_loader.shutdown()
+    app.preview_renderer.shutdown()
+    app._drop_target.disable()
+    app.destroy()
+
+
 def _worker_startup() -> tuple[dict[str, Any], Any]:
     started = time.perf_counter()
     app = _create_ui_application()
@@ -319,15 +347,15 @@ def _worker_open(path: Path) -> dict[str, Any]:
     app = _create_ui_application()
     app.withdraw()
     try:
+        previous_generation = app.preview_ready_generation
         started = time.perf_counter()
         app.open_path(path, confirm=False)
-        app.update_idletasks()
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        elapsed_ms = _wait_for_preview(app, previous_generation, started=started)
         if app.original is None:
             raise RuntimeError(f"application did not load fixture: {path}")
         return {"open_and_render_ms": elapsed_ms}
     finally:
-        app.destroy()
+        _destroy_ui_application(app)
 
 
 def _worker_switch(paths: list[Path]) -> dict[str, Any]:
@@ -337,16 +365,17 @@ def _worker_switch(paths: list[Path]) -> dict[str, Any]:
     app.withdraw()
     samples: list[float] = []
     try:
+        previous_generation = app.preview_ready_generation
         app.open_path(paths[0], confirm=False)
-        app.update_idletasks()
+        _wait_for_preview(app, previous_generation)
         for path in paths[1:]:
+            previous_generation = app.preview_ready_generation
             started = time.perf_counter()
             app.open_path(path, confirm=False)
-            app.update_idletasks()
-            samples.append((time.perf_counter() - started) * 1000.0)
+            samples.append(_wait_for_preview(app, previous_generation, started=started))
         return {"switch_samples_ms": samples}
     finally:
-        app.destroy()
+        _destroy_ui_application(app)
 
 
 def _run_worker(arguments: list[str]) -> int:

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
+from collections.abc import Sequence
+from concurrent.futures import Future
 from functools import partial
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import cast
 
 from PIL import Image, ImageGrab, ImageTk
@@ -22,25 +24,41 @@ from image_ops import (
 )
 
 from ..files import (
+    copy_file,
     copy_image_to_clipboard,
-    folder_position,
-    list_folder_images,
+    move_file,
     open_folder,
+    open_recycle_bin,
+    rename_file,
     reveal_file,
+    send_to_recycle_bin,
     unique_export_path,
     validate_filename_affix,
 )
 from ..identity import PRODUCT_NAME_ZH
+from ..image_loader import ImageLoader, ImageLoadFailure
+from ..metadata import image_properties
+from ..navigation import NavigationSession
+from ..preview import PreviewFrame, PreviewRenderer
 from ..settings import SettingsStore
+from ..windows_drop import WindowsFileDrop
 
 APP_NAME = PRODUCT_NAME_ZH
 ZOOM_LEVELS = ("适应", "50%", "100%", "150%", "200%")
 
 
 class ImageEditorApp(tk.Tk):
-    def __init__(self, settings_store: SettingsStore | None = None) -> None:
+    def __init__(
+        self,
+        settings_store: SettingsStore | None = None,
+        image_loader: ImageLoader | None = None,
+        preview_renderer: PreviewRenderer | None = None,
+    ) -> None:
         super().__init__()
         self.settings_store = settings_store or SettingsStore()
+        self.image_loader = image_loader or ImageLoader()
+        self.preview_renderer = preview_renderer or PreviewRenderer()
+        self.navigation = NavigationSession([])
         self.title(APP_NAME)
         self.geometry("1240x780")
         self.minsize(1040, 680)
@@ -64,6 +82,14 @@ class ImageEditorApp(tk.Tk):
         self.batch_cancel_requested = False
         self._ratio_lock = False
         self._preview_job: str | None = None
+        self._preview_generation = 0
+        self.preview_ready_generation = 0
+        self._load_generation = 0
+        self._failed_navigation_paths: set[str] = set()
+        self._saved_geometry = ""
+        self._is_fullscreen = False
+        self._is_immersive = False
+        self._slideshow_job: str | None = None
 
         self.format_var = tk.StringVar(value="JPEG")
         self.quality_var = tk.IntVar(value=85)
@@ -83,6 +109,9 @@ class ImageEditorApp(tk.Tk):
         self.info_var = tk.StringVar(value="未载入图片")
         self.crop_var = tk.StringVar(value="未设置裁剪")
         self.size_var = tk.StringVar(value="预计输出大小：-")
+        self.edit_panel_visible_var = tk.BooleanVar(value=False)
+        self.slideshow_interval_var = tk.DoubleVar(value=3.0)
+        self.slideshow_loop_var = tk.BooleanVar(value=True)
 
         self.rotation = 0
         self.flip_h = False
@@ -94,15 +123,23 @@ class ImageEditorApp(tk.Tk):
         self.grayscale_var = tk.BooleanVar(value=False)
         self.auto_contrast_var = tk.BooleanVar(value=False)
         self.recent_files: list[str] = []
+        self.recent_directories: list[str] = []
         self.undo_stack: list[dict[str, object]] = []
         self.redo_stack: list[dict[str, object]] = []
         self._restoring_history = False
         self.clean_signature: tuple[object, ...] | None = None
 
         self._load_config()
+        if self._saved_geometry:
+            try:
+                self.geometry(self._saved_geometry)
+            except tk.TclError:
+                self.geometry("1240x780")
         self._build_ui()
         self._bind_shortcuts()
-        self.bind("<Configure>", lambda _event: self._schedule_preview())
+        self._drop_target = WindowsFileDrop(self, self.open_paths)
+        self.after(0, self._drop_target.enable)
+        self.bind("<Configure>", self._on_configure)
         self.protocol("WM_DELETE_WINDOW", self.close)
 
     def _build_ui(self) -> None:
@@ -114,68 +151,96 @@ class ImageEditorApp(tk.Tk):
 
         self.columnconfigure(0, weight=1)
         self.columnconfigure(1, weight=0)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
 
         self._build_menu()
 
-        toolbar = ttk.Frame(self, padding=(12, 10))
-        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew")
-        toolbar.columnconfigure(18, weight=1)
+        self.toolbar = ttk.Frame(self, padding=(12, 10))
+        self.toolbar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.toolbar.columnconfigure(10, weight=1)
 
-        ttk.Button(toolbar, text="打开", command=self.open_file).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(toolbar, text="上一张", command=lambda: self.navigate_folder(-1)).grid(
+        ttk.Button(self.toolbar, text="打开", command=self.open_file).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        ttk.Button(self.toolbar, text="上一张", command=lambda: self.navigate_folder(-1)).grid(
             row=0, column=1, padx=(0, 6)
         )
-        ttk.Button(toolbar, text="下一张", command=lambda: self.navigate_folder(1)).grid(
+        ttk.Button(self.toolbar, text="下一张", command=lambda: self.navigate_folder(1)).grid(
             row=0, column=2, padx=(0, 8)
         )
-        ttk.Button(toolbar, text="粘贴", command=self.paste_from_clipboard).grid(
-            row=0, column=3, padx=(0, 8)
+        ttk.Button(self.toolbar, text="实际尺寸", command=lambda: self.set_zoom("100%")).grid(
+            row=0, column=3, padx=(0, 6)
         )
-        ttk.Button(toolbar, text="保存为", style="Accent.TButton", command=self.save_as).grid(
-            row=0, column=4, padx=(0, 8)
+        ttk.Button(self.toolbar, text="全屏", command=self.toggle_fullscreen).grid(
+            row=0, column=4, padx=(0, 6)
         )
-        ttk.Button(toolbar, text="快速导出", command=self.quick_export).grid(
-            row=0, column=5, padx=(0, 8)
+        ttk.Button(self.toolbar, text="幻灯片", command=self.toggle_slideshow).grid(
+            row=0, column=5, padx=(0, 6)
         )
-        ttk.Button(toolbar, text="复制", command=self.copy_result).grid(
-            row=0, column=6, padx=(0, 8)
-        )
-        ttk.Button(toolbar, text="批量", command=self.batch_process).grid(
-            row=0, column=7, padx=(0, 14)
-        )
-        ttk.Button(toolbar, text="撤销", command=self.undo).grid(row=0, column=8, padx=(0, 8))
-        ttk.Button(toolbar, text="裁剪复位", command=self.reset_crop).grid(
-            row=0, column=9, padx=(0, 8)
-        )
-        ttk.Button(toolbar, text="应用裁剪", command=self.apply_crop).grid(
-            row=0, column=10, padx=(0, 14)
-        )
-        ttk.Button(toolbar, text="左转", command=lambda: self.rotate(-90)).grid(
-            row=0, column=11, padx=(0, 6)
-        )
-        ttk.Button(toolbar, text="右转", command=lambda: self.rotate(90)).grid(
-            row=0, column=12, padx=(0, 6)
-        )
-        ttk.Button(toolbar, text="水平翻转", command=self.flip_horizontal).grid(
-            row=0, column=13, padx=(0, 6)
-        )
-        ttk.Button(toolbar, text="垂直翻转", command=self.flip_vertical).grid(
-            row=0, column=14, padx=(0, 12)
+        ttk.Button(self.toolbar, text="属性", command=self.show_properties).grid(
+            row=0, column=6, padx=(0, 6)
         )
         ttk.Checkbutton(
-            toolbar, text="对比原图", variable=self.compare_original, command=self._refresh_preview
-        ).grid(row=0, column=15, padx=(0, 12))
-        ttk.Label(toolbar, text="缩放").grid(row=0, column=16, padx=(0, 4))
+            self.toolbar,
+            text="编辑工具",
+            variable=self.edit_panel_visible_var,
+            command=self.toggle_edit_panel,
+        ).grid(row=0, column=7, padx=(0, 12))
+        ttk.Label(self.toolbar, text="缩放").grid(row=0, column=8, padx=(0, 4))
         zoom = ttk.Combobox(
-            toolbar, textvariable=self.zoom_mode, values=ZOOM_LEVELS, state="readonly", width=7
+            self.toolbar, textvariable=self.zoom_mode, values=ZOOM_LEVELS, state="readonly", width=7
         )
-        zoom.grid(row=0, column=17, padx=(0, 8))
+        zoom.grid(row=0, column=9, padx=(0, 8))
         zoom.bind("<<ComboboxSelected>>", lambda _event: self._zoom_changed())
-        ttk.Label(toolbar, textvariable=self.info_var).grid(row=0, column=18, sticky="e")
+        ttk.Label(self.toolbar, textvariable=self.info_var).grid(row=0, column=10, sticky="e")
+
+        self.edit_toolbar = ttk.Frame(self, padding=(12, 0, 12, 8))
+        self.edit_toolbar.grid(row=1, column=0, columnspan=2, sticky="ew")
+        ttk.Button(self.edit_toolbar, text="粘贴", command=self.paste_from_clipboard).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        ttk.Button(
+            self.edit_toolbar, text="保存为", style="Accent.TButton", command=self.save_as
+        ).grid(row=0, column=1, padx=(0, 8))
+        ttk.Button(self.edit_toolbar, text="快速导出", command=self.quick_export).grid(
+            row=0, column=2, padx=(0, 8)
+        )
+        ttk.Button(self.edit_toolbar, text="复制结果", command=self.copy_result).grid(
+            row=0, column=3, padx=(0, 8)
+        )
+        ttk.Button(self.edit_toolbar, text="批量", command=self.batch_process).grid(
+            row=0, column=4, padx=(0, 14)
+        )
+        ttk.Button(self.edit_toolbar, text="撤销", command=self.undo).grid(
+            row=0, column=5, padx=(0, 8)
+        )
+        ttk.Button(self.edit_toolbar, text="裁剪复位", command=self.reset_crop).grid(
+            row=0, column=6, padx=(0, 8)
+        )
+        ttk.Button(self.edit_toolbar, text="应用裁剪", command=self.apply_crop).grid(
+            row=0, column=7, padx=(0, 14)
+        )
+        ttk.Button(self.edit_toolbar, text="左转", command=lambda: self.rotate(-90)).grid(
+            row=0, column=8, padx=(0, 6)
+        )
+        ttk.Button(self.edit_toolbar, text="右转", command=lambda: self.rotate(90)).grid(
+            row=0, column=9, padx=(0, 6)
+        )
+        ttk.Button(self.edit_toolbar, text="水平翻转", command=self.flip_horizontal).grid(
+            row=0, column=10, padx=(0, 6)
+        )
+        ttk.Button(self.edit_toolbar, text="垂直翻转", command=self.flip_vertical).grid(
+            row=0, column=11, padx=(0, 12)
+        )
+        ttk.Checkbutton(
+            self.edit_toolbar,
+            text="对比原图",
+            variable=self.compare_original,
+            command=self._refresh_preview,
+        ).grid(row=0, column=12, padx=(0, 12))
 
         canvas_frame = ttk.Frame(self, padding=(12, 0, 8, 12))
-        canvas_frame.grid(row=1, column=0, sticky="nsew")
+        canvas_frame.grid(row=2, column=0, sticky="nsew")
         canvas_frame.rowconfigure(0, weight=1)
         canvas_frame.columnconfigure(0, weight=1)
 
@@ -196,13 +261,15 @@ class ImageEditorApp(tk.Tk):
         self.canvas.bind("<ButtonRelease-3>", self._finish_pan)
         self.canvas.bind("<Double-Button-1>", lambda _event: self.reset_view())
 
-        panel_shell = ttk.Frame(self, padding=(0, 0, 8, 12), width=360)
-        panel_shell.grid(row=1, column=1, sticky="ns")
-        panel_shell.rowconfigure(0, weight=1)
-        panel_shell.columnconfigure(0, weight=1)
-        panel_canvas = tk.Canvas(panel_shell, width=340, highlightthickness=0)
+        self.panel_shell = ttk.Frame(self, padding=(0, 0, 8, 12), width=360)
+        self.panel_shell.grid(row=2, column=1, sticky="ns")
+        self.panel_shell.rowconfigure(0, weight=1)
+        self.panel_shell.columnconfigure(0, weight=1)
+        panel_canvas = tk.Canvas(self.panel_shell, width=340, highlightthickness=0)
         panel_canvas.grid(row=0, column=0, sticky="ns")
-        panel_scroll = ttk.Scrollbar(panel_shell, orient="vertical", command=panel_canvas.yview)
+        panel_scroll = ttk.Scrollbar(
+            self.panel_shell, orient="vertical", command=panel_canvas.yview
+        )
         panel_scroll.grid(row=0, column=1, sticky="ns")
         panel_canvas.configure(yscrollcommand=panel_scroll.set)
         panel = ttk.Frame(panel_canvas, padding=(8, 0, 12, 12))
@@ -361,18 +428,36 @@ class ImageEditorApp(tk.Tk):
             justify="left",
         ).grid(row=0, column=0, sticky="w")
 
-        status = ttk.Label(self, textvariable=self.status_var, anchor="w", padding=(12, 6))
-        status.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.status_label = ttk.Label(
+            self, textvariable=self.status_var, anchor="w", padding=(12, 6)
+        )
+        self.status_label.grid(row=3, column=0, columnspan=2, sticky="ew")
+        if not self.edit_panel_visible_var.get():
+            self.edit_toolbar.grid_remove()
+            self.panel_shell.grid_remove()
 
     def _build_menu(self) -> None:
-        menu_bar = tk.Menu(self)
-        file_menu = tk.Menu(menu_bar, tearoff=False)
+        self.menu_bar = tk.Menu(self)
+        file_menu = tk.Menu(self.menu_bar, tearoff=False)
         file_menu.add_command(label="打开...", accelerator="Ctrl+O", command=self.open_file)
         file_menu.add_command(
             label="从剪贴板粘贴", accelerator="Ctrl+V", command=self.paste_from_clipboard
         )
         self.recent_menu = tk.Menu(file_menu, tearoff=False)
         file_menu.add_cascade(label="最近打开", menu=self.recent_menu)
+        self.recent_directory_menu = tk.Menu(file_menu, tearoff=False)
+        file_menu.add_cascade(label="最近目录", menu=self.recent_directory_menu)
+        file_menu.add_separator()
+        file_menu.add_command(label="重命名...", accelerator="F2", command=self.rename_current)
+        file_menu.add_command(label="复制到...", command=self.copy_current)
+        file_menu.add_command(label="移动到...", command=self.move_current)
+        file_menu.add_command(
+            label="在资源管理器中显示", accelerator="Ctrl+Shift+E", command=self.reveal_current
+        )
+        file_menu.add_command(
+            label="移入回收站", accelerator="Delete", command=self.delete_current_to_recycle_bin
+        )
+        file_menu.add_command(label="打开回收站", command=open_recycle_bin)
         file_menu.add_separator()
         file_menu.add_command(label="保存为...", accelerator="Ctrl+S", command=self.save_as)
         file_menu.add_command(label="快速导出", accelerator="Ctrl+E", command=self.quick_export)
@@ -383,9 +468,9 @@ class ImageEditorApp(tk.Tk):
         file_menu.add_command(label="批量处理文件夹...", command=self.batch_process_folder)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.close)
-        menu_bar.add_cascade(label="文件", menu=file_menu)
+        self.menu_bar.add_cascade(label="文件", menu=file_menu)
 
-        edit_menu = tk.Menu(menu_bar, tearoff=False)
+        edit_menu = tk.Menu(self.menu_bar, tearoff=False)
         edit_menu.add_command(label="撤销", accelerator="Ctrl+Z", command=self.undo)
         edit_menu.add_command(label="重做", accelerator="Ctrl+Y", command=self.redo)
         edit_menu.add_separator()
@@ -399,9 +484,9 @@ class ImageEditorApp(tk.Tk):
         )
         edit_menu.add_command(label="水平翻转", command=self.flip_horizontal)
         edit_menu.add_command(label="垂直翻转", command=self.flip_vertical)
-        menu_bar.add_cascade(label="编辑", menu=edit_menu)
+        self.menu_bar.add_cascade(label="编辑", menu=edit_menu)
 
-        view_menu = tk.Menu(menu_bar, tearoff=False)
+        view_menu = tk.Menu(self.menu_bar, tearoff=False)
         view_menu.add_command(
             label="第一张", accelerator="Home", command=lambda: self.navigate_folder_to("first")
         )
@@ -422,10 +507,31 @@ class ImageEditorApp(tk.Tk):
         )
         view_menu.add_command(label="150%", command=lambda: self.set_zoom("150%"))
         view_menu.add_command(label="200%", command=lambda: self.set_zoom("200%"))
-        menu_bar.add_cascade(label="视图", menu=view_menu)
+        view_menu.add_separator()
+        view_menu.add_checkbutton(
+            label="显示编辑工具",
+            variable=self.edit_panel_visible_var,
+            command=self.toggle_edit_panel,
+        )
+        view_menu.add_command(label="全屏", accelerator="F11", command=self.toggle_fullscreen)
+        view_menu.add_command(
+            label="沉浸式看图", accelerator="Ctrl+F11", command=self.toggle_immersive
+        )
+        view_menu.add_command(
+            label="开始/停止幻灯片", accelerator="F5", command=self.toggle_slideshow
+        )
+        view_menu.add_command(label="幻灯片设置...", command=self.configure_slideshow)
+        self.menu_bar.add_cascade(label="视图", menu=view_menu)
 
-        self.config(menu=menu_bar)
+        info_menu = tk.Menu(self.menu_bar, tearoff=False)
+        info_menu.add_command(
+            label="图片属性", accelerator="Alt+Enter", command=self.show_properties
+        )
+        self.menu_bar.add_cascade(label="信息", menu=info_menu)
+
+        self.config(menu=self.menu_bar)
         self._refresh_recent_menu()
+        self._refresh_recent_directory_menu()
 
     def _refresh_recent_menu(self) -> None:
         self.recent_menu.delete(0, "end")
@@ -437,6 +543,19 @@ class ImageEditorApp(tk.Tk):
         for path in self.recent_files:
             label = Path(path).name
             self.recent_menu.add_command(label=label, command=partial(self.open_path, path))
+
+    def _refresh_recent_directory_menu(self) -> None:
+        self.recent_directory_menu.delete(0, "end")
+        existing = [path for path in self.recent_directories if Path(path).is_dir()]
+        self.recent_directories = existing[:8]
+        if not self.recent_directories:
+            self.recent_directory_menu.add_command(label="暂无", state="disabled")
+            return
+        for path in self.recent_directories:
+            self.recent_directory_menu.add_command(
+                label=path,
+                command=partial(self.open_paths, [path]),
+            )
 
     def _slider(
         self, parent: tk.Misc, label: str, var: tk.IntVar, start: int, end: int, row: int, command
@@ -477,10 +596,17 @@ class ImageEditorApp(tk.Tk):
         self.bind("<Next>", lambda _event: self.navigate_folder(1))
         self.bind("<Home>", lambda _event: self.navigate_folder_to("first"))
         self.bind("<End>", lambda _event: self.navigate_folder_to("last"))
-        self.bind("<Escape>", lambda _event: self.reset_crop())
+        self.bind("<Escape>", lambda _event: self._handle_escape())
         self.bind("<Return>", lambda _event: self.apply_crop())
         self.bind("<space>", lambda _event: self._set_compare(True))
         self.bind("<KeyRelease-space>", lambda _event: self._set_compare(False))
+        self.bind("<F11>", lambda _event: self.toggle_fullscreen())
+        self.bind("<Control-F11>", lambda _event: self.toggle_immersive())
+        self.bind("<F5>", lambda _event: self.toggle_slideshow())
+        self.bind("<F2>", lambda _event: self.rename_current())
+        self.bind("<Delete>", lambda _event: self.delete_current_to_recycle_bin())
+        self.bind("<Control-Shift-E>", lambda _event: self.reveal_current())
+        self.bind("<Alt-Return>", lambda _event: self.show_properties())
 
     def _load_config(self) -> None:
         data = self.settings_store.load()
@@ -497,6 +623,14 @@ class ImageEditorApp(tk.Tk):
         self.recent_files = [
             str(path) for path in data.get("recent_files", []) if isinstance(path, str)
         ]
+        self.recent_directories = [
+            str(path) for path in data.get("recent_directories", []) if isinstance(path, str)
+        ]
+        self.edit_panel_visible_var.set(bool(data.get("edit_panel_visible", False)))
+        self.slideshow_interval_var.set(float(data.get("slideshow_interval", 3.0)))
+        self.slideshow_loop_var.set(bool(data.get("slideshow_loop", True)))
+        geometry = data.get("window_geometry", "")
+        self._saved_geometry = str(geometry) if isinstance(geometry, str) else ""
 
     def _save_config(self) -> None:
         data = {
@@ -511,104 +645,181 @@ class ImageEditorApp(tk.Tk):
             "watermark_size_percent": self.watermark_size_var.get(),
             "reveal_after_save": self.reveal_after_save_var.get(),
             "recent_files": self.recent_files[:8],
+            "recent_directories": self.recent_directories[:8],
+            "edit_panel_visible": self.edit_panel_visible_var.get(),
+            "slideshow_interval": self.slideshow_interval_var.get(),
+            "slideshow_loop": self.slideshow_loop_var.get(),
+            "window_geometry": self._saved_geometry or self.geometry(),
         }
         self.settings_store.save(data)
+
+    def _on_configure(self, _event: tk.Event) -> None:
+        if not self._is_fullscreen and not self._is_immersive:
+            self._saved_geometry = self.geometry()
+        self._schedule_preview()
 
     def open_file(self) -> None:
         if not self._confirm_discard_changes():
             return
-        path = filedialog.askopenfilename(
-            title="选择图片",
+        paths = filedialog.askopenfilenames(
+            title="选择一张或多张图片",
             filetypes=[
                 ("图片文件", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff"),
                 ("所有文件", "*.*"),
             ],
         )
-        if not path:
+        if not paths:
             return
-        self.open_path(path, confirm=False)
+        self.open_paths(paths, confirm=False)
 
     def open_path(self, path: str | Path, confirm: bool = True) -> None:
+        self.open_paths([path], confirm=confirm)
+
+    def open_paths(self, paths: Sequence[str | Path], confirm: bool = True) -> None:
         if confirm and not self._confirm_discard_changes():
             return
+        session = NavigationSession.from_activation(paths)
+        if session.current is None:
+            self.status_var.set("没有找到可打开的受支持图片")
+            messagebox.showwarning(
+                APP_NAME, "所选路径中没有可打开的 JPG、PNG、WEBP、BMP 或 TIFF 图片。"
+            )
+            return
+        self.stop_slideshow()
+        self.navigation = session
+        self._failed_navigation_paths.clear()
+        self._begin_image_load(session.current, notify_error=True)
+
+    def handle_activation(self, paths: Sequence[str | Path]) -> None:
+        self.deiconify()
+        self.lift()
         try:
-            self.original = open_image(path)
-            self.image_path = Path(path)
-        except Exception as exc:
-            messagebox.showerror(APP_NAME, f"无法打开图片：{exc}")
+            self.attributes("-topmost", True)
+            self.after(80, lambda: self.attributes("-topmost", False))
+            self.focus_force()
+        except tk.TclError:
+            pass
+        if paths:
+            self.open_paths(paths)
+
+    def _begin_image_load(
+        self,
+        path: Path,
+        *,
+        notify_error: bool = False,
+        skip_direction: int = 0,
+    ) -> None:
+        self._load_generation += 1
+        generation = self._load_generation
+        self.status_var.set(f"正在后台解码：{path.name}")
+        future = self.image_loader.load(path)
+        self.after(
+            10,
+            lambda: self._poll_image_load(
+                generation,
+                path,
+                future,
+                notify_error=notify_error,
+                skip_direction=skip_direction,
+            ),
+        )
+
+    def _poll_image_load(
+        self,
+        generation: int,
+        path: Path,
+        future: Future[Image.Image],
+        *,
+        notify_error: bool,
+        skip_direction: int,
+    ) -> None:
+        if generation != self._load_generation:
+            return
+        if not future.done():
+            self.after(
+                10,
+                lambda: self._poll_image_load(
+                    generation,
+                    path,
+                    future,
+                    notify_error=notify_error,
+                    skip_direction=skip_direction,
+                ),
+            )
+            return
+        try:
+            image = future.result()
+        except ImageLoadFailure as failure:
+            self._handle_load_failure(failure, notify_error, skip_direction)
+            return
+        except Exception as error:
+            failure = ImageLoadFailure(path, "decode", f"无法打开图片：{error}")
+            self._handle_load_failure(failure, notify_error, skip_direction)
             return
 
-        self.reset_edits(refresh=False)
-        self.crop_box = None
-        self.width_var.set(str(self.original.width))
-        self.height_var.set(str(self.original.height))
-        self.max_side_var.set("")
-        self.info_var.set(self._image_info_text())
-        self.crop_var.set("未设置裁剪")
-        self.status_var.set("图片已载入")
-        self.undo_stack.clear()
-        self.redo_stack.clear()
-        self.pan_offset = (0, 0)
-        self.zoom_mode.set("适应")
-        self._remember_file(self.image_path)
-        self._refresh_preview()
-        self._mark_clean()
+        self.original = image
+        self.image_path = path
+        self._load_current_image(path.name)
+        self._remember_file(path)
+        self.status_var.set(f"图片已载入 · {self.navigation.source_label or path.parent}")
+        self.image_loader.prefetch(self.navigation.neighbors())
 
-    def _folder_images(self) -> list[Path]:
-        return list_folder_images(self.image_path)
-
-    def _folder_position(self) -> tuple[int, int] | None:
-        return folder_position(self.image_path, self._folder_images())
+    def _handle_load_failure(
+        self,
+        failure: ImageLoadFailure,
+        notify_error: bool,
+        skip_direction: int,
+    ) -> None:
+        key = str(failure.path).casefold()
+        self._failed_navigation_paths.add(key)
+        self.status_var.set(f"{failure.path.name}：{failure.user_message}")
+        self.canvas.delete("all")
+        self.canvas.create_text(
+            max(200, self.canvas.winfo_width() // 2),
+            max(120, self.canvas.winfo_height() // 2),
+            text=f"无法显示 {failure.path.name}\n{failure.user_message}\n可继续切换其他图片。",
+            fill="#f3f4f6",
+            justify="center",
+            font=("Microsoft YaHei UI", 12),
+        )
+        if notify_error:
+            messagebox.showwarning(APP_NAME, f"{failure.path.name}\n\n{failure.user_message}")
+        if skip_direction and len(self._failed_navigation_paths) < len(self.navigation.files):
+            target = self.navigation.target(skip_direction, wrap=True)
+            if target is not None:
+                self._begin_image_load(target, skip_direction=skip_direction)
 
     def _image_info_text(self) -> str:
         if self.original is None:
             return "未载入图片"
         name = self.image_path.name if self.image_path is not None else "剪贴板图片"
-        position = self._folder_position()
+        position = self.navigation.position
         suffix = f"  {position[0]} / {position[1]}" if position and position[1] > 1 else ""
         return f"{name}{suffix}  {self.original.width} x {self.original.height}"
 
-    def navigate_folder(self, direction: int) -> None:
-        files = self._navigation_files()
-        if not files:
-            return
-        if self.image_path is None:
-            return
-        try:
-            current = self.image_path.resolve()
-            resolved = [path.resolve() for path in files]
-            index = resolved.index(current)
-        except (OSError, ValueError):
-            self.status_var.set("无法定位当前图片在文件夹中的位置")
-            return
-        target = files[(index + direction) % len(files)]
-        label = "下一张" if direction > 0 else "上一张"
-        self._open_navigation_target(target, label)
+    def navigate_folder(self, direction: int, *, wrap: bool = True) -> bool:
+        if len(self.navigation.files) <= 1:
+            self.status_var.set("当前浏览序列没有其他图片")
+            return False
+        if not self._confirm_discard_changes():
+            self.stop_slideshow()
+            return False
+        target = self.navigation.target(direction, wrap=wrap)
+        if target is None:
+            self.stop_slideshow()
+            self.status_var.set("幻灯片已播放到末尾")
+            return False
+        self._begin_image_load(target, skip_direction=direction)
+        return True
 
     def navigate_folder_to(self, position: str) -> None:
-        files = self._navigation_files()
-        if not files:
+        if not self.navigation.files:
             return
-        if position == "first":
-            self._open_navigation_target(files[0], "第一张")
-        elif position == "last":
-            self._open_navigation_target(files[-1], "最后一张")
-
-    def _navigation_files(self) -> list[Path]:
-        if self.image_path is None:
-            self.status_var.set("当前图片不在文件夹中")
-            return []
         if not self._confirm_discard_changes():
-            return []
-        files = self._folder_images()
-        if len(files) <= 1:
-            self.status_var.set("当前文件夹没有其他图片")
-            return []
-        return files
-
-    def _open_navigation_target(self, target: Path, label: str) -> None:
-        self.open_path(target, confirm=False)
-        self.status_var.set(f"已打开{label}：{target.name}")
+            return
+        target = self.navigation.select_edge(position)
+        if target is not None:
+            self._begin_image_load(target, notify_error=True)
 
     def paste_from_clipboard(self) -> None:
         if not self._confirm_discard_changes():
@@ -622,6 +833,7 @@ class ImageEditorApp(tk.Tk):
         if isinstance(clipboard, Image.Image):
             self.original = clipboard.copy()
             self.image_path = None
+            self.navigation = NavigationSession([])
             self._load_current_image("剪贴板图片")
             self.status_var.set("已从剪贴板粘贴图片")
             return
@@ -638,7 +850,7 @@ class ImageEditorApp(tk.Tk):
                     ".tif",
                     ".tiff",
                 }:
-                    self.open_path(path, confirm=False)
+                    self.open_paths([path], confirm=False)
                     return
 
         messagebox.showinfo(APP_NAME, "剪贴板里没有可粘贴的图片。")
@@ -646,12 +858,17 @@ class ImageEditorApp(tk.Tk):
     def _load_current_image(self, display_name: str) -> None:
         if self.original is None:
             return
+        self.title(f"{display_name} — {APP_NAME}")
         self.reset_edits(refresh=False)
         self.crop_box = None
         self.width_var.set(str(self.original.width))
         self.height_var.set(str(self.original.height))
         self.max_side_var.set("")
-        self.info_var.set(f"{display_name}  {self.original.width} x {self.original.height}")
+        self.info_var.set(
+            self._image_info_text()
+            if self.image_path is not None
+            else f"{display_name}  {self.original.width} x {self.original.height}"
+        )
         self.crop_var.set("未设置裁剪")
         self.undo_stack.clear()
         self.redo_stack.clear()
@@ -665,8 +882,234 @@ class ImageEditorApp(tk.Tk):
         self.recent_files = [item for item in self.recent_files if item != value]
         self.recent_files.insert(0, value)
         self.recent_files = self.recent_files[:8]
+        directory = str(path.parent)
+        self.recent_directories = [item for item in self.recent_directories if item != directory]
+        self.recent_directories.insert(0, directory)
+        self.recent_directories = self.recent_directories[:8]
         self._refresh_recent_menu()
+        self._refresh_recent_directory_menu()
         self._save_config()
+
+    def toggle_edit_panel(self) -> None:
+        if self.edit_panel_visible_var.get():
+            self.edit_toolbar.grid()
+            self.panel_shell.grid()
+            self.status_var.set("编辑工具已展开")
+        else:
+            self.edit_toolbar.grid_remove()
+            self.panel_shell.grid_remove()
+            self.status_var.set("已切换到简洁查看模式")
+        self._save_config()
+        self._schedule_preview()
+
+    def toggle_fullscreen(self) -> None:
+        if self._is_immersive:
+            self.toggle_immersive()
+            return
+        self._is_fullscreen = not self._is_fullscreen
+        self.attributes("-fullscreen", self._is_fullscreen)
+        self.status_var.set(
+            "已进入全屏，按 F11 或 Esc 退出" if self._is_fullscreen else "已退出全屏"
+        )
+
+    def toggle_immersive(self) -> None:
+        self._is_immersive = not self._is_immersive
+        if self._is_immersive:
+            self._is_fullscreen = True
+            self.attributes("-fullscreen", True)
+            self.config(menu="")
+            self.toolbar.grid_remove()
+            self.edit_toolbar.grid_remove()
+            self.panel_shell.grid_remove()
+            self.status_label.grid_remove()
+        else:
+            self._is_fullscreen = False
+            self.attributes("-fullscreen", False)
+            self.config(menu=self.menu_bar)
+            self.toolbar.grid()
+            self.status_label.grid()
+            if self.edit_panel_visible_var.get():
+                self.edit_toolbar.grid()
+                self.panel_shell.grid()
+        self._schedule_preview()
+
+    def _handle_escape(self) -> None:
+        if self._slideshow_job is not None:
+            self.stop_slideshow()
+        elif self._is_immersive:
+            self.toggle_immersive()
+        elif self._is_fullscreen:
+            self.toggle_fullscreen()
+        else:
+            self.reset_crop()
+
+    def configure_slideshow(self) -> None:
+        interval = simpledialog.askfloat(
+            APP_NAME,
+            "每张图片显示多少秒？",
+            initialvalue=self.slideshow_interval_var.get(),
+            minvalue=0.5,
+            maxvalue=3600.0,
+            parent=self,
+        )
+        if interval is None:
+            return
+        self.slideshow_interval_var.set(interval)
+        loop = messagebox.askyesno(APP_NAME, "播放到最后一张后循环播放吗？", parent=self)
+        self.slideshow_loop_var.set(loop)
+        self._save_config()
+
+    def toggle_slideshow(self) -> None:
+        if self._slideshow_job is not None:
+            self.stop_slideshow()
+            return
+        if len(self.navigation.files) <= 1:
+            messagebox.showinfo(APP_NAME, "当前浏览序列至少需要两张图片才能播放幻灯片。")
+            return
+        self.status_var.set("幻灯片播放中，按 F5 或 Esc 停止")
+        self._schedule_slideshow()
+
+    def _schedule_slideshow(self) -> None:
+        interval_ms = max(500, round(self.slideshow_interval_var.get() * 1000))
+        self._slideshow_job = self.after(interval_ms, self._advance_slideshow)
+
+    def _advance_slideshow(self) -> None:
+        self._slideshow_job = None
+        advanced = self.navigate_folder(1, wrap=self.slideshow_loop_var.get())
+        if advanced:
+            self._schedule_slideshow()
+
+    def stop_slideshow(self) -> None:
+        if self._slideshow_job is not None:
+            self.after_cancel(self._slideshow_job)
+            self._slideshow_job = None
+            self.status_var.set("幻灯片已停止")
+
+    def _current_file(self) -> Path | None:
+        if self.image_path is None:
+            messagebox.showinfo(APP_NAME, "当前内容不是磁盘上的图片文件。")
+            return None
+        return self.image_path
+
+    def reveal_current(self) -> None:
+        path = self._current_file()
+        if path is not None:
+            try:
+                reveal_file(path)
+            except OSError as error:
+                messagebox.showerror(APP_NAME, f"无法打开资源管理器：{error}")
+
+    def rename_current(self) -> None:
+        path = self._current_file()
+        if path is None or not self._confirm_discard_changes():
+            return
+        name = simpledialog.askstring(
+            APP_NAME,
+            "输入新文件名（保留或修改扩展名）：",
+            initialvalue=path.name,
+            parent=self,
+        )
+        if name is None or name == path.name:
+            return
+        try:
+            target = rename_file(path, name)
+        except (OSError, ValueError) as error:
+            messagebox.showerror(APP_NAME, f"重命名失败：{error}")
+            return
+        self.image_loader.invalidate(path)
+        self.navigation.files[self.navigation.index] = target
+        self.image_path = target
+        self.info_var.set(self._image_info_text())
+        self._remember_file(target)
+        self.status_var.set(f"已重命名为：{target.name}")
+
+    def copy_current(self) -> None:
+        path = self._current_file()
+        if path is None:
+            return
+        folder = filedialog.askdirectory(title="复制到文件夹", initialdir=str(path.parent))
+        if not folder:
+            return
+        try:
+            target = copy_file(path, folder)
+        except OSError as error:
+            messagebox.showerror(APP_NAME, f"复制失败：{error}")
+            return
+        self.status_var.set(f"已复制到：{target}")
+
+    def move_current(self) -> None:
+        path = self._current_file()
+        if path is None or not self._confirm_discard_changes():
+            return
+        folder = filedialog.askdirectory(title="移动到文件夹", initialdir=str(path.parent))
+        if not folder:
+            return
+        try:
+            target = move_file(path, folder)
+        except OSError as error:
+            messagebox.showerror(APP_NAME, f"移动失败：{error}")
+            return
+        self.image_loader.invalidate(path)
+        self.status_var.set(f"已移动到：{target}")
+        self.open_paths([target], confirm=False)
+
+    def delete_current_to_recycle_bin(self) -> None:
+        path = self._current_file()
+        if path is None or not self._confirm_discard_changes():
+            return
+        if not messagebox.askyesno(
+            APP_NAME,
+            f"将 {path.name} 移入回收站？\n\n文件不会被永久删除，可从 Windows 回收站恢复。",
+            parent=self,
+        ):
+            return
+        try:
+            send_to_recycle_bin(path)
+        except OSError as error:
+            messagebox.showerror(APP_NAME, f"无法移入回收站：{error}")
+            return
+        self.image_loader.invalidate(path)
+        target = self.navigation.remove(path)
+        self.original = None
+        self.image_path = None
+        self.preview = None
+        self.canvas.delete("all")
+        if target is not None:
+            self._begin_image_load(target, skip_direction=1)
+        else:
+            self.info_var.set("未载入图片")
+            self.status_var.set("文件已移入回收站；可通过“文件 → 打开回收站”恢复")
+        if messagebox.askyesno(APP_NAME, "文件已移入回收站。现在打开回收站查看或恢复吗？"):
+            open_recycle_bin()
+
+    def show_properties(self) -> None:
+        path = self._current_file()
+        if path is None or self.original is None:
+            return
+        try:
+            properties = image_properties(path, self.original)
+        except OSError as error:
+            messagebox.showerror(APP_NAME, f"无法读取图片属性：{error}")
+            return
+        window = tk.Toplevel(self)
+        window.title(f"属性 - {path.name}")
+        window.geometry("620x520")
+        window.minsize(520, 380)
+        window.transient(self)
+        frame = ttk.Frame(window, padding=16)
+        frame.pack(fill="both", expand=True)
+        canvas = tk.Canvas(frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        body = ttk.Frame(canvas)
+        body.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window(0, 0, window=body, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        for row, (label, value) in enumerate(properties):
+            ttk.Label(body, text=label, width=18).grid(row=row, column=0, sticky="nw", pady=4)
+            ttk.Label(body, text=value, wraplength=410).grid(row=row, column=1, sticky="nw", pady=4)
+        body.columnconfigure(1, weight=1)
 
     def save_as(self) -> None:
         if self.original is None:
@@ -1010,7 +1453,38 @@ class ImageEditorApp(tk.Tk):
 
     def close(self) -> None:
         if self._confirm_discard_changes():
+            self._shutdown_services()
             self.destroy()
+
+    def request_exit_for_upgrade(self) -> bool:
+        if self.has_unsaved_changes():
+            decision = messagebox.askyesnocancel(
+                APP_NAME,
+                "安装程序准备升级软件，但当前图片有未保存的修改。\n\n"
+                "选择“是”先保存，选择“否”放弃修改并安全退出，选择“取消”终止升级。",
+                parent=self,
+            )
+            if decision is None:
+                self.status_var.set("用户已取消升级，程序继续运行")
+                return False
+            if decision:
+                self.save_as()
+                if self.has_unsaved_changes():
+                    self.status_var.set("修改尚未保存，升级已取消")
+                    return False
+        self.after(50, self._finish_upgrade_exit)
+        return True
+
+    def _finish_upgrade_exit(self) -> None:
+        self._shutdown_services()
+        self.destroy()
+
+    def _shutdown_services(self) -> None:
+        self.stop_slideshow()
+        self._save_config()
+        self._drop_target.disable()
+        self.image_loader.shutdown()
+        self.preview_renderer.shutdown()
 
     def _snapshot(self, include_image: bool = False) -> dict[str, object]:
         snapshot: dict[str, object] = {
@@ -1440,24 +1914,51 @@ class ImageEditorApp(tk.Tk):
 
     def _refresh_preview(self) -> None:
         self._preview_job = None
-        working = (
-            self.original.copy()
-            if self.compare_original.get() and self.original is not None
-            else self._current_working_image()
-        )
-        if working is None:
+        if self.original is None:
             return
-        self.base_preview_image = working
         canvas_w = max(100, self.canvas.winfo_width())
         canvas_h = max(100, self.canvas.winfo_height())
-        if self.zoom_mode.get() == "适应":
-            scale = min(canvas_w / working.width, canvas_h / working.height, 1.0)
-        else:
-            scale = int(self.zoom_mode.get().replace("%", "")) / 100
-        preview_size = (max(1, int(working.width * scale)), max(1, int(working.height * scale)))
-        image = working.resize(preview_size, Image.Resampling.LANCZOS)
+        zoom_percent = (
+            None if self.zoom_mode.get() == "适应" else int(self.zoom_mode.get().replace("%", ""))
+        )
+        self._preview_generation += 1
+        generation = self._preview_generation
+        future = self.preview_renderer.render(
+            self.original,
+            self.edit_state(),
+            compare_original=self.compare_original.get(),
+            canvas_size=(canvas_w, canvas_h),
+            zoom_percent=zoom_percent,
+        )
+        self.after(10, self._poll_preview, generation, future, canvas_w, canvas_h)
+
+    def _poll_preview(
+        self,
+        generation: int,
+        future: Future[PreviewFrame],
+        canvas_w: int,
+        canvas_h: int,
+    ) -> None:
+        if generation != self._preview_generation:
+            return
+        if not future.done():
+            self.after(10, self._poll_preview, generation, future, canvas_w, canvas_h)
+            return
+        try:
+            frame = future.result()
+        except Exception as error:
+            self.status_var.set(f"无法生成预览：{error}")
+            return
+        if generation != self._preview_generation:
+            return
+        self._display_preview(frame, canvas_w, canvas_h)
+        self.preview_ready_generation += 1
+
+    def _display_preview(self, frame: PreviewFrame, canvas_w: int, canvas_h: int) -> None:
+        self.base_preview_image = frame.working
+        image = frame.image
         self.preview = ImageTk.PhotoImage(image)
-        self.preview_scale = image.width / working.width
+        self.preview_scale = frame.scale
         centered_x = (canvas_w - image.width) // 2
         centered_y = (canvas_h - image.height) // 2
         if image.width <= canvas_w:
@@ -1476,7 +1977,8 @@ class ImageEditorApp(tk.Tk):
         )
         self._draw_checker_bounds(image.width, image.height)
         self._draw_crop()
-        self._update_estimate()
+        if self.edit_panel_visible_var.get():
+            self.after_idle(self._update_estimate)
 
     def _draw_checker_bounds(self, width: int, height: int) -> None:
         ox, oy = self.preview_offset
