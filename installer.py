@@ -10,11 +10,17 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from urllib.parse import quote
 
+from light_image_editor.identity import (
+    DESCRIPTION,
+    EXECUTABLE_NAME,
+    PRODUCT_NAME_ZH,
+    PROG_ID,
+    REGISTRY_NAME,
+)
 
-APP_NAME = "轻量图片编辑器"
-EXE_NAME = "ImageEditor.exe"
-APP_REGISTRY_NAME = "LightImageEditor"
-PROG_ID = "LightImageEditor.Image"
+APP_NAME = PRODUCT_NAME_ZH
+EXE_NAME = EXECUTABLE_NAME
+APP_REGISTRY_NAME = REGISTRY_NAME
 SUPPORTED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
 CONTEXT_MENU_KEY = r"Software\Classes\SystemFileAssociations\image\shell\LightImageEditor"
 CAPABILITIES_KEY = rf"Software\{APP_REGISTRY_NAME}\Capabilities"
@@ -38,7 +44,9 @@ $shortcut.WorkingDirectory = '{target.parent}'
 $shortcut.IconLocation = '{target},0'
 $shortcut.Save()
 """
-    subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], check=True)
+    subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], check=True
+    )
 
 
 def stop_running_app() -> None:
@@ -100,7 +108,7 @@ def register_file_associations(target: Path) -> None:
             "ApplicationDescription",
             0,
             winreg.REG_SZ,
-            "用于查看、转换、压缩、裁剪和批量处理常见图像文件。",
+            DESCRIPTION,
         )
         winreg.SetValueEx(key, "ApplicationIcon", 0, winreg.REG_SZ, f'"{target}",0')
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, CAPABILITIES_KEY + r"\FileAssociations") as key:
@@ -113,7 +121,9 @@ def register_file_associations(target: Path) -> None:
         winreg.SetValueEx(key, "FriendlyAppName", 0, winreg.REG_SZ, APP_NAME)
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, APPLICATION_KEY + r"\DefaultIcon") as key:
         winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'"{target}",0')
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, APPLICATION_KEY + r"\shell\open\command") as key:
+    with winreg.CreateKey(
+        winreg.HKEY_CURRENT_USER, APPLICATION_KEY + r"\shell\open\command"
+    ) as key:
         winreg.SetValueEx(key, "", 0, winreg.REG_SZ, command)
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, APPLICATION_KEY + r"\SupportedTypes") as key:
         for extension in SUPPORTED_EXTENSIONS:
@@ -183,7 +193,14 @@ def install_app() -> Path:
     stop_running_app()
     shutil.copy2(source, target)
 
-    start_menu = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / f"{APP_NAME}.lnk"
+    start_menu = (
+        Path(os.environ["APPDATA"])
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+        / f"{APP_NAME}.lnk"
+    )
     desktop = Path(os.environ["USERPROFILE"]) / "Desktop" / f"{APP_NAME}.lnk"
     create_shortcut(target, start_menu)
     create_shortcut(target, desktop)
@@ -194,7 +211,14 @@ def install_app() -> Path:
 
 def uninstall_app() -> None:
     install_dir = Path(os.environ["LOCALAPPDATA"]) / "LightImageEditor"
-    start_menu = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / f"{APP_NAME}.lnk"
+    start_menu = (
+        Path(os.environ["APPDATA"])
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+        / f"{APP_NAME}.lnk"
+    )
     desktop = Path(os.environ["USERPROFILE"]) / "Desktop" / f"{APP_NAME}.lnk"
     for shortcut in (start_menu, desktop):
         if shortcut.exists():
@@ -213,8 +237,14 @@ class Installer(tk.Tk):
         self.resizable(False, False)
         self.columnconfigure(0, weight=1)
 
-        ttk.Label(self, text=APP_NAME, font=("Microsoft YaHei UI", 18, "bold")).grid(row=0, column=0, sticky="w", padx=24, pady=(22, 8))
-        ttk.Label(self, text="安装到当前用户账户，无需管理员权限。安装完成后会创建开始菜单和桌面快捷方式。", wraplength=390).grid(row=1, column=0, sticky="ew", padx=24)
+        ttk.Label(self, text=APP_NAME, font=("Microsoft YaHei UI", 18, "bold")).grid(
+            row=0, column=0, sticky="w", padx=24, pady=(22, 8)
+        )
+        ttk.Label(
+            self,
+            text="安装到当前用户账户，无需管理员权限。安装完成后会创建开始菜单和桌面快捷方式。",
+            wraplength=390,
+        ).grid(row=1, column=0, sticky="ew", padx=24)
         self.open_defaults_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             self,
@@ -227,7 +257,9 @@ class Installer(tk.Tk):
             wraplength=400,
         ).grid(row=3, column=0, sticky="w", padx=44, pady=(4, 0))
         self.status = tk.StringVar(value="准备安装")
-        ttk.Label(self, textvariable=self.status).grid(row=4, column=0, sticky="w", padx=24, pady=(18, 8))
+        ttk.Label(self, textvariable=self.status).grid(
+            row=4, column=0, sticky="w", padx=24, pady=(18, 8)
+        )
         button_row = ttk.Frame(self)
         button_row.grid(row=5, column=0, sticky="e", padx=24, pady=(10, 0))
         ttk.Button(button_row, text="安装", command=self.install).grid(row=0, column=0, padx=(0, 8))

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-import re
-from typing import Iterable
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
-
 
 SUPPORTED_INPUTS = {
     ".jpg",
@@ -136,7 +135,9 @@ def prepare_image(image: Image.Image, options: ExportOptions) -> Image.Image:
         result = result.crop((left, top, right, bottom))
 
     if options.exact_width and options.exact_height:
-        result = result.resize((options.exact_width, options.exact_height), Image.Resampling.LANCZOS)
+        result = result.resize(
+            (options.exact_width, options.exact_height), Image.Resampling.LANCZOS
+        )
     elif options.max_width or options.max_height:
         max_width = options.max_width or result.width
         max_height = options.max_height or result.height
@@ -174,7 +175,14 @@ def apply_text_watermark(
     margin = max(12, round(min(result.size) * 0.035))
     x, y = watermark_xy(position, result.width, result.height, text_w, text_h, margin)
     alpha = max(0, min(100, int(opacity))) * 255 // 100
-    draw.text((x, y), text, font=font, fill=(255, 255, 255, alpha), stroke_width=2, stroke_fill=(0, 0, 0, max(0, alpha - 35)))
+    draw.text(
+        (x, y),
+        text,
+        font=font,
+        fill=(255, 255, 255, alpha),
+        stroke_width=2,
+        stroke_fill=(0, 0, 0, max(0, alpha - 35)),
+    )
     watermarked = Image.alpha_composite(result, overlay)
     if image.mode == "RGBA":
         return watermarked
@@ -199,7 +207,9 @@ def watermark_font(image_size: tuple[int, int], size_percent: int) -> ImageFont.
     return ImageFont.load_default(size=font_size)
 
 
-def watermark_xy(position: str, image_w: int, image_h: int, text_w: int, text_h: int, margin: int) -> tuple[int, int]:
+def watermark_xy(
+    position: str, image_w: int, image_h: int, text_w: int, text_h: int, margin: int
+) -> tuple[int, int]:
     positions = {
         "左上": (margin, margin),
         "右上": (image_w - text_w - margin, margin),
@@ -220,13 +230,17 @@ def estimate_save_size(image: Image.Image, options: ExportOptions) -> int:
 
 def encode_image(image: Image.Image, output_format: str, options: ExportOptions) -> bytes:
     if options.target_size_kb and output_format in {"JPEG", "WEBP"}:
-        return encode_to_target_size(image, output_format, options.quality, options.target_size_kb * 1024)
+        return encode_to_target_size(
+            image, output_format, options.quality, options.target_size_kb * 1024
+        )
     buffer = BytesIO()
     image.save(buffer, output_format, **save_kwargs_for(output_format, options.quality))
     return buffer.getvalue()
 
 
-def encode_to_target_size(image: Image.Image, output_format: str, max_quality: int, target_bytes: int) -> bytes:
+def encode_to_target_size(
+    image: Image.Image, output_format: str, max_quality: int, target_bytes: int
+) -> bytes:
     low = 1
     high = max(1, min(100, int(max_quality)))
     best_under: bytes | None = None

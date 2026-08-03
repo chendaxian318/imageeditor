@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools==83.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "light-image-editor"
+description = "A lightweight Windows image viewer and editor"
+requires-python = "==3.12.10"
+dependencies = ["Pillow==11.3.0"]
+dynamic = ["version"]
+
+[tool.setuptools.packages.find]
+include = ["light_image_editor*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "light_image_editor.version.__version__" }
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [
+    ".venv",
+    "build",
+    "dist",
+    "release",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+ignore_missing_imports = true
+show_error_codes = true
+warn_redundant_casts = true
+warn_unused_configs = true
+exclude = "^(build|dist|release|\\.venv)/"
+
+[[tool.mypy.overrides]]
+# These behavior-preserving legacy modules remain on the M0 typing backlog.
+# New service/build modules are checked immediately; this allow-list can only shrink.
+module = ["image_ops", "installer", "light_image_editor.ui.*"]
+ignore_errors = true

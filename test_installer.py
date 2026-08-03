@@ -1,5 +1,5 @@
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from installer import APP_REGISTRY_NAME, SUPPORTED_EXTENSIONS, default_apps_uri, open_command
 
