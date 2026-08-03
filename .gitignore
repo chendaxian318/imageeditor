@@ -1,10 +1,11 @@
-.venv/
-build/
-dist/
-release/
+/.venv/
+/build/
+/dist/
+/release/
 __pycache__/
 *.py[cod]
 *.spec
+!packaging/windows/*.spec
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

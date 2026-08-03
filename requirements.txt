@@ -1,2 +1,2 @@
-Pillow==11.3.0
-pyinstaller==6.17.0
+# Compatibility entry point for runtime-only installations.
+-r requirements.lock

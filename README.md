@@ -26,15 +26,54 @@
 
 ## 构建
 
+构建环境固定为 Windows x64 与 Python 3.12.10。第一次运行会创建 `.venv`，安装锁定依赖，依次执行格式检查、静态检查、类型检查和测试，然后构建两个 EXE。构建过程不会升级 pip，依赖缺失、版本漂移、存在额外包或任一外部命令失败都会立即停止。
+
 在 PowerShell 中运行：
 
 ```powershell
-.\build.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
 构建完成后产物位于 `release`：
 
 - `ImageEditor.exe`：直接运行版
 - `ImageEditorSetup.exe`：当前用户安装版，会创建桌面和开始菜单快捷方式
+- `LICENSE`、`NOTICE.md`、`THIRD_PARTY_LICENSES.md`：随发布物和安装程序提供的权属及第三方许可说明
+- `SHA256SUMS.txt`：本次构建产物的 SHA-256 校验值
 
 安装程序可在完成后直接打开 Windows“默认应用”设置。选择“轻量图片编辑器”，再为希望使用的图片格式确认默认关联即可。Windows 10/11 要求默认应用由用户在系统设置中确认，安装程序不会静默覆盖现有选择。
+
+## 开发与验证
+
+产品版本的唯一来源是 `light_image_editor/version.py`，产品名、发布者、应用 ID、注册表名和文件 ProgID 的唯一来源是 `light_image_editor/identity.py`。
+
+```powershell
+# 完整单元测试
+.\.venv\Scripts\python.exe -m unittest discover -s . -p "test_*.py" -v
+
+# 格式、静态检查和类型检查
+.\.venv\Scripts\python.exe -m ruff format --check .
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m mypy image_editor.py image_ops.py installer.py light_image_editor scripts benchmarks
+
+# 快速性能基准冒烟
+.\.venv\Scripts\python.exe benchmarks\run_benchmarks.py --profile smoke
+```
+
+核心结构：
+
+- `image_editor.py`：向后兼容的脚本入口
+- `light_image_editor/app.py`：应用创建和命令行入口
+- `light_image_editor/ui/`：Tkinter 界面
+- `light_image_editor/settings.py`：配置持久化
+- `light_image_editor/files.py`：文件与 Windows Shell 服务
+- `image_ops.py`：图像处理和导出核心
+- `packaging/windows/`：受版本管理的 PyInstaller 配方
+- `benchmarks/`：启动、大图、切图和批处理基准
+- `docs/release/`：来源、历史校验值和发布合规记录
+
+完整版本规划见 [DEVELOPMENT_ROADMAP.md](DEVELOPMENT_ROADMAP.md)。
+
+## 许可证状态
+
+导入的上游源码没有附带明确许可证。本仓库当前不授予开源使用或再分发许可；公开或商业发布前必须确认原始代码权属并取得书面修改与再分发授权。详见 [LICENSE](LICENSE)、[NOTICE.md](NOTICE.md) 和 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。

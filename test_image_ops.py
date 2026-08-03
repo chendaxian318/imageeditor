@@ -1,6 +1,6 @@
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 
 from PIL import Image
 
@@ -85,8 +85,12 @@ class ImageOpsTests(unittest.TestCase):
         wide = Image.new("RGB", (4000, 2000), "purple")
         small = Image.new("RGB", (400, 200), "purple")
 
-        resized = prepare_image(wide, ExportOptions(output_format="JPEG", max_width=1000, max_height=1000))
-        unchanged = prepare_image(small, ExportOptions(output_format="JPEG", max_width=1000, max_height=1000))
+        resized = prepare_image(
+            wide, ExportOptions(output_format="JPEG", max_width=1000, max_height=1000)
+        )
+        unchanged = prepare_image(
+            small, ExportOptions(output_format="JPEG", max_width=1000, max_height=1000)
+        )
 
         self.assertEqual(resized.size, (1000, 500))
         self.assertEqual(unchanged.size, (400, 200))
@@ -121,8 +125,12 @@ class ImageOpsTests(unittest.TestCase):
 
             found = iter_image_files([work])
 
-            self.assertEqual([item.name for item in found], ["image1.jpg", "image2.jpg", "image10.jpg"])
-            self.assertLess(natural_sort_key(work / "image2.jpg"), natural_sort_key(work / "image10.jpg"))
+            self.assertEqual(
+                [item.name for item in found], ["image1.jpg", "image2.jpg", "image10.jpg"]
+            )
+            self.assertLess(
+                natural_sort_key(work / "image2.jpg"), natural_sort_key(work / "image10.jpg")
+            )
 
     def test_jpeg_target_size_uses_lower_quality(self) -> None:
         with TemporaryDirectory() as raw_dir:

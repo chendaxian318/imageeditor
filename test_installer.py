@@ -1,10 +1,22 @@
-from pathlib import Path
 import unittest
+from pathlib import Path
 
-from installer import APP_REGISTRY_NAME, SUPPORTED_EXTENSIONS, default_apps_uri, open_command
+from installer import (
+    APP_REGISTRY_NAME,
+    LEGAL_DOCUMENTS,
+    SUPPORTED_EXTENSIONS,
+    default_apps_uri,
+    open_command,
+)
 
 
 class InstallerTests(unittest.TestCase):
+    def test_installer_carries_required_legal_documents(self) -> None:
+        self.assertEqual(
+            LEGAL_DOCUMENTS,
+            ("LICENSE", "NOTICE.md", "THIRD_PARTY_LICENSES.md"),
+        )
+
     def test_supported_extensions_cover_documented_image_formats(self) -> None:
         self.assertEqual(
             SUPPORTED_EXTENSIONS,

@@ -1,0 +1,56 @@
+# Source Code Licensing Status / 源代码授权状态
+
+This repository is **not currently released under an open-source license**.
+
+The baseline source was imported from the repository at
+<https://gitee.com/cswl2020/pic>. At the time of the 2026-08-03 M0 review,
+the imported source tree contained no `LICENSE` file and no other explicit
+copyright licence grant. The absence of a licence does not place a work in the
+public domain.
+
+Accordingly, this file grants **no permission** to use, copy, modify,
+redistribute, sublicense, publish, or commercially exploit the first-party
+source code. Any such permission must come from the relevant copyright holder
+in a separate, verifiable written agreement, or from rights independently
+available under applicable law.
+
+Copyright in upstream material remains with its respective author or owner.
+Copyright in later contributions remains with the respective contributor
+unless assigned or licensed by a separate written agreement. Repository
+access, a Git remote, a commit, or technical ability to build the software is
+not evidence of copyright ownership or permission to distribute it.
+
+Before any public or commercial distribution, the project maintainers must:
+
+1. establish and record the chain of title for the upstream source;
+2. obtain a written licence or assignment covering modification and
+   redistribution, or replace the affected source with code that can be
+   demonstrably distributed;
+3. select and publish an appropriate first-party licence; and
+4. preserve all independently applicable third-party notices and licence
+   terms listed in `THIRD_PARTY_LICENSES.md`.
+
+Third-party components are not covered by this notice. They remain available
+under their own licences.
+
+---
+
+本仓库目前**未以任何开源许可证发布**。
+
+基线代码来自 <https://gitee.com/cswl2020/pic>。在 2026-08-03 的 M0
+核查中，导入的源码树内没有 `LICENSE` 文件，也没有发现明确的著作权许可声明。
+没有许可证并不代表代码属于公有领域。
+
+因此，本文件**不授予**使用、复制、修改、再分发、再许可、公开发布或商业利用
+第一方源码的任何权限。相关权限必须由著作权人通过可核验的单独书面协议授予，
+或由适用法律另行赋予。
+
+上游材料的权利仍归各自作者或权利人所有；后续贡献的权利仍归各贡献者所有，
+除非另有书面转让或许可。能够访问仓库、设置 Git 远程地址、创建提交或成功构建，
+均不能证明代码权属或公开分发权限。
+
+任何公开或商业发布前，维护者必须完成权属链确认、取得覆盖修改与再分发的书面
+授权（或替换相关代码）、确定第一方许可证，并保留
+`THIRD_PARTY_LICENSES.md` 中全部适用的第三方声明与许可条款。
+
+第三方组件不受本声明重新许可，仍分别遵循其自身许可证。

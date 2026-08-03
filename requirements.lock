@@ -1,0 +1,2 @@
+# Runtime dependencies. Every published build must use these exact versions.
+Pillow==11.3.0
