@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.2 — 2026-08-04
+
+- Added throttled, non-committing preview timelines so annotations follow the pointer while they are created, moved or resized.
+- Kept drag interactions as a single undoable command on mouse release and discarded stale transient frames safely.
+- Improved the immediate Canvas guide with real arrowheads and annotation-relative stroke widths.
+- Preserved arrow direction when resizing arrows that were originally drawn in reverse directions.
+
 ## 1.1.1 — 2026-08-04
 
 - Reworked split comparison to show complete before/after images in equal panels without aspect-ratio distortion.

@@ -42,7 +42,7 @@ from ..batch import (
     TaskStatus,
     export_batch_log,
 )
-from ..commands import EditCommand
+from ..commands import EditCommand, EditTimeline
 from ..diagnostics import CrashStore, DiagnosticReporter
 from ..document import Document, DocumentState
 from ..dpi import DpiManager, dpi_scale, enable_process_dpi_awareness, monitor_work_area
@@ -116,6 +116,34 @@ ANNOTATION_TOOL_LABELS = {
     "number": "序号",
     "perspective": "透视",
 }
+
+
+def _timeline_with_annotation_draft(
+    timeline: EditTimeline,
+    draft: AnnotationObject,
+    original: AnnotationObject | None,
+) -> EditTimeline:
+    """Create a render-only timeline without mutating undo history."""
+
+    if original is None:
+        transient = EditCommand.create(
+            "annotation_add",
+            {"object": draft.to_json()},
+            "预览标注",
+        )
+    else:
+        patch = draft.to_json()
+        patch.pop("id", None)
+        patch.pop("kind", None)
+        transient = EditCommand.create(
+            "annotation_update",
+            {"id": original.id, "patch": patch},
+            "预览调整标注",
+        )
+    commands = [*timeline.active_commands, transient]
+    return EditTimeline(commands=commands, cursor=len(commands))
+
+
 ACTION_CATALOG = (
     ("open", "打开", "<Control-o>"),
     ("save", "保存图片", "<Control-s>"),
@@ -232,6 +260,7 @@ class ImageEditorApp(tk.Tk):
         self._ratio_lock = False
         self._preview_job: str | None = None
         self._preview_poll_jobs: set[str] = set()
+        self._annotation_preview_job: str | None = None
         self._preview_generation = 0
         self.preview_ready_generation = 0
         self._load_generation = 0
@@ -3038,6 +3067,7 @@ class ImageEditorApp(tk.Tk):
     def _clear_document_after_load_failure(self, failed_path: Path) -> None:
         """Prevent file actions from targeting the previously displayed document."""
 
+        self._clear_annotation_drag(redraw=False)
         self._release_base_preview()
         self.document = None
         self.original = None
@@ -3245,6 +3275,8 @@ class ImageEditorApp(tk.Tk):
     def _load_current_image(self, display_name: str, *, recovered: bool = False) -> None:
         if self.original is None or self.document is None:
             return
+        self._clear_annotation_drag(redraw=False)
+        self.selected_annotation_id = None
         self.title(f"{display_name} — {APP_NAME}")
         self._apply_document_state(self.document.state)
         self._sync_controls_from_timeline()
@@ -4336,6 +4368,7 @@ class ImageEditorApp(tk.Tk):
         self.destroy()
 
     def _cancel_pending_preview_updates(self) -> None:
+        self._cancel_annotation_drag_preview()
         if self._preview_job is not None:
             try:
                 self.after_cancel(self._preview_job)
@@ -4864,13 +4897,14 @@ class ImageEditorApp(tk.Tk):
         )
         self._preview_generation += 1
         generation = self._preview_generation
+        timeline = self._timeline_for_preview()
         future = self.preview_renderer.render(
             self.original,
             self.edit_state(),
             compare_original=self.compare_original.get(),
             canvas_size=(canvas_w, canvas_h),
             zoom_percent=zoom_percent,
-            timeline=self.document.timeline if self.document is not None else None,
+            timeline=timeline,
             split_compare=self.split_compare_var.get(),
         )
         self._schedule_preview_poll(generation, future, canvas_w, canvas_h)
@@ -5014,6 +5048,9 @@ class ImageEditorApp(tk.Tk):
     def _set_annotation_tool(self, tool: str) -> None:
         if tool not in ANNOTATION_TOOL_LABELS:
             return
+        if self._annotation_start is not None:
+            self._clear_annotation_drag(redraw=False)
+            self._refresh_preview()
         self.annotation_tool_var.set(tool)
         self.current_tool_label_var.set(f"当前：{ANNOTATION_TOOL_LABELS[tool]}")
         if tool != "select":
@@ -5150,6 +5187,7 @@ class ImageEditorApp(tk.Tk):
         )
 
     def _start_annotation_selection(self, event: tk.Event) -> None:
+        self._cancel_annotation_drag_preview()
         point = self._canvas_to_normalized(event.x, event.y)
         handle = self._annotation_handle_at(event.x, event.y)
         selected = self._selected_annotation()
@@ -5193,28 +5231,34 @@ class ImageEditorApp(tk.Tk):
             draft = original.resized((left, top, right, bottom))
         self._annotation_drag_object = draft
         self._draw_annotation_overlay()
+        self._schedule_annotation_drag_preview()
 
     def _finish_annotation_selection(self, _event: tk.Event) -> None:
         original = self._annotation_original_object
         draft = self._annotation_drag_object
+        command: EditCommand | None = None
         if original is not None and draft is not None and draft != original:
             patch = draft.to_json()
             patch.pop("id", None)
             patch.pop("kind", None)
-            self._commit_command(
-                EditCommand.create(
-                    "annotation_update",
-                    {"id": original.id, "patch": patch},
-                    f"调整{ANNOTATION_TOOL_LABELS[original.kind]}",
-                )
+            command = EditCommand.create(
+                "annotation_update",
+                {"id": original.id, "patch": patch},
+                f"调整{ANNOTATION_TOOL_LABELS[original.kind]}",
             )
-        self._annotation_start = None
-        self._annotation_original_object = None
-        self._annotation_drag_object = None
+        self._clear_annotation_drag(redraw=False)
+        if command is not None:
+            self._commit_command(command)
+        else:
+            # A transient frame can contain an intermediate position even when
+            # the pointer returns to its starting point before release.
+            self._refresh_preview()
+        self._draw_annotation_overlay()
 
     def _start_annotation(self, event: tk.Event, tool: str) -> None:
         if self.document is None:
             return
+        self._cancel_annotation_drag_preview()
         point = self._canvas_to_normalized(event.x, event.y)
         self._annotation_start = point
         self._annotation_freehand_points = [point]
@@ -5242,6 +5286,7 @@ class ImageEditorApp(tk.Tk):
             self.status_var.set(str(error))
             return
         self._draw_annotation_overlay()
+        self._schedule_annotation_drag_preview()
 
     def _finish_annotation(self, event: tk.Event, tool: str) -> None:
         if self.document is None or self._annotation_start is None:
@@ -5257,7 +5302,8 @@ class ImageEditorApp(tk.Tk):
             annotation = self._annotation_from_drag(tool, self._annotation_start, point)
         except ValueError as error:
             messagebox.showerror(APP_NAME, str(error))
-            self._clear_annotation_drag()
+            self._clear_annotation_drag(redraw=False)
+            self._refresh_preview()
             return
         if tool == "text":
             text = simpledialog.askstring(
@@ -5267,7 +5313,8 @@ class ImageEditorApp(tk.Tk):
                 parent=self,
             )
             if not text:
-                self._clear_annotation_drag()
+                self._clear_annotation_drag(redraw=False)
+                self._refresh_preview()
                 return
             self.annotation_text_var.set(text)
             annotation = annotation.with_patch({"text": text})
@@ -5280,10 +5327,11 @@ class ImageEditorApp(tk.Tk):
             refresh=False,
         )
         self.selected_annotation_id = annotation.id
+        self._clear_annotation_drag(redraw=False)
         self._set_annotation_tool("select")
         self.selected_annotation_id = annotation.id
         self._load_annotation_style(annotation)
-        self._clear_annotation_drag()
+        self._draw_annotation_overlay()
         self._refresh_preview()
 
     def _annotation_from_drag(
@@ -5320,11 +5368,53 @@ class ImageEditorApp(tk.Tk):
             blur_radius=self.annotation_effect_size_var.get(),
         )
 
-    def _clear_annotation_drag(self) -> None:
+    def _clear_annotation_drag(self, *, redraw: bool = True) -> None:
+        self._cancel_annotation_drag_preview()
         self._annotation_start = None
+        self._annotation_original_object = None
         self._annotation_drag_object = None
         self._annotation_freehand_points = []
-        self._draw_annotation_overlay()
+        if redraw:
+            self._draw_annotation_overlay()
+
+    def _schedule_annotation_drag_preview(self) -> None:
+        """Throttle exact drag previews while the Canvas guide remains immediate."""
+
+        if self._annotation_preview_job is not None or self._services_shutdown:
+            return
+        self._annotation_preview_job = self.after(40, self._render_annotation_drag_preview)
+
+    def _render_annotation_drag_preview(self) -> None:
+        self._annotation_preview_job = None
+        if (
+            self.document is not None
+            and self._annotation_start is not None
+            and self._annotation_drag_object is not None
+        ):
+            self._refresh_preview()
+
+    def _cancel_annotation_drag_preview(self) -> None:
+        if self._annotation_preview_job is None:
+            return
+        try:
+            self.after_cancel(self._annotation_preview_job)
+        except tk.TclError:
+            pass
+        self._annotation_preview_job = None
+
+    def _timeline_for_preview(self) -> EditTimeline | None:
+        """Return a snapshot containing the current drag draft without committing it."""
+
+        if self.document is None:
+            return None
+        timeline = self.document.timeline
+        draft = self._annotation_drag_object
+        if self._annotation_start is None or draft is None:
+            return timeline
+        original = self._annotation_original_object
+        if original is not None and draft == original:
+            return timeline
+        return _timeline_with_annotation_draft(timeline, draft, original)
 
     def _load_annotation_style(self, annotation: AnnotationObject) -> None:
         self.selected_annotation_var.set(
@@ -5510,19 +5600,39 @@ class ImageEditorApp(tk.Tk):
         x1, y1 = self._normalized_to_canvas(left, top)
         x2, y2 = self._normalized_to_canvas(right, bottom)
         color = annotation.color
+        stroke = max(
+            2,
+            round(
+                annotation.stroke_width
+                * min(self.base_preview_image.size)
+                * self.preview_scale
+                / 1000
+            ),
+        )
         if annotation.kind in {"line", "arrow"}:
             start = self._normalized_to_canvas(annotation.x1, annotation.y1)
             end = self._normalized_to_canvas(annotation.x2, annotation.y2)
-            self.canvas.create_line(*start, *end, fill=color, width=2, tags="annotation-ui")
+            arrow_size = max(8, stroke * 4)
+            self.canvas.create_line(
+                *start,
+                *end,
+                fill=color,
+                width=stroke,
+                arrow=tk.LAST if annotation.kind == "arrow" else tk.NONE,
+                arrowshape=(arrow_size, arrow_size, max(3, arrow_size // 2)),
+                tags="annotation-ui",
+            )
         elif annotation.kind == "ellipse":
-            self.canvas.create_oval(x1, y1, x2, y2, outline=color, width=2, tags="annotation-ui")
+            self.canvas.create_oval(
+                x1, y1, x2, y2, outline=color, width=stroke, tags="annotation-ui"
+            )
         elif annotation.kind == "freehand" and annotation.points:
             points = [self._normalized_to_canvas(x, y) for x, y in annotation.points]
             if len(points) >= 2:
                 self.canvas.create_line(
                     *[coordinate for point in points for coordinate in point],
                     fill=color,
-                    width=2,
+                    width=stroke,
                     tags="annotation-ui",
                 )
             else:
@@ -5543,7 +5653,7 @@ class ImageEditorApp(tk.Tk):
                 x2,
                 y2,
                 outline=color,
-                width=2,
+                width=stroke,
                 dash=(4, 3),
                 tags="annotation-ui",
             )

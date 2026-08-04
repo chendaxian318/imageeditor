@@ -56,6 +56,20 @@ class AnnotationModelTests(unittest.TestCase):
         self.assertEqual(hit_radius_px(96), 8)
         self.assertEqual(hit_radius_px(192), 16)
 
+    def test_resizing_reverse_arrow_preserves_its_direction(self) -> None:
+        arrow = AnnotationObject.create("arrow", (0.8, 0.7, 0.2, 0.1))
+
+        resized = arrow.resized((0.1, 0.2, 0.9, 0.8))
+
+        self.assertEqual(resized.bounds, (0.1, 0.2, 0.9, 0.8))
+        self.assertEqual((resized.x1, resized.y1), (0.9, 0.8))
+        self.assertEqual((resized.x2, resized.y2), (0.1, 0.2))
+
+        horizontal = AnnotationObject.create("arrow", (0.2, 0.5, 0.8, 0.5))
+        diagonal = horizontal.resized((0.1, 0.2, 0.9, 0.8))
+        self.assertEqual((diagonal.x1, diagonal.y1), (0.1, 0.2))
+        self.assertEqual((diagonal.x2, diagonal.y2), (0.9, 0.8))
+
     def test_custom_crop_ratio_accepts_decimal_dimensions(self) -> None:
         self.assertAlmostEqual(parse_crop_ratio("2.39:1"), 2.39)
         self.assertIsNone(parse_crop_ratio("自由"))

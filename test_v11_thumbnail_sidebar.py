@@ -12,13 +12,14 @@ from PIL import Image, ImageChops
 
 from image_ops import EditState
 from light_image_editor.annotations import AnnotationObject
-from light_image_editor.commands import EditCommand
+from light_image_editor.commands import EditCommand, EditTimeline
 from light_image_editor.presets import resolve_size_preset
 from light_image_editor.preview import render_preview
+from light_image_editor.renderer import reduce_timeline, render_image
 from light_image_editor.session import SessionStore
 from light_image_editor.settings import SettingsStore
 from light_image_editor.thumbnails import THUMBNAIL_SIZE, ThumbnailLoader, generate_thumbnail
-from light_image_editor.ui.main_window import ImageEditorApp
+from light_image_editor.ui.main_window import ImageEditorApp, _timeline_with_annotation_draft
 
 
 class ThumbnailGenerationTests(unittest.TestCase):
@@ -110,6 +111,87 @@ class InteractionLogicTests(unittest.TestCase):
         self.assertEqual(quarter, (270, 152, None))
         self.assertEqual(resolve_size_preset(original_size, "original"), (1080, 608, None))
         self.assertEqual(resolve_size_preset(original_size, "1920"), (None, None, 1920))
+
+    def test_transient_annotation_drag_renders_without_mutating_history(self) -> None:
+        base = Image.new("RGB", (240, 120), "white")
+        original = AnnotationObject.create(
+            "arrow",
+            (0.1, 0.2, 0.35, 0.4),
+            color="#ff0000",
+            stroke_width=8,
+        )
+        timeline = EditTimeline()
+        timeline.commit(
+            EditCommand.create(
+                "annotation_add",
+                {"object": original.to_json()},
+                "添加箭头",
+            )
+        )
+        draft = original.translated(0.4, 0.3)
+        history_before = (
+            timeline.active_signature(),
+            timeline.cursor,
+            timeline.revision,
+            len(timeline.commands),
+        )
+
+        transient = _timeline_with_annotation_draft(timeline, draft, original)
+        transient_image = render_image(base, transient)
+        expected = EditTimeline.from_json(timeline.to_json())
+        patch_data = draft.to_json()
+        patch_data.pop("id")
+        patch_data.pop("kind")
+        expected.commit(
+            EditCommand.create(
+                "annotation_update",
+                {"id": original.id, "patch": patch_data},
+                "调整箭头",
+            )
+        )
+        expected_image = render_image(base, expected)
+        try:
+            self.assertEqual(transient_image.tobytes(), expected_image.tobytes())
+            self.assertEqual(reduce_timeline(transient).annotations, (draft,))
+            self.assertEqual(reduce_timeline(timeline).annotations, (original,))
+            self.assertEqual(
+                (
+                    timeline.active_signature(),
+                    timeline.cursor,
+                    timeline.revision,
+                    len(timeline.commands),
+                ),
+                history_before,
+            )
+        finally:
+            transient_image.close()
+            expected_image.close()
+            base.close()
+
+    def test_transient_creation_preview_covers_vector_text_and_region_tools(self) -> None:
+        base = Image.effect_noise((180, 120), 80).convert("RGB")
+        try:
+            for kind in ("arrow", "rectangle", "text", "mosaic", "blur"):
+                with self.subTest(kind=kind):
+                    timeline = EditTimeline()
+                    draft = AnnotationObject.create(
+                        kind,
+                        (0.2, 0.2, 0.75, 0.75),
+                        text="实时文字" if kind == "text" else "",
+                        color="#ff0000",
+                        stroke_width=8,
+                    )
+                    transient = _timeline_with_annotation_draft(timeline, draft, None)
+                    rendered = render_image(base, transient)
+                    try:
+                        self.assertEqual(reduce_timeline(transient).annotations, (draft,))
+                        self.assertEqual(reduce_timeline(timeline).annotations, ())
+                        self.assertEqual((timeline.cursor, timeline.revision), (0, 0))
+                        self.assertNotEqual(rendered.tobytes(), base.tobytes())
+                    finally:
+                        rendered.close()
+        finally:
+            base.close()
 
     def test_split_compare_contains_two_complete_images(self) -> None:
         original = Image.new("RGB", (100, 60), "red")
@@ -371,6 +453,145 @@ class InteractionLogicTests(unittest.TestCase):
                 )
                 app._draw_annotation_overlay()
                 self.assertTrue(app.canvas.find_withtag("annotation-ui"))
+            finally:
+                self._close_app(app)
+
+    def test_annotation_drag_follows_motion_and_commits_once_on_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "original.png"
+            Image.new("RGB", (240, 120), "white").save(source)
+            settings = SettingsStore(root / "settings.json")
+            settings.save({"schema_version": 1, "onboarding_completed": True})
+            app = ImageEditorApp(
+                settings_store=settings,
+                session_store=SessionStore(root / "session.json"),
+            )
+            try:
+                self._cancel_startup_jobs(app)
+                self._open_and_wait(app, source)
+                deadline = time.monotonic() + 5
+                while app.base_preview_image is None and time.monotonic() < deadline:
+                    app.update()
+                    time.sleep(0.01)
+                self.assertIsNotNone(app.base_preview_image)
+                assert app.document is not None
+
+                arrow = AnnotationObject.create(
+                    "arrow",
+                    (0.1, 0.2, 0.3, 0.4),
+                    color="#ff0000",
+                    stroke_width=8,
+                )
+                self.assertTrue(
+                    app._commit_command(
+                        EditCommand.create(
+                            "annotation_add",
+                            {"object": arrow.to_json()},
+                            "添加箭头",
+                        ),
+                        refresh=False,
+                    )
+                )
+                initial_generation = app.preview_ready_generation
+                app._refresh_preview()
+                deadline = time.monotonic() + 5
+                while (
+                    app.preview_ready_generation <= initial_generation
+                    and time.monotonic() < deadline
+                ):
+                    app.update()
+                    time.sleep(0.01)
+                self.assertGreater(app.preview_ready_generation, initial_generation)
+                assert app.base_preview_image is not None
+                initial_pixel = cast(tuple[int, ...], app.base_preview_image.getpixel((48, 36)))
+                self.assertEqual(initial_pixel[:3], (255, 0, 0))
+                app._set_annotation_tool("select")
+                app.selected_annotation_id = arrow.id
+                app._load_annotation_style(arrow)
+                app._annotation_start = (0.1, 0.2)
+                app._annotation_original_object = arrow
+                app._annotation_drag_object = arrow
+                app._annotation_drag_action = "move"
+                history_before = (
+                    app.document.timeline.cursor,
+                    app.document.timeline.revision,
+                    len(app.document.timeline.commands),
+                )
+
+                with patch.object(
+                    app,
+                    "_canvas_to_normalized",
+                    side_effect=[(0.3, 0.4), (0.4, 0.5), (0.5, 0.6)],
+                ):
+                    for _ in range(3):
+                        app._drag_annotation_selection(Mock(x=0, y=0))
+
+                draft = app._annotation_drag_object
+                self.assertIsNotNone(draft)
+                assert draft is not None
+                self.assertEqual(draft.bounds, (0.5, 0.6, 0.7, 0.8))
+                self.assertIsNotNone(app._annotation_preview_job)
+                preview_timeline = app._timeline_for_preview()
+                self.assertIsNotNone(preview_timeline)
+                assert preview_timeline is not None
+                self.assertEqual(reduce_timeline(preview_timeline).annotations, (draft,))
+                self.assertEqual(reduce_timeline(app.document.timeline).annotations, (arrow,))
+                self.assertEqual(
+                    (
+                        app.document.timeline.cursor,
+                        app.document.timeline.revision,
+                        len(app.document.timeline.commands),
+                    ),
+                    history_before,
+                )
+                live_lines = [
+                    item
+                    for item in app.canvas.find_withtag("annotation-ui")
+                    if app.canvas.type(item) == "line"
+                ]
+                self.assertTrue(live_lines)
+                self.assertTrue(
+                    any(app.canvas.itemcget(item, "arrow") == "last" for item in live_lines)
+                )
+                drag_generation = app.preview_ready_generation
+                deadline = time.monotonic() + 5
+                live_pixels: tuple[tuple[int, ...], tuple[int, ...]] | None = None
+                while time.monotonic() < deadline:
+                    app.update()
+                    if app.base_preview_image is not None:
+                        old_pixel = cast(tuple[int, ...], app.base_preview_image.getpixel((48, 36)))
+                        new_pixel = cast(
+                            tuple[int, ...], app.base_preview_image.getpixel((144, 84))
+                        )
+                        if old_pixel[:3] == (255, 255, 255) and new_pixel[:3] == (255, 0, 0):
+                            live_pixels = (old_pixel, new_pixel)
+                            break
+                    time.sleep(0.01)
+                self.assertGreater(app.preview_ready_generation, drag_generation)
+                self.assertIsNotNone(live_pixels)
+
+                with patch.object(app, "_refresh_preview") as refresh:
+                    app._finish_annotation_selection(Mock())
+                refresh.assert_called_once_with()
+                self.assertEqual(
+                    (
+                        app.document.timeline.cursor,
+                        app.document.timeline.revision,
+                        len(app.document.timeline.commands),
+                    ),
+                    (history_before[0] + 1, history_before[1] + 1, history_before[2] + 1),
+                )
+                self.assertEqual(reduce_timeline(app.document.timeline).annotations, (draft,))
+
+                committed_count = len(app.document.timeline.commands)
+                with patch.object(app, "_refresh_preview"):
+                    app._finish_annotation_selection(Mock())
+                self.assertEqual(len(app.document.timeline.commands), committed_count)
+                app.document.timeline.undo()
+                self.assertEqual(reduce_timeline(app.document.timeline).annotations, (arrow,))
+                app.document.timeline.redo()
+                self.assertEqual(reduce_timeline(app.document.timeline).annotations, (draft,))
             finally:
                 self._close_app(app)
 

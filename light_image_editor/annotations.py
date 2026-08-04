@@ -187,23 +187,34 @@ class AnnotationObject:
     ) -> AnnotationObject:
         left, top, right, bottom = (_unit_float(value, "标注坐标") for value in box)
         old_left, old_top, old_right, old_bottom = self.bounds
-        old_width = max(1e-9, old_right - old_left)
-        old_height = max(1e-9, old_bottom - old_top)
+        old_width_span = old_right - old_left
+        old_height_span = old_bottom - old_top
+        old_width = max(1e-9, old_width_span)
+        old_height = max(1e-9, old_height_span)
         new_left, new_right = sorted((left, right))
         new_top, new_bottom = sorted((top, bottom))
+        new_width = new_right - new_left
+        new_height = new_bottom - new_top
+
+        def scale_x(value: float) -> float:
+            return new_left + (value - old_left) / old_width * new_width
+
+        def scale_y(value: float) -> float:
+            return new_top + (value - old_top) / old_height * new_height
+
         points = tuple(
             (
-                new_left + (x - old_left) / old_width * (new_right - new_left),
-                new_top + (y - old_top) / old_height * (new_bottom - new_top),
+                scale_x(x),
+                scale_y(y),
             )
             for x, y in self.points
         )
         return replace(
             self,
-            x1=left,
-            y1=top,
-            x2=right,
-            y2=bottom,
+            x1=left if old_width_span < 1e-9 else scale_x(self.x1),
+            y1=top if old_height_span < 1e-9 else scale_y(self.y1),
+            x2=right if old_width_span < 1e-9 else scale_x(self.x2),
+            y2=bottom if old_height_span < 1e-9 else scale_y(self.y2),
             points=points,
         )
 
