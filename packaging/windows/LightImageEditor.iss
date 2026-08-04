@@ -108,6 +108,9 @@ Filename: "{app}\{#MyAppExeName}"; Description: "启动{#MyAppName}"; Flags: now
 Filename: "ms-settings:defaultapps?registeredAppUser={#RegistryName}"; Description: "打开 Windows 默认应用设置"; Flags: shellexec postinstall skipifsilent unchecked
 
 [Code]
+var
+  PreserveUserData: Boolean;
+
 function RequestRunningAppExit(): Integer;
 var
   ResultCode: Integer;
@@ -149,5 +152,32 @@ begin
   ExitResult := RequestRunningAppExit();
   Result := ExitResult = 0;
   if not Result then
+  begin
     MsgBox('主程序仍在运行或用户取消退出，卸载已安全取消。', mbInformation, MB_OK);
+    exit;
+  end;
+
+  PreserveUserData := True;
+  if Pos('/CLEARUSERDATA', Uppercase(GetCmdTail)) > 0 then
+    PreserveUserData := False
+  else if not UninstallSilent then
+    PreserveUserData := MsgBox(
+      '是否保留设置、最近文件、恢复会话、诊断日志和更新缓存？' + #13#10 + #13#10 +
+      '选择“是”可在重新安装后继续使用；选择“否”将清除这些本机数据。',
+      mbConfirmation,
+      MB_YESNO
+    ) = IDYES;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if (CurUninstallStep = usPostUninstall) and (not PreserveUserData) then
+  begin
+    DeleteFile(ExpandConstant('{%USERPROFILE}\.light_image_editor.json'));
+    DeleteFile(ExpandConstant('{%USERPROFILE}\.light_image_editor.json.pre-v1.bak'));
+    DeleteFile(ExpandConstant('{%USERPROFILE}\.light_image_editor_session.json'));
+    DeleteFile(ExpandConstant('{%USERPROFILE}\.light_image_editor_session.recovery.png'));
+    DeleteFile(ExpandConstant('{%USERPROFILE}\.light_image_editor_batch.json'));
+    DelTree(ExpandConstant('{localappdata}\LightImageEditor'), True, True, True);
+  end;
 end;

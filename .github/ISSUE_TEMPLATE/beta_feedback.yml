@@ -1,0 +1,29 @@
+name: Beta 反馈
+description: 提交 v0.8 Beta 的可复现问题或体验反馈
+title: "[Beta] "
+labels: ["beta", "needs-triage"]
+body:
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 影响级别
+      options: ["P0 数据丢失/安全/无法启动", "P1 核心流程阻断/高频崩溃", "P2 一般问题"]
+    validations: {required: true}
+  - type: input
+    id: environment
+    attributes: {label: 环境, description: "Windows 版本、DPI、显示器数量、安装/便携版"}
+    validations: {required: true}
+  - type: textarea
+    id: steps
+    attributes: {label: 复现步骤, description: "请勿上传含隐私的原图；可附主动导出的脱敏诊断 ZIP。"}
+    validations: {required: true}
+  - type: textarea
+    id: result
+    attributes: {label: 期望结果与实际结果}
+    validations: {required: true}
+  - type: input
+    id: owner
+    attributes: {label: 负责人, description: "P0/P1 分诊时必须填写"}
+  - type: textarea
+    id: close
+    attributes: {label: 关闭标准, description: "P0/P1 分诊时必须填写可验证标准"}

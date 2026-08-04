@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.0 — 2026-08-04
+
+### Beta release system
+
+- Added stable and Beta channels with user-initiated checks only; signed manifests, declared size, SHA-256 and trusted Windows Authenticode publisher verification all fail closed.
+- Added atomic update downloads, a cache of the previous verified installer and an explicit rollback action.
+- Added versioned settings migration that preserves recent files and unknown fields, with a pre-migration backup.
+- Added rotating local diagnostics, crash recovery records, privacy redaction and user-initiated ZIP report export; anonymous upload remains off by default and requires both saved consent and per-report confirmation.
+- Added uninstall-time choice to preserve or clear settings, sessions, logs, update cache and batch state.
+- Added deterministic CycloneDX 1.6 SBOM generation, release SHA-256 coverage, Beta release notes, known issues, feedback template and P0/P1 ownership/closure register.
+- Added release signing gates and dual-channel manifest generation when the Authenticode tool, certificate thumbprint and protected manifest private key are configured.
+
+### Validation
+
+- 113 automated tests pass, including signature tampering, channel mismatch, interrupted download, hash mismatch, publisher rejection, rollback, redaction, dual-consent and legacy migration cases.
+- Unsigned local builds carry `SIGNING_REQUIRED.txt` and cannot produce update-channel manifests; public Beta remains blocked until the final binaries have a trusted publisher signature.
+
 ## 0.7.0 — 2026-08-04
 
 ### Experience and accessibility

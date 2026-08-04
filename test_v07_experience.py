@@ -100,7 +100,9 @@ class OfflinePrivacyTests(unittest.TestCase):
 
     def test_application_has_no_background_network_client(self) -> None:
         source = "\n".join(
-            path.read_text(encoding="utf-8") for path in (ROOT / "light_image_editor").rglob("*.py")
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "light_image_editor").rglob("*.py")
+            if path.name != "updater.py"
         )
         for forbidden in ("import requests", "from requests", "urllib.request", "http.client"):
             self.assertNotIn(forbidden, source)
@@ -188,7 +190,7 @@ class PackagingTests(unittest.TestCase):
         for name in ("image_editor.spec", "image_editor_portable.spec"):
             source = (ROOT / "packaging" / "windows" / name).read_text(encoding="utf-8")
             self.assertIn('"resources/locales"', source)
-            self.assertIn("datas=[(str(LOCALES)", source)
+            self.assertIn("(str(LOCALES)", source)
 
 
 @unittest.skipUnless(os.name == "nt", "WM_DROPFILES is Windows-specific")

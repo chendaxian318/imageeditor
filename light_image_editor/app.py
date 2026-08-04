@@ -8,6 +8,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from .diagnostics import configure_diagnostics, install_crash_handlers
 from .dpi import enable_process_dpi_awareness
 from .single_instance import (
     SingleInstanceController,
@@ -77,6 +78,8 @@ def main(
     controller_factory: Callable[[], SingleInstanceController] = SingleInstanceController,
 ) -> int:
     enable_process_dpi_awareness()
+    configure_diagnostics()
+    install_crash_handlers()
     arguments = list(sys.argv[1:] if argv is None else argv)
     if "--request-exit-for-upgrade" in arguments:
         response = request_running_app_exit()

@@ -36,6 +36,9 @@ $ProgId = "HKCU:\Software\Classes\LightImageEditor.Image"
 $ContextMenu = "HKCU:\Software\Classes\SystemFileAssociations\image\shell\LightImageEditor"
 $UninstallRoot = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
 $UninstallKey = Join-Path $UninstallRoot "io.github.chendaxian318.imageeditor_is1"
+$UserSettings = Join-Path $env:USERPROFILE ".light_image_editor.json"
+$UserDataRoot = Join-Path $env:LOCALAPPDATA "LightImageEditor"
+$SmokeMarker = Join-Path $UserDataRoot "lifecycle-smoke.marker"
 
 function Invoke-External {
     param(
@@ -119,8 +122,13 @@ function Assert-Uninstalled {
     }
 }
 
-if ((Test-Path -LiteralPath $InstallDirectory) -or @(Get-UninstallEntry).Count -ne 0) {
-    throw "A pre-existing Light Image Editor installation was found; remove it before this destructive cycle test."
+if (
+    (Test-Path -LiteralPath $InstallDirectory) -or
+    @(Get-UninstallEntry).Count -ne 0 -or
+    (Test-Path -LiteralPath $UserSettings) -or
+    (Test-Path -LiteralPath $UserDataRoot)
+) {
+    throw "A pre-existing installation or user-data directory was found; use a disposable clean profile."
 }
 
 $installArguments = @(
@@ -141,20 +149,43 @@ for ($iteration = 1; $iteration -le $Iterations; $iteration++) {
     Invoke-External -FilePath $Installer -Arguments $installArguments
     Assert-Installed
 
+    New-Item -ItemType Directory -Path $UserDataRoot -Force | Out-Null
+    [System.IO.File]::WriteAllText(
+        $UserSettings,
+        '{"schema_version":1,"lifecycle_smoke":true}',
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    [System.IO.File]::WriteAllText($SmokeMarker, "preserve-me")
+
     $uninstallCopy = $Uninstaller
     Invoke-External `
         -FilePath $uninstallCopy `
         -Arguments @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
     Assert-Uninstalled
+    if (-not (Test-Path -LiteralPath $UserSettings) -or -not (Test-Path -LiteralPath $SmokeMarker)) {
+        throw "Silent uninstall did not preserve user settings and cache by default."
+    }
+
+    Invoke-External -FilePath $Installer -Arguments $installArguments
+    Assert-Installed
+    $uninstallCopy = $Uninstaller
+    Invoke-External `
+        -FilePath $uninstallCopy `
+        -Arguments @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLEARUSERDATA")
+    Assert-Uninstalled
+    if ((Test-Path -LiteralPath $UserSettings) -or (Test-Path -LiteralPath $UserDataRoot)) {
+        throw "CLEARUSERDATA uninstall left settings or cache behind."
+    }
 
     $results += [PSCustomObject]@{
         Cycle = $iteration
         FreshInstall = "passed"
         OverwriteUpgrade = "passed"
-        Uninstall = "passed"
+        PreserveUninstall = "passed"
+        ClearUninstall = "passed"
         ElapsedSeconds = [Math]::Round(((Get-Date) - $started).TotalSeconds, 2)
     }
 }
 
 $results | Format-Table -AutoSize
-Write-Host "Validated $Iterations fresh installs, $Iterations overwrite upgrades, and $Iterations clean uninstalls."
+Write-Host "Validated $Iterations installs/upgrades plus preserve-data and clear-data uninstalls."

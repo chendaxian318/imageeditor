@@ -43,6 +43,7 @@ from ..batch import (
     export_batch_log,
 )
 from ..commands import EditCommand
+from ..diagnostics import CrashStore, DiagnosticReporter
 from ..document import Document, DocumentState
 from ..dpi import DpiManager, dpi_scale, enable_process_dpi_awareness, monitor_work_area
 from ..files import (
@@ -81,8 +82,17 @@ from ..renderer import (
     render_image,
 )
 from ..session import SessionStore
-from ..settings import SettingsStore
+from ..settings import SETTINGS_SCHEMA_VERSION, SettingsStore
 from ..theme import ThemeManager, resolve_theme
+from ..update_security import load_trusted_keys, trusted_keys_path
+from ..updater import (
+    UpdateCache,
+    UpdateError,
+    UpdateManifest,
+    UpdateService,
+    launch_installer,
+)
+from ..version import __version__
 from ..windows_drop import WindowsFileDrop
 from .curve_editor import CurveEditor
 
@@ -131,13 +141,15 @@ class ImageEditorApp(tk.Tk):
         enable_process_dpi_awareness()
         super().__init__()
         self.settings_store = settings_store or SettingsStore()
-        initial_settings = self.settings_store.load()
+        initial_settings = self.settings_store.load_migrated()
         self.image_loader = image_loader or ImageLoader(
             max_workers=max(1, min(8, int(initial_settings.get("decode_workers", 2)))),
             cache_size=max(1, min(20, int(initial_settings.get("preview_cache", 3)))),
         )
         self.preview_renderer = preview_renderer or PreviewRenderer()
         self.session_store = session_store or SessionStore()
+        self.diagnostic_reporter = DiagnosticReporter()
+        self.crash_store = CrashStore()
         self.localizer = Localizer(str(initial_settings.get("locale", "zh-CN")))
         self.theme_manager = ThemeManager(self)
         self.dpi_manager = DpiManager(self)
@@ -227,6 +239,8 @@ class ImageEditorApp(tk.Tk):
         self.theme_mode_var = tk.StringVar(value="system")
         self.decode_workers_var = tk.IntVar(value=2)
         self.preview_cache_var = tk.IntVar(value=3)
+        self.update_channel_var = tk.StringVar(value="stable")
+        self.crash_reporting_consent_var = tk.BooleanVar(value=False)
         self.onboarding_completed = False
         self._theme_poll_job: str | None = None
         self._startup_jobs: list[str] = []
@@ -319,6 +333,7 @@ class ImageEditorApp(tk.Tk):
         self._startup_jobs.append(self.after(250, self._offer_session_recovery))
         self._startup_jobs.append(self.after(650, self._offer_batch_recovery))
         self._startup_jobs.append(self.after(900, self._offer_onboarding))
+        self._startup_jobs.append(self.after(1200, self._offer_crash_report))
         self._theme_poll_job = self.after(2000, self._poll_system_theme)
 
     def _setup_experience(self) -> None:
@@ -345,6 +360,24 @@ class ImageEditorApp(tk.Tk):
         )
         self._name_interactive_widgets(self)
         self.bind_all("<Map>", self._on_accessible_widget_map, add="+")
+
+    def report_callback_exception(
+        self,
+        exception_type: type[BaseException],
+        exception: BaseException,
+        traceback_value: object,
+    ) -> None:
+        self.crash_store.record(
+            exception_type,
+            exception,
+            traceback_value if hasattr(traceback_value, "tb_frame") else None,
+            "tk-main",
+        )
+        messagebox.showerror(
+            APP_NAME,
+            "程序遇到错误，已在本机保存脱敏诊断记录。可从“信息”菜单导出问题报告。",
+            parent=self,
+        )
 
     def _refresh_accessible_names(self) -> None:
         set_accessible_name(self.canvas, self.localizer.gettext("accessibility_canvas"))
@@ -1181,6 +1214,7 @@ class ImageEditorApp(tk.Tk):
         info_menu.add_command(
             label="图片属性", accelerator="Alt+Enter", command=self.show_properties
         )
+        info_menu.add_command(label="导出问题报告...", command=self.export_diagnostic_report)
         info_menu.add_command(label="快捷键帮助", accelerator="F1", command=self.show_shortcut_help)
         info_menu.add_command(label="首次使用引导", command=self.show_onboarding)
         self.menu_bar.add_cascade(label="信息", menu=info_menu, underline=0)
@@ -1516,11 +1550,45 @@ class ImageEditorApp(tk.Tk):
             text=self.localizer.gettext("offline_ready"),
             style="Accent.TLabel",
         ).pack(anchor="w", pady=(18, 0))
+        ttk.Checkbutton(
+            privacy,
+            text=self.localizer.gettext("crash_consent"),
+            variable=self.crash_reporting_consent_var,
+        ).pack(anchor="w", pady=(18, 8))
+        ttk.Button(
+            privacy,
+            text=self.localizer.gettext("export_diagnostic_report"),
+            command=self.export_diagnostic_report,
+        ).pack(anchor="w")
         ttk.Label(
             updates,
             text=self.localizer.gettext("update_text"),
             wraplength=600,
             justify="left",
+        ).pack(anchor="w")
+        ttk.Radiobutton(
+            updates,
+            text=self.localizer.gettext("stable_channel"),
+            variable=self.update_channel_var,
+            value="stable",
+        ).pack(anchor="w", pady=(18, 4))
+        ttk.Radiobutton(
+            updates,
+            text=self.localizer.gettext("beta_channel"),
+            variable=self.update_channel_var,
+            value="beta",
+        ).pack(anchor="w", pady=4)
+        ttk.Button(
+            updates,
+            text=self.localizer.gettext("check_updates"),
+            command=self.check_for_updates,
+        ).pack(anchor="w", pady=(18, 6))
+        rollback = UpdateCache().rollback_installer()
+        ttk.Button(
+            updates,
+            text=self.localizer.gettext("rollback_update"),
+            command=self.rollback_update,
+            state="normal" if rollback else "disabled",
         ).pack(anchor="w")
         ttk.Label(
             associations,
@@ -1591,6 +1659,131 @@ class ImageEditorApp(tk.Tk):
             startfile("ms-settings:defaultapps?registeredAppUser=LightImageEditor")
         except OSError as error:
             messagebox.showerror(APP_NAME, str(error), parent=self)
+
+    def export_diagnostic_report(self) -> None:
+        notes = simpledialog.askstring(
+            APP_NAME,
+            "请简要描述问题和复现步骤（报告会自动脱敏）：",
+            parent=self,
+        )
+        if notes is None:
+            return
+        target = filedialog.asksaveasfilename(
+            title="导出脱敏问题报告",
+            defaultextension=".zip",
+            initialfile=f"LightImageEditor-diagnostics-{__version__}.zip",
+            filetypes=[("ZIP", "*.zip")],
+            parent=self,
+        )
+        if not target:
+            return
+        try:
+            saved = self.diagnostic_reporter.export(
+                target,
+                self.settings_store.load_migrated(),
+                notes,
+            )
+        except OSError as error:
+            messagebox.showerror(APP_NAME, f"问题报告导出失败：{error}", parent=self)
+            return
+        self.status_var.set(f"脱敏问题报告已导出：{saved}")
+        messagebox.showinfo(APP_NAME, f"问题报告已保存：\n{saved}", parent=self)
+
+    def _offer_crash_report(self) -> None:
+        pending = self.crash_store.pending()
+        if not pending:
+            return
+        if messagebox.askyesno(
+            APP_NAME,
+            f"检测到 {len(pending)} 份尚未处理的崩溃记录。是否现在导出脱敏问题报告？",
+            parent=self,
+        ):
+            self.export_diagnostic_report()
+
+    def _update_service(self) -> UpdateService:
+        keys = load_trusted_keys(trusted_keys_path())
+        if not keys:
+            raise UpdateError("没有配置可信发布清单公钥")
+        return UpdateService(keys)
+
+    def check_for_updates(self) -> None:
+        channel = self.update_channel_var.get()
+        self._save_config()
+        self.status_var.set("正在主动检查更新...")
+
+        def worker() -> None:
+            try:
+                service = self._update_service()
+                manifest = service.check(channel, __version__)
+            except Exception as error:
+                message = str(error)
+                self.after(0, lambda: self._show_update_error(message))
+                return
+            self.after(0, lambda: self._offer_update(service, manifest))
+
+        threading.Thread(target=worker, name="manual-update-check", daemon=True).start()
+
+    def _show_update_error(self, message: str) -> None:
+        self.status_var.set("更新检查安全失败")
+        messagebox.showwarning(
+            APP_NAME,
+            f"未安装任何内容。\n\n{message}",
+            parent=self,
+        )
+
+    def _offer_update(self, service: UpdateService, manifest: UpdateManifest | None) -> None:
+        if manifest is None:
+            self.status_var.set("当前通道已是最新版本")
+            messagebox.showinfo(APP_NAME, "当前通道已是最新版本。", parent=self)
+            return
+        version = manifest.version
+        if not messagebox.askyesno(
+            APP_NAME,
+            f"发现版本 {version}。是否下载并验证安装包？",
+            parent=self,
+        ):
+            return
+        self.status_var.set(f"正在下载并验证版本 {version}...")
+
+        def worker() -> None:
+            try:
+                installer = service.download(manifest)
+            except Exception as error:
+                message = str(error)
+                self.after(0, lambda: self._show_update_error(message))
+                return
+            self.after(0, lambda: self._launch_verified_update(installer, version))
+
+        threading.Thread(target=worker, name="manual-update-download", daemon=True).start()
+
+    def _launch_verified_update(self, installer: Path, version: str) -> None:
+        self.status_var.set(f"版本 {version} 已通过全部安全校验")
+        if not messagebox.askyesno(
+            APP_NAME,
+            "安装包的清单签名、哈希和 Authenticode 均已验证。现在安装吗？",
+            parent=self,
+        ):
+            return
+        try:
+            launch_installer(installer)
+        except UpdateError as error:
+            self._show_update_error(str(error))
+
+    def rollback_update(self) -> None:
+        installer = UpdateCache().rollback_installer()
+        if installer is None:
+            messagebox.showinfo(APP_NAME, "没有可用的已验证回滚安装包。", parent=self)
+            return
+        if not messagebox.askyesno(
+            APP_NAME,
+            f"将使用已验证安装包回滚：\n{installer.name}\n\n是否继续？",
+            parent=self,
+        ):
+            return
+        try:
+            launch_installer(installer)
+        except UpdateError as error:
+            self._show_update_error(str(error))
 
     def show_shortcut_help(self) -> None:
         window = tk.Toplevel(self)
@@ -2268,7 +2461,7 @@ class ImageEditorApp(tk.Tk):
         )
 
     def _load_config(self) -> None:
-        data = self.settings_store.load()
+        data = self.settings_store.load_migrated()
         locale = str(data.get("locale", "zh-CN"))
         if locale not in SUPPORTED_LOCALES:
             locale = "zh-CN"
@@ -2281,6 +2474,9 @@ class ImageEditorApp(tk.Tk):
         self.decode_workers_var.set(max(1, min(8, int(data.get("decode_workers", 2)))))
         self.preview_cache_var.set(max(1, min(20, int(data.get("preview_cache", 3)))))
         self.onboarding_completed = bool(data.get("onboarding_completed", False))
+        channel = str(data.get("update_channel", "stable"))
+        self.update_channel_var.set(channel if channel in {"stable", "beta"} else "stable")
+        self.crash_reporting_consent_var.set(bool(data.get("crash_reporting_consent", False)))
         self.format_var.set(data.get("format", "JPEG"))
         self.quality_var.set(int(data.get("quality", 85)))
         self.target_size_var.set(str(data.get("target_size_kb", "") or ""))
@@ -2342,45 +2538,51 @@ class ImageEditorApp(tk.Tk):
         self._saved_geometry = str(geometry) if isinstance(geometry, str) else ""
 
     def _save_config(self) -> None:
-        data = {
-            "locale": self.locale_var.get(),
-            "theme_mode": self.theme_mode_var.get(),
-            "decode_workers": self.decode_workers_var.get(),
-            "preview_cache": self.preview_cache_var.get(),
-            "onboarding_completed": self.onboarding_completed,
-            "format": self.format_var.get(),
-            "quality": self.quality_var.get(),
-            "target_size_kb": self.target_size_var.get().strip(),
-            "filename_prefix": self.filename_prefix_var.get().strip(),
-            "filename_suffix": self.filename_suffix_var.get().strip(),
-            "watermark_text": self.watermark_text_var.get().strip(),
-            "watermark_position": self.watermark_position_var.get(),
-            "watermark_opacity": self.watermark_opacity_var.get(),
-            "watermark_size_percent": self.watermark_size_var.get(),
-            "reveal_after_save": self.reveal_after_save_var.get(),
-            "recent_files": self.recent_files[:8],
-            "recent_directories": self.recent_directories[:8],
-            "recent_projects": self.recent_projects[:8],
-            "recent_export_directories": self.recent_export_directories[:8],
-            "favorite_actions": self.favorite_actions,
-            "custom_shortcuts": self.custom_shortcuts,
-            "restore_workspace": self.restore_workspace_var.get(),
-            "last_project": self.last_project,
-            "annotation_tool": self.annotation_tool_var.get(),
-            "edit_panel_visible": self.edit_panel_visible_var.get(),
-            "slideshow_interval": self.slideshow_interval_var.get(),
-            "slideshow_loop": self.slideshow_loop_var.get(),
-            "preserve_metadata": self.preserve_metadata_var.get(),
-            "backup_on_overwrite": self.backup_on_overwrite_var.get(),
-            "batch_concurrency": self.batch_concurrency_var.get(),
-            "batch_memory_mb": self.batch_memory_var.get(),
-            "batch_rename_template": self.batch_rename_template_var.get(),
-            "batch_conflict_policy": self.batch_conflict_var.get(),
-            "batch_strip_metadata": self.batch_strip_metadata_var.get(),
-            "batch_preserve_animation": self.batch_preserve_animation_var.get(),
-            "export_preset": self.export_preset_var.get(),
-            "window_geometry": self._saved_geometry or self.geometry(),
-        }
+        data = self.settings_store.load_migrated()
+        data.update(
+            {
+                "schema_version": SETTINGS_SCHEMA_VERSION,
+                "locale": self.locale_var.get(),
+                "theme_mode": self.theme_mode_var.get(),
+                "decode_workers": self.decode_workers_var.get(),
+                "preview_cache": self.preview_cache_var.get(),
+                "onboarding_completed": self.onboarding_completed,
+                "update_channel": self.update_channel_var.get(),
+                "crash_reporting_consent": self.crash_reporting_consent_var.get(),
+                "format": self.format_var.get(),
+                "quality": self.quality_var.get(),
+                "target_size_kb": self.target_size_var.get().strip(),
+                "filename_prefix": self.filename_prefix_var.get().strip(),
+                "filename_suffix": self.filename_suffix_var.get().strip(),
+                "watermark_text": self.watermark_text_var.get().strip(),
+                "watermark_position": self.watermark_position_var.get(),
+                "watermark_opacity": self.watermark_opacity_var.get(),
+                "watermark_size_percent": self.watermark_size_var.get(),
+                "reveal_after_save": self.reveal_after_save_var.get(),
+                "recent_files": self.recent_files[:8],
+                "recent_directories": self.recent_directories[:8],
+                "recent_projects": self.recent_projects[:8],
+                "recent_export_directories": self.recent_export_directories[:8],
+                "favorite_actions": self.favorite_actions,
+                "custom_shortcuts": self.custom_shortcuts,
+                "restore_workspace": self.restore_workspace_var.get(),
+                "last_project": self.last_project,
+                "annotation_tool": self.annotation_tool_var.get(),
+                "edit_panel_visible": self.edit_panel_visible_var.get(),
+                "slideshow_interval": self.slideshow_interval_var.get(),
+                "slideshow_loop": self.slideshow_loop_var.get(),
+                "preserve_metadata": self.preserve_metadata_var.get(),
+                "backup_on_overwrite": self.backup_on_overwrite_var.get(),
+                "batch_concurrency": self.batch_concurrency_var.get(),
+                "batch_memory_mb": self.batch_memory_var.get(),
+                "batch_rename_template": self.batch_rename_template_var.get(),
+                "batch_conflict_policy": self.batch_conflict_var.get(),
+                "batch_strip_metadata": self.batch_strip_metadata_var.get(),
+                "batch_preserve_animation": self.batch_preserve_animation_var.get(),
+                "export_preset": self.export_preset_var.get(),
+                "window_geometry": self._saved_geometry or self.geometry(),
+            }
+        )
         self.settings_store.save(data)
 
     def _on_configure(self, _event: tk.Event) -> None:

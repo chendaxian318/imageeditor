@@ -8,12 +8,16 @@ ROOT = Path(SPECPATH).resolve().parents[1]
 ICON = ROOT / "resources" / "icons" / "app.ico"
 VERSION_INFO = ROOT / "build" / "version" / "ImageEditor.version.txt"
 LOCALES = ROOT / "resources" / "locales"
+UPDATE_KEYS = ROOT / "resources" / "update"
 
 a = Analysis(
     [str(ROOT / "image_editor.py")],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[(str(LOCALES), "resources/locales")],
+    datas=[
+        (str(LOCALES), "resources/locales"),
+        (str(UPDATE_KEYS), "resources/update"),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

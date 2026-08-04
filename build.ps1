@@ -18,6 +18,13 @@ $AppSpec = Join-Path $Root "packaging\windows\image_editor.spec"
 $PortableSpec = Join-Path $Root "packaging\windows\image_editor_portable.spec"
 $InnoScript = Join-Path $Root "packaging\windows\LightImageEditor.iss"
 $LegalDocuments = @("LICENSE", "NOTICE.md", "PRIVACY.md", "THIRD_PARTY_LICENSES.md")
+$BetaDocuments = @(
+    "docs\beta\RELEASE_NOTES-v0.8.0-beta.md",
+    "docs\beta\KNOWN_ISSUES.md",
+    "docs\beta\BETA_PLAN.md",
+    "docs\beta\P0_P1_REGISTER.md",
+    "docs\release\UPDATE_SECURITY.md"
+)
 $InnoVersion = "7.0.2"
 $InnoInstallerUrl = "https://github.com/jrsoftware/issrc/releases/download/is-7_0_2/innosetup-7.0.2-x64.exe"
 $InnoInstallerSha256 = "5ad54ca3def786f8f4212552e54cc6d8d61329e2d24a1cfee0571d42c2684ff1"
@@ -147,6 +154,40 @@ function Get-InnoCompiler {
     return $compiler
 }
 
+function Assert-PublisherSignature {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Thumbprint
+    )
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    $actualThumbprint = ""
+    if ($null -ne $signature.SignerCertificate) {
+        $actualThumbprint = $signature.SignerCertificate.Thumbprint.Replace(" ", "").ToUpperInvariant()
+    }
+    $expectedThumbprint = $Thumbprint.Replace(" ", "").ToUpperInvariant()
+    if ($signature.Status -ne "Valid" -or $actualThumbprint -ne $expectedThumbprint) {
+        throw "Publisher signature verification failed for $Path"
+    }
+}
+
+function Sign-PublisherBinary {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not $env:IMAGEEDITOR_SIGNTOOL -or -not $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT) {
+        return
+    }
+    $timestampUrl = $env:IMAGEEDITOR_TIMESTAMP_URL
+    if (-not $timestampUrl) {
+        $timestampUrl = "http://timestamp.digicert.com"
+    }
+    Invoke-Checked $env:IMAGEEDITOR_SIGNTOOL @(
+        "sign", "/sha1", $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT,
+        "/fd", "SHA256", "/td", "SHA256", "/tr", $timestampUrl, $Path
+    )
+    Assert-PublisherSignature $Path $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT
+}
+
 Push-Location $Root
 try {
     if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
@@ -205,7 +246,7 @@ try {
         "light_image_editor", "scripts", "benchmarks",
         "test_architecture.py", "test_build_metadata.py", "test_identity_resources.py",
         "test_image_ops.py", "test_installer.py", "test_v03_safety.py",
-        "test_viewer_services.py", "test_v07_experience.py"
+        "test_viewer_services.py", "test_v07_experience.py", "test_v08_release_system.py"
     )
 
     if (-not $SkipTests) {
@@ -247,6 +288,7 @@ try {
     if (-not (Test-Path -LiteralPath $appExecutable -PathType Leaf)) {
         throw "PyInstaller did not create $appExecutable"
     }
+    Sign-PublisherBinary $appExecutable
     Copy-Item -LiteralPath $appDirectory -Destination (Join-Path $Release "LightImageEditor") -Recurse
 
     Write-Host "Building the portable onefile application..."
@@ -265,6 +307,7 @@ try {
     if (-not (Test-Path -LiteralPath $portableSource -PathType Leaf)) {
         throw "PyInstaller did not create $portableSource"
     }
+    Sign-PublisherBinary $portableSource
     Copy-Item -LiteralPath $portableSource -Destination $portableExecutable
 
     Write-Host "Building the standard per-user installer..."
@@ -281,6 +324,7 @@ try {
     if (-not (Test-Path -LiteralPath $installerExecutable -PathType Leaf)) {
         throw "Inno Setup did not create $installerExecutable"
     }
+    Sign-PublisherBinary $installerExecutable
 
     foreach ($legalDocument in $LegalDocuments) {
         $legalSource = Join-Path $Root $legalDocument
@@ -295,6 +339,56 @@ try {
         if (-not $productVersion.StartsWith($version)) {
             throw "$(Split-Path -Leaf $binaryPath) contains product version '$productVersion'; expected '$version'."
         }
+    }
+
+    foreach ($betaDocument in $BetaDocuments) {
+        $documentSource = Join-Path $Root $betaDocument
+        if (-not (Test-Path -LiteralPath $documentSource -PathType Leaf)) {
+            throw "Required Beta document is missing: $documentSource"
+        }
+        Copy-Item -LiteralPath $documentSource -Destination (Join-Path $Release (Split-Path -Leaf $documentSource))
+    }
+
+    Invoke-Checked $Python @(
+        "-m", "scripts.generate_sbom",
+        "--lock", (Join-Path $Root "requirements.lock"),
+        "--output", (Join-Path $Release "SBOM.cdx.json")
+    )
+
+    $signingReady = (
+        $env:IMAGEEDITOR_SIGNTOOL -and
+        $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT -and
+        $env:IMAGEEDITOR_UPDATE_PRIVATE_KEY
+    )
+    if ($signingReady) {
+        Assert-PublisherSignature $appExecutable $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT
+        Assert-PublisherSignature $portableExecutable $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT
+        Assert-PublisherSignature $installerExecutable $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT
+        foreach ($channel in @("stable", "beta")) {
+            $manifestName = "update-$channel.json"
+            $assetUrl = "https://github.com/chendaxian318/imageeditor/releases/download/v$version/$setupName"
+            Invoke-Checked $Python @(
+                "-m", "scripts.generate_update_manifest",
+                "--installer", $installerExecutable,
+                "--version", $version,
+                "--channel", $channel,
+                "--url", $assetUrl,
+                "--thumbprint", $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT,
+                "--private-key", $env:IMAGEEDITOR_UPDATE_PRIVATE_KEY,
+                "--output", (Join-Path $Release $manifestName)
+            )
+        }
+    }
+    else {
+        $gate = Join-Path $Release "SIGNING_REQUIRED.txt"
+        [System.IO.File]::WriteAllText(
+            $gate,
+            "PUBLIC BETA BLOCKED: configure IMAGEEDITOR_SIGNTOOL, " +
+            "IMAGEEDITOR_AUTHENTICODE_THUMBPRINT and IMAGEEDITOR_UPDATE_PRIVATE_KEY, " +
+            "then rebuild. Unsigned binaries must not be published to an update channel.`r`n",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        Write-Warning "Unsigned local build created. Public Beta release remains blocked."
     }
 
     $checksumPath = Join-Path $Release "SHA256SUMS.txt"
@@ -322,6 +416,7 @@ try {
     Write-Host "  $Release\$portableName"
     Write-Host "  $Release\$setupName"
     Write-Host "  $Release\SHA256SUMS.txt"
+    Write-Host "  $Release\SBOM.cdx.json"
 }
 finally {
     Pop-Location

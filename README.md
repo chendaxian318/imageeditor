@@ -11,6 +11,9 @@
 - 首次启动引导、可操作的空状态，以及加载失败后的重试、另选图片和文件夹定位
 - 分类设置页覆盖外观、语言、性能、缓存、保存、元数据、隐私、更新和文件关联
 - 离线状态下所有核心功能完整可用；程序不会在后台上传图片或自动发起网络请求
+- 稳定版与测试版双更新通道；只在用户主动检查时联网，清单签名、安装包大小、SHA-256 和 Windows 发布者签名必须全部通过
+- 保留上一份已验证安装包，可由用户主动回滚；任何下载中断、篡改或签名不匹配都会安全失败
+- 本地轮转日志、异常退出记录和脱敏问题报告 ZIP；匿名崩溃上报默认关闭，发送前实行“设置同意 + 本次确认”双重许可
 - 单实例运行；连续打开图片时复用已有窗口并转发全部路径
 - 后台解码、相邻图片预取和后台预览缩放，损坏文件不会阻塞目录浏览
 - 全屏、沉浸式查看、幻灯片、播放间隔与循环设置
@@ -71,12 +74,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 构建完成后产物位于 `release`：
 
 - `LightImageEditor/`：供标准安装器使用的 `onedir` 应用目录
-- `LightImageEditor-Portable-x64-0.7.0.exe`：便携 `onefile` 版本
-- `LightImageEditor-Setup-x64-0.7.0.exe`：当前用户标准安装器，支持覆盖升级和“已安装的应用”卸载
+- `LightImageEditor-Portable-x64-0.8.0.exe`：便携 `onefile` 版本
+- `LightImageEditor-Setup-x64-0.8.0.exe`：当前用户标准安装器，支持覆盖升级和“已安装的应用”卸载
 - `LICENSE`、`NOTICE.md`、`PRIVACY.md`、`THIRD_PARTY_LICENSES.md`：随发布物和安装程序提供的权属、隐私及第三方许可说明
+- `SBOM.cdx.json`：CycloneDX 1.6 软件物料清单
+- `RELEASE_NOTES-v0.8.0-beta.md`、`KNOWN_ISSUES.md`：Beta 说明与发布门禁
 - `SHA256SUMS.txt`：本次构建产物的 SHA-256 校验值
 
-安装程序可在完成后直接打开 Windows“默认应用”设置。选择“轻量图片编辑器”，再为希望使用的图片格式确认默认关联即可。Windows 10/11 要求默认应用由用户在系统设置中确认，安装程序不会静默覆盖现有选择。覆盖升级或卸载时，安装器会通过本地 IPC 请求主程序保存或安全退出；用户取消时操作随之取消，不会强制终止进程。
+安装程序可在完成后直接打开 Windows“默认应用”设置。选择“轻量图片编辑器”，再为希望使用的图片格式确认默认关联即可。Windows 10/11 要求默认应用由用户在系统设置中确认，安装程序不会静默覆盖现有选择。覆盖升级或卸载时，安装器会通过本地 IPC 请求主程序保存或安全退出；用户取消时操作随之取消，不会强制终止进程。卸载时可选择保留或清除设置、最近记录、恢复会话、日志和缓存；静默卸载默认保留，传入 `/CLEARUSERDATA` 才会清除。
+
+公开发布还需要配置 `IMAGEEDITOR_SIGNTOOL`、`IMAGEEDITOR_AUTHENTICODE_THUMBPRINT` 和仓库外的 `IMAGEEDITOR_UPDATE_PRIVATE_KEY`。构建会签署并复验最终 EXE 后生成两个通道的签名清单；未配置时只生成带 `SIGNING_REQUIRED.txt` 的本地测试构建，不得上传到更新通道。更新安全模型与发布步骤见 `docs/release/UPDATE_SECURITY.md`。
 
 如需 HEIF/HEIC，可在开发环境中单独执行 `python -m pip install -r requirements-heif.lock`。该插件不会进入基础依赖或默认安装包；启用后应用会在启动时自动发现并注册解码器。
 
