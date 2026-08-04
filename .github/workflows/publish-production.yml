@@ -53,7 +53,7 @@ jobs:
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\inspect_release.ps1 -ReleasePath release -Output release\LOCAL_SECURITY_SCAN.json -MultiEngineEvidence release\MULTI_ENGINE_REVIEW.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m scripts.verify_production_release --gates release\V1_RELEASE_GATES.json --stability release\RC_STABILITY_LOG.json --evidence release\BUILD_PROVENANCE.json --security release\LOCAL_SECURITY_SCAN.json --release release --output release\RELEASE_GATE_STATUS.json
+          python -m scripts.verify_production_release --gates release\V1_RELEASE_GATES.json --priorities release\V1_PRIORITY_MATRIX.json --stability release\RC_STABILITY_LOG.json --evidence release\BUILD_PROVENANCE.json --security release\LOCAL_SECURITY_SCAN.json --release release --output release\RELEASE_GATE_STATUS.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Replace final evidence and publish as Latest

@@ -2,11 +2,13 @@
 
 ## 先决条件
 
-1. `V1_RELEASE_GATES.json` 中除 `V1-MALWARE` 外全部为 `passed`，并附可审计证据。
+1. `V1_RELEASE_GATES.json` 中除 `V1-MALWARE` 外全部为 `passed`，`V1_PRIORITY_MATRIX.json` 中所有 P0 均由静态状态或最终签名证据关闭，并附可审计证据。
 2. `RC_STABILITY_LOG.json` 至少包含连续 7 天且无新增/开放 P0/P1 的记录。
 3. 创建并推送指向冻结提交的 annotated tag `v1.0.0`。
 4. GitHub Actions secrets 已配置：`WINDOWS_CODE_SIGNING_PFX_BASE64`、`WINDOWS_CODE_SIGNING_PFX_PASSWORD`、`UPDATE_MANIFEST_PRIVATE_KEY_BASE64`。
 5. 代码签名证书的发布者与产品身份一致，时间戳服务可用；私钥不得写入仓库或构建日志。
+
+功能冻结后不得直接加入 P1/P2。确有必要时，优先级矩阵中的新增项必须设置 `introduced_after_freeze: true`，并记录 `scope_exchange.removed_id`、新增与移除工作量；移除工作量不得小于新增工作量。
 
 ## 阶段一：生成签名草稿
 

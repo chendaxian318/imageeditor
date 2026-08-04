@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "release": "1.0.0",
+  "feature_freeze_commit": "65a174618488dbef197dc5be27ac4911d52ffc94",
+  "policy": "Every P0 must pass. Any P1/P2 introduced after feature freeze requires an equal-or-larger removed scope item.",
+  "items": [
+    {"id": "P0-GIT", "priority": "P0", "title": "Git baseline and reproducible source history", "status": "passed", "evidence": [".gitignore", "docs/release/source-provenance.md", "BUILD_PROVENANCE.json"], "introduced_after_freeze": false},
+    {"id": "P0-LICENSE", "priority": "P0", "title": "First-party and build-tool redistribution rights", "status": "blocked", "evidence": ["LICENSE", "NOTICE.md", "THIRD_PARTY_LICENSES.md"], "closure": "Archive written first-party redistribution rights and the required commercial Inno Setup licence", "introduced_after_freeze": false},
+    {"id": "P0-MODULES", "priority": "P0", "title": "Modular application architecture", "status": "passed", "evidence": ["test_architecture.py", "light_image_editor/app.py", "light_image_editor/ui/main_window.py"], "introduced_after_freeze": false},
+    {"id": "P0-ASYNC", "priority": "P0", "title": "Asynchronous preview and decode", "status": "passed", "evidence": ["light_image_editor/preview.py", "light_image_editor/image_loader.py", "test_viewer_services.py"], "introduced_after_freeze": false},
+    {"id": "P0-SINGLE", "priority": "P0", "title": "Single instance and activation forwarding", "status": "passed", "evidence": ["light_image_editor/single_instance.py", "scripts/test_single_instance.ps1", "test_viewer_services.py"], "introduced_after_freeze": false},
+    {"id": "P0-NAV", "priority": "P0", "title": "Fast ordered image navigation", "status": "passed", "evidence": ["light_image_editor/navigation.py", "benchmarks/run_benchmarks.py", "test_viewer_services.py"], "introduced_after_freeze": false},
+    {"id": "P0-SAFE-FILES", "priority": "P0", "title": "Safe file operations and Recycle Bin deletion", "status": "passed", "evidence": ["light_image_editor/files.py", "test_viewer_services.py"], "introduced_after_freeze": false},
+    {"id": "P0-ATOMIC", "priority": "P0", "title": "Atomic save, conflict and backup policy", "status": "passed", "evidence": ["light_image_editor/document.py", "test_v03_safety.py"], "introduced_after_freeze": false},
+    {"id": "P0-FIDELITY", "priority": "P0", "title": "Metadata, orientation and colour fidelity", "status": "passed", "evidence": ["light_image_editor/metadata.py", "light_image_editor/preview.py", "test_v03_safety.py"], "introduced_after_freeze": false},
+    {"id": "P0-INSTALL", "priority": "P0", "title": "Standard install, upgrade and uninstall", "status": "passed", "evidence": ["packaging/windows/LightImageEditor.iss", "scripts/test_install_cycles.ps1", "test_installer.py"], "introduced_after_freeze": false},
+    {"id": "P0-TEST", "priority": "P0", "title": "Automated tests and release quality gates", "status": "passed", "evidence": ["test_v10_production_release.py", "benchmarks/", "scripts/run_soak_tests.py"], "introduced_after_freeze": false},
+    {"id": "P0-SIGN", "priority": "P0", "title": "Timestamped production code signing", "status": "external", "evidence": ["scripts/inspect_release.ps1", "LOCAL_SECURITY_SCAN.json"], "closure": "All final and rollback EXEs are Valid, timestamped and match the approved publisher thumbprint", "introduced_after_freeze": false},
+
+    {"id": "P1-NONDESTRUCTIVE", "priority": "P1", "title": "Non-destructive editing", "status": "passed", "evidence": ["light_image_editor/commands.py", "light_image_editor/renderer.py", "test_v04_core.py"], "introduced_after_freeze": false},
+    {"id": "P1-RECOVERY", "priority": "P1", "title": "Project and crash recovery", "status": "passed", "evidence": ["light_image_editor/projects.py", "light_image_editor/session.py", "test_v04_projects.py"], "introduced_after_freeze": false},
+    {"id": "P1-ANNOTATION", "priority": "P1", "title": "Annotation and privacy tools", "status": "passed", "evidence": ["light_image_editor/annotations.py", "test_v05_annotations.py"], "introduced_after_freeze": false},
+    {"id": "P1-BATCH", "priority": "P1", "title": "Versioned batch presets", "status": "passed", "evidence": ["light_image_editor/batch.py", "test_v06_batch_formats.py"], "introduced_after_freeze": false},
+    {"id": "P1-FORMATS", "priority": "P1", "title": "AVIF and optional HEIF", "status": "passed", "evidence": ["light_image_editor/formats.py", "requirements-heif.lock", "test_v06_batch_formats.py"], "introduced_after_freeze": false},
+    {"id": "P1-DPI-THEME", "priority": "P1", "title": "High DPI and dark mode", "status": "passed", "evidence": ["light_image_editor/dpi.py", "light_image_editor/theme.py", "test_v07_experience.py"], "introduced_after_freeze": false},
+
+    {"id": "P2-ENGLISH", "priority": "P2", "title": "English interface", "status": "passed", "evidence": ["resources/locales/en-US.json", "test_v07_experience.py"], "introduced_after_freeze": false},
+    {"id": "P2-PLUGINS", "priority": "P2", "title": "Plugin system", "status": "deferred", "introduced_after_freeze": false},
+    {"id": "P2-OCR", "priority": "P2", "title": "OCR", "status": "deferred", "introduced_after_freeze": false},
+    {"id": "P2-CUTOUT", "priority": "P2", "title": "Smart background removal", "status": "deferred", "introduced_after_freeze": false},
+    {"id": "P2-SUPERRES", "priority": "P2", "title": "Super resolution", "status": "deferred", "introduced_after_freeze": false},
+    {"id": "P2-EXPLORER", "priority": "P2", "title": "Explorer preview extension", "status": "deferred", "introduced_after_freeze": false},
+    {"id": "P2-STORE", "priority": "P2", "title": "Microsoft Store", "status": "deferred", "introduced_after_freeze": false}
+  ]
+}

@@ -62,6 +62,17 @@ class ProductionGateTests(unittest.TestCase):
                 {"id": "V1-MALWARE", "status": "blocked", "closure": "external scan"},
             ],
         }
+        self.priorities: dict[str, object] = {
+            "release": "1.0.0",
+            "items": [
+                {
+                    "id": "P0-SIGN",
+                    "priority": "P0",
+                    "status": "external",
+                    "introduced_after_freeze": False,
+                }
+            ],
+        }
         start = date(2026, 8, 1)
         self.stability: dict[str, object] = {
             "required_consecutive_days": 7,
@@ -93,6 +104,7 @@ class ProductionGateTests(unittest.TestCase):
             "SHA256SUMS.txt",
             "SBOM.cdx.json",
             "THIRD_PARTY_LICENSES.md",
+            "V1_PRIORITY_MATRIX.json",
             "RELEASE_NOTES-v1.0.0.md",
             "POST_RELEASE_MONITORING.md",
             "HOTFIX_RUNBOOK.md",
@@ -132,6 +144,7 @@ class ProductionGateTests(unittest.TestCase):
             self.assertEqual(
                 verify(
                     self.gates,
+                    self.priorities,
                     self.stability,
                     self.evidence,
                     security,
@@ -141,7 +154,13 @@ class ProductionGateTests(unittest.TestCase):
                 [],
             )
             blockers = verify(
-                self.gates, self.stability, self.evidence, security, release, candidate=False
+                self.gates,
+                self.priorities,
+                self.stability,
+                self.evidence,
+                security,
+                release,
+                candidate=False,
             )
             self.assertTrue(any("V1-MALWARE" in blocker for blocker in blockers))
 
@@ -151,6 +170,47 @@ class ProductionGateTests(unittest.TestCase):
         )
         self.assertTrue(any(gate["status"] == "blocked" for gate in gates["gates"]))
         self.assertEqual(gates["release"], "1.0.0")
+        priorities = json.loads(
+            (ROOT / "docs/release/V1_PRIORITY_MATRIX.json").read_text(encoding="utf-8")
+        )
+        incomplete_p0 = [
+            item["id"]
+            for item in priorities["items"]
+            if item["priority"] == "P0" and item["status"] != "passed"
+        ]
+        self.assertEqual(incomplete_p0, ["P0-LICENSE", "P0-SIGN"])
+
+    def test_new_p1_or_p2_requires_equal_scope_exchange(self) -> None:
+        priorities = {
+            "release": "1.0.0",
+            "items": [
+                {
+                    "id": "P2-OCR",
+                    "priority": "P2",
+                    "status": "passed",
+                    "introduced_after_freeze": True,
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            release = Path(directory)
+            self.create_bundle(release)
+            security = {
+                "AuthenticodePassed": True,
+                "DefenderStatus": "passed",
+                "MultiEngineReview": "required-before-publication",
+                "PublicReleaseReady": False,
+            }
+            blockers = verify(
+                self.gates,
+                priorities,
+                self.stability,
+                self.evidence,
+                security,
+                release,
+                candidate=True,
+            )
+            self.assertTrue(any("V1-SCOPE" in blocker for blocker in blockers))
 
 
 class ProductionContractTests(unittest.TestCase):
@@ -161,6 +221,7 @@ class ProductionContractTests(unittest.TestCase):
             "docs/release/RELEASE_PAGE-v1.0.0.md",
             "docs/release/POST_RELEASE_MONITORING.md",
             "docs/release/HOTFIX_RUNBOOK.md",
+            "docs/release/V1_PRIORITY_MATRIX.json",
             ".github/workflows/production-candidate.yml",
             ".github/workflows/publish-production.yml",
         ):

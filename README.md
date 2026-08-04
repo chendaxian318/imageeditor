@@ -90,6 +90,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
 v1.0 正式发布采用签名草稿与公开发布两个阶段。草稿阶段要求上一版本签名回滚包并生成 GitHub artifact attestation；公开阶段下载同一批资产，绑定多引擎审核哈希并重新验证签名、Defender、SHA-256、SBOM、标签、提交和全部发布门禁。完整步骤见 `docs/release/PRODUCTION_RELEASE_RUNBOOK.md`，未通过 `RELEASE_GATE_STATUS.json` 时禁止创建公开稳定版。
 
+`docs/release/V1_PRIORITY_MATRIX.json` 是 v1.0 范围冻结的机器台账：任何 P0 未关闭都会阻止候选构建；冻结后新增 P1/P2 必须记录一项工作量相等或更大的换出范围，否则生产验证器失败。
+
 正式发布候选还需运行标准性能比较和长稳测试：
 
 ```powershell

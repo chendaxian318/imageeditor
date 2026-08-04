@@ -12,6 +12,7 @@ from typing import Any
 
 def verify(
     gates: dict[str, Any],
+    priorities: dict[str, Any],
     stability: dict[str, Any],
     evidence: dict[str, Any],
     security: dict[str, Any],
@@ -30,6 +31,25 @@ def verify(
     ]
     if gates.get("release") != expected_version:
         blockers.append("V1-VERSION: release gate file does not target 1.0.0")
+    if priorities.get("release") != expected_version:
+        blockers.append("V1-PRIORITY: priority matrix does not target 1.0.0")
+    for item in priorities.get("items", []):
+        item_id = str(item.get("id", "unknown"))
+        item_status = item.get("status")
+        signing_evidence_passed = (
+            item_id == "P0-SIGN" and security.get("AuthenticodePassed") is True
+        )
+        if item.get("priority") == "P0" and item_status != "passed" and not signing_evidence_passed:
+            blockers.append(f"V1-PRIORITY: {item_id} is not complete")
+        if item.get("introduced_after_freeze") is True:
+            exchange = item.get("scope_exchange")
+            if not isinstance(exchange, dict):
+                blockers.append(f"V1-SCOPE: {item_id} was added without an exchanged scope item")
+                continue
+            removed = int(exchange.get("removed_effort_points", 0))
+            added = int(exchange.get("added_effort_points", 0))
+            if not exchange.get("removed_id") or added <= 0 or removed < added:
+                blockers.append(f"V1-SCOPE: {item_id} does not have an equal scope exchange")
 
     entries = stability.get("entries", [])
     required = int(stability.get("required_consecutive_days", 7))
@@ -98,6 +118,7 @@ def verify(
         "SHA256SUMS.txt",
         "SBOM.cdx.json",
         "THIRD_PARTY_LICENSES.md",
+        "V1_PRIORITY_MATRIX.json",
         "RELEASE_NOTES-v1.0.0.md",
         "POST_RELEASE_MONITORING.md",
         "HOTFIX_RUNBOOK.md",
@@ -110,6 +131,7 @@ def verify(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gates", type=Path, required=True)
+    parser.add_argument("--priorities", type=Path, required=True)
     parser.add_argument("--stability", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--security", type=Path, required=True)
@@ -120,6 +142,7 @@ def main() -> int:
     arguments = parser.parse_args()
     blockers = verify(
         json.loads(arguments.gates.read_text(encoding="utf-8")),
+        json.loads(arguments.priorities.read_text(encoding="utf-8")),
         json.loads(arguments.stability.read_text(encoding="utf-8")),
         json.loads(arguments.evidence.read_text(encoding="utf-8")),
         json.loads(arguments.security.read_text(encoding="utf-8-sig")),

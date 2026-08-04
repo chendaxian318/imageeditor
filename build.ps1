@@ -26,6 +26,7 @@ $ReleaseDocuments = @(
     "docs\release\RELEASE_NOTES-v1.0.0.md",
     "docs\release\RELEASE_PAGE-v1.0.0.md",
     "docs\release\V1_RELEASE_GATES.json",
+    "docs\release\V1_PRIORITY_MATRIX.json",
     "docs\release\POST_RELEASE_MONITORING.md",
     "docs\release\HOTFIX_RUNBOOK.md",
     "docs\release\PRODUCTION_RELEASE_RUNBOOK.md",
@@ -489,6 +490,7 @@ try {
     $releaseGateArguments = @(
         "-m", "scripts.verify_production_release",
         "--gates", (Join-Path $Root "docs\release\V1_RELEASE_GATES.json"),
+        "--priorities", (Join-Path $Root "docs\release\V1_PRIORITY_MATRIX.json"),
         "--stability", (Join-Path $Root "docs\release\RC_STABILITY_LOG.json"),
         "--evidence", (Join-Path $Release "BUILD_PROVENANCE.json"),
         "--security", (Join-Path $Release "LOCAL_SECURITY_SCAN.json"),
