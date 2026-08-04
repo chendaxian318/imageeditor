@@ -54,6 +54,32 @@ class UpdateManifest:
     release_notes_url: str
     asset: UpdateAsset
     key_id: str
+    rollback_version: str | None = None
+    rollback_asset: UpdateAsset | None = None
+
+
+def _parse_asset(data: dict[str, Any]) -> UpdateAsset:
+    return UpdateAsset(
+        url=str(data["url"]),
+        sha256=str(data["sha256"]).casefold(),
+        size=int(data["size"]),
+        authenticode_thumbprints=tuple(
+            str(value).replace(" ", "").upper() for value in data["authenticode_thumbprints"]
+        ),
+    )
+
+
+def _validate_asset(asset: UpdateAsset, label: str) -> None:
+    if not asset.url.startswith("https://"):
+        raise UpdateError(f"{label} asset must use HTTPS")
+    if len(asset.sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in asset.sha256
+    ):
+        raise UpdateError(f"invalid {label} asset hash")
+    if asset.size <= 0 or asset.size > MAX_INSTALLER_BYTES:
+        raise UpdateError(f"invalid {label} asset size")
+    if not asset.authenticode_thumbprints:
+        raise UpdateError(f"{label} asset has no trusted Authenticode publisher")
 
 
 def version_tuple(version: str) -> tuple[int, int, int]:
@@ -85,15 +111,10 @@ def parse_signed_manifest(
     try:
         channel = str(payload["channel"])
         asset_data = payload["assets"]["windows_x64"]
-        asset = UpdateAsset(
-            url=str(asset_data["url"]),
-            sha256=str(asset_data["sha256"]).casefold(),
-            size=int(asset_data["size"]),
-            authenticode_thumbprints=tuple(
-                str(value).replace(" ", "").upper()
-                for value in asset_data["authenticode_thumbprints"]
-            ),
-        )
+        asset = _parse_asset(asset_data)
+        rollback_data = payload["assets"].get("rollback_windows_x64")
+        rollback_asset = _parse_asset(rollback_data) if rollback_data is not None else None
+        rollback_version = str(rollback_data["version"]) if rollback_data is not None else None
         manifest = UpdateManifest(
             channel=channel,
             version=str(payload["version"]),
@@ -102,6 +123,8 @@ def parse_signed_manifest(
             release_notes_url=str(payload.get("release_notes_url", "")),
             asset=asset,
             key_id=key_id,
+            rollback_version=rollback_version,
+            rollback_asset=rollback_asset,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise UpdateError("update manifest is incomplete") from error
@@ -109,16 +132,14 @@ def parse_signed_manifest(
         raise UpdateError("update channel mismatch")
     version_tuple(manifest.version)
     version_tuple(manifest.minimum_version)
-    if not asset.url.startswith("https://"):
-        raise UpdateError("update asset must use HTTPS")
-    if len(asset.sha256) != 64 or any(
-        character not in "0123456789abcdef" for character in asset.sha256
-    ):
-        raise UpdateError("invalid update asset hash")
-    if asset.size <= 0 or asset.size > MAX_INSTALLER_BYTES:
-        raise UpdateError("invalid update asset size")
-    if not asset.authenticode_thumbprints:
-        raise UpdateError("update asset has no trusted Authenticode publisher")
+    _validate_asset(asset, "update")
+    if manifest.rollback_asset is not None:
+        if manifest.rollback_version is None:
+            raise UpdateError("rollback asset has no version")
+        version_tuple(manifest.rollback_version)
+        if version_tuple(manifest.rollback_version) >= version_tuple(manifest.version):
+            raise UpdateError("rollback version must be older than update version")
+        _validate_asset(manifest.rollback_asset, "rollback")
     return manifest
 
 

@@ -52,6 +52,9 @@ def create_evidence(root: Path, release: Path, tests_executed: bool) -> dict[str
         )
     commit = _git(root, "rev-parse", "HEAD")
     tags = [item for item in _git(root, "tag", "--points-at", "HEAD").splitlines() if item]
+    annotated_tags = [
+        tag for tag in tags if _git(root, "cat-file", "-t", f"refs/tags/{tag}") == "tag"
+    ]
     return {
         "schema_version": 1,
         "generated_utc": datetime.now(UTC).isoformat(),
@@ -60,6 +63,7 @@ def create_evidence(root: Path, release: Path, tests_executed: bool) -> dict[str
             "repository": "https://github.com/chendaxian318/imageeditor",
             "commit": commit,
             "tags": tags,
+            "annotated_tags": annotated_tags,
             "dirty": bool(_git(root, "status", "--porcelain")),
         },
         "build": {

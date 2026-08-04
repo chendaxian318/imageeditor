@@ -1,0 +1,67 @@
+name: Publish externally reviewed production release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing draft release and annotated tag
+        required: true
+        default: v1.0.0
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          architecture: x64
+          python-version: "3.12.10"
+
+      - name: Download the exact draft assets
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          gh release download "${{ inputs.release_tag }}" --dir release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path release\MULTI_ENGINE_REVIEW.json)) { throw 'Upload MULTI_ENGINE_REVIEW.json to the draft after scanning the exact assets.' }
+          Expand-Archive release\LightImageEditor-Onedir-x64-1.0.0.zip -DestinationPath release -Force
+
+      - name: Verify recursive SHA-256 manifest
+        shell: powershell
+        run: |
+          $failures = @()
+          Get-Content release\SHA256SUMS.txt | ForEach-Object {
+            if ($_ -notmatch '^([0-9a-fA-F]{64})  (.+)$') { $failures += "invalid: $_"; return }
+            $path = Join-Path release $Matches[2]
+            if (-not (Test-Path -LiteralPath $path) -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ine $Matches[1]) { $failures += $Matches[2] }
+          }
+          if ($failures.Count) { throw "Checksum verification failed: $($failures -join ', ')" }
+
+      - name: Re-run signature, Defender and reviewed-hash checks
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\inspect_release.ps1 -ReleasePath release -Output release\LOCAL_SECURITY_SCAN.json -MultiEngineEvidence release\MULTI_ENGINE_REVIEW.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m scripts.verify_production_release --gates release\V1_RELEASE_GATES.json --stability release\RC_STABILITY_LOG.json --evidence release\BUILD_PROVENANCE.json --security release\LOCAL_SECURITY_SCAN.json --release release --output release\RELEASE_GATE_STATUS.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Replace final evidence and publish as Latest
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ inputs.release_tag }}" release\LOCAL_SECURITY_SCAN.json release\RELEASE_GATE_STATUS.json --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release edit "${{ inputs.release_tag }}" --verify-tag --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

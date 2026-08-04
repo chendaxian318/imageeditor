@@ -67,7 +67,8 @@ Source: "{#SourcePath}\..\..\NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\..\..\PRIVACY.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\..\..\THIRD_PARTY_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\..\..\docs\USER_MANUAL.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourcePath}\..\..\docs\release\RELEASE_NOTES-v0.9.0-rc.1.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourcePath}\..\..\docs\release\RELEASE_NOTES-v1.0.0.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourcePath}\..\..\docs\DEFAULT_APP_HELP.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"

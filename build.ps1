@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param(
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [switch]$Production,
+    [switch]$ProductionCandidate,
+    [string]$RollbackInstaller = "",
+    [string]$RollbackVersion = "0.9.0"
 )
 
 Set-StrictMode -Version Latest
@@ -19,7 +23,14 @@ $PortableSpec = Join-Path $Root "packaging\windows\image_editor_portable.spec"
 $InnoScript = Join-Path $Root "packaging\windows\LightImageEditor.iss"
 $LegalDocuments = @("LICENSE", "NOTICE.md", "PRIVACY.md", "THIRD_PARTY_LICENSES.md")
 $ReleaseDocuments = @(
-    "docs\release\RELEASE_NOTES-v0.9.0-rc.1.md",
+    "docs\release\RELEASE_NOTES-v1.0.0.md",
+    "docs\release\RELEASE_PAGE-v1.0.0.md",
+    "docs\release\V1_RELEASE_GATES.json",
+    "docs\release\POST_RELEASE_MONITORING.md",
+    "docs\release\HOTFIX_RUNBOOK.md",
+    "docs\release\PRODUCTION_RELEASE_RUNBOOK.md",
+    "docs\release\MULTI_ENGINE_REVIEW.template.json",
+    "docs\DEFAULT_APP_HELP.md",
     "docs\beta\KNOWN_ISSUES.md",
     "docs\beta\BETA_PLAN.md",
     "docs\beta\P0_P1_REGISTER.md",
@@ -171,7 +182,11 @@ function Assert-PublisherSignature {
         $actualThumbprint = $signature.SignerCertificate.Thumbprint.Replace(" ", "").ToUpperInvariant()
     }
     $expectedThumbprint = $Thumbprint.Replace(" ", "").ToUpperInvariant()
-    if ($signature.Status -ne "Valid" -or $actualThumbprint -ne $expectedThumbprint) {
+    if (
+        $signature.Status -ne "Valid" -or
+        $actualThumbprint -ne $expectedThumbprint -or
+        $null -eq $signature.TimeStamperCertificate
+    ) {
         throw "Publisher signature verification failed for $Path"
     }
 }
@@ -252,7 +267,7 @@ try {
         "test_architecture.py", "test_build_metadata.py", "test_identity_resources.py",
         "test_image_ops.py", "test_installer.py", "test_v03_safety.py",
         "test_viewer_services.py", "test_v07_experience.py", "test_v08_release_system.py",
-        "test_v09_release_candidate.py"
+        "test_v09_release_candidate.py", "test_v10_production_release.py"
     )
 
     if (-not $SkipTests) {
@@ -372,6 +387,25 @@ try {
         $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT -and
         $env:IMAGEEDITOR_UPDATE_PRIVATE_KEY
     )
+    $rollbackReleasePath = ""
+    if ($RollbackInstaller) {
+        if (-not (Test-Path -LiteralPath $RollbackInstaller -PathType Leaf)) {
+            throw "Rollback installer does not exist: $RollbackInstaller"
+        }
+        $rollbackName = "LightImageEditor-Rollback-x64-$RollbackVersion.exe"
+        $rollbackReleasePath = Join-Path $Release $rollbackName
+        Copy-Item -LiteralPath $RollbackInstaller -Destination $rollbackReleasePath
+        if ($signingReady) {
+            Assert-PublisherSignature $rollbackReleasePath $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT
+        }
+    }
+    $signedProductionBuild = $Production -or $ProductionCandidate
+    if ($signedProductionBuild -and -not $signingReady) {
+        throw "Production build requires Authenticode signing and the protected update key."
+    }
+    if ($signedProductionBuild -and -not $rollbackReleasePath) {
+        throw "Production build requires the previous-version rollback installer."
+    }
     if ($signingReady) {
         Assert-PublisherSignature $appExecutable $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT
         Assert-PublisherSignature $portableExecutable $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT
@@ -379,7 +413,7 @@ try {
         foreach ($channel in @("stable", "beta")) {
             $manifestName = "update-$channel.json"
             $assetUrl = "https://github.com/chendaxian318/imageeditor/releases/download/v$version/$setupName"
-            Invoke-Checked $Python @(
+            $manifestArguments = @(
                 "-m", "scripts.generate_update_manifest",
                 "--installer", $installerExecutable,
                 "--version", $version,
@@ -389,22 +423,30 @@ try {
                 "--private-key", $env:IMAGEEDITOR_UPDATE_PRIVATE_KEY,
                 "--output", (Join-Path $Release $manifestName)
             )
+            if ($channel -eq "stable" -and $rollbackReleasePath) {
+                $manifestArguments += @(
+                    "--rollback-installer", $rollbackReleasePath,
+                    "--rollback-version", $RollbackVersion,
+                    "--rollback-url", "https://github.com/chendaxian318/imageeditor/releases/download/v$version/$rollbackName"
+                )
+            }
+            Invoke-Checked $Python $manifestArguments
         }
     }
     else {
         $gate = Join-Path $Release "SIGNING_REQUIRED.txt"
         [System.IO.File]::WriteAllText(
             $gate,
-            "PUBLIC BETA BLOCKED: configure IMAGEEDITOR_SIGNTOOL, " +
+            "PUBLIC RELEASE BLOCKED: configure IMAGEEDITOR_SIGNTOOL, " +
             "IMAGEEDITOR_AUTHENTICODE_THUMBPRINT and IMAGEEDITOR_UPDATE_PRIVATE_KEY, " +
             "then rebuild. Unsigned binaries must not be published to an update channel.`r`n",
             [System.Text.UTF8Encoding]::new($false)
         )
-        Write-Warning "Unsigned local build created. Public Beta release remains blocked."
+        Write-Warning "Unsigned local build created. Public release remains blocked."
     }
 
     $securityScanScript = Join-Path $Root "scripts\inspect_release.ps1"
-    Invoke-Checked "powershell.exe" @(
+    $securityArguments = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", $securityScanScript,
         "-ReleasePath", $Release,
@@ -412,6 +454,10 @@ try {
         "-AllowUnsignedLocal",
         "-AllowUnavailableLocal"
     )
+    if ($env:IMAGEEDITOR_MULTI_ENGINE_EVIDENCE) {
+        $securityArguments += @("-MultiEngineEvidence", $env:IMAGEEDITOR_MULTI_ENGINE_EVIDENCE)
+    }
+    Invoke-Checked "powershell.exe" $securityArguments
 
     Invoke-Checked $Python @(
         "-m", "scripts.generate_release_evidence",
@@ -420,15 +466,6 @@ try {
         "--output", (Join-Path $Release "BUILD_PROVENANCE.json"),
         "--tests-executed", $(if ($SkipTests) { "false" } else { "true" })
     )
-    Invoke-Checked $Python @(
-        "-m", "scripts.verify_release_candidate",
-        "--gates", (Join-Path $Root "docs\release\RC_GATES.json"),
-        "--stability", (Join-Path $Root "docs\release\RC_STABILITY_LOG.json"),
-        "--evidence", (Join-Path $Release "BUILD_PROVENANCE.json"),
-        "--output", (Join-Path $Release "RELEASE_GATE_STATUS.json"),
-        "--allow-blocked"
-    )
-
     $checksumPath = Join-Path $Release "SHA256SUMS.txt"
     $releasePrefix = [System.IO.Path]::GetFullPath($Release).TrimEnd("\") + "\"
     $checksumLines = Get-ChildItem -LiteralPath $Release -File -Recurse |
@@ -448,6 +485,19 @@ try {
         $checksumLines,
         [System.Text.UTF8Encoding]::new($false)
     )
+
+    $releaseGateArguments = @(
+        "-m", "scripts.verify_production_release",
+        "--gates", (Join-Path $Root "docs\release\V1_RELEASE_GATES.json"),
+        "--stability", (Join-Path $Root "docs\release\RC_STABILITY_LOG.json"),
+        "--evidence", (Join-Path $Release "BUILD_PROVENANCE.json"),
+        "--security", (Join-Path $Release "LOCAL_SECURITY_SCAN.json"),
+        "--release", $Release,
+        "--output", (Join-Path $Release "RELEASE_GATE_STATUS.json")
+    )
+    if ($ProductionCandidate) { $releaseGateArguments += "--candidate" }
+    elseif (-not $Production) { $releaseGateArguments += "--allow-blocked" }
+    Invoke-Checked $Python $releaseGateArguments
 
     Write-Host "Build complete (version $version):"
     Write-Host "  $Release\LightImageEditor\ImageEditor.exe"

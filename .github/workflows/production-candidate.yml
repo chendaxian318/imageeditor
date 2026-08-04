@@ -1,0 +1,128 @@
+name: Build signed production draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing annotated production tag
+        required: true
+        default: v1.0.0
+      rollback_tag:
+        description: Previous source tag used to build the rollback installer
+        required: true
+        default: v0.9.0-rc.1
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  signed-draft:
+    runs-on: windows-2022
+    timeout-minutes: 240
+    steps:
+      - name: Check out production tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+          path: current
+
+      - name: Check out rollback tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.rollback_tag }}
+          fetch-depth: 0
+          path: previous
+
+      - uses: actions/setup-python@v5
+        with:
+          architecture: x64
+          python-version: "3.12.10"
+
+      - name: Import protected release material
+        id: signing
+        shell: powershell
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_PFX_PASSWORD }}
+          UPDATE_KEY_BASE64: ${{ secrets.UPDATE_MANIFEST_PRIVATE_KEY_BASE64 }}
+        run: |
+          if (-not $env:PFX_BASE64 -or -not $env:PFX_PASSWORD -or -not $env:UPDATE_KEY_BASE64) { throw 'Missing protected release secrets.' }
+          $pfx = Join-Path $env:RUNNER_TEMP 'publisher.pfx'
+          $key = Join-Path $env:RUNNER_TEMP 'update-private-key.json'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_BASE64))
+          [IO.File]::WriteAllBytes($key, [Convert]::FromBase64String($env:UPDATE_KEY_BASE64))
+          $secure = ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $secure -Exportable:$false
+          if (-not $certificate.Thumbprint) { throw 'Certificate import failed.' }
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe |
+            Where-Object FullName -Like '*\x64\signtool.exe' | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'Windows SDK SignTool was not found.' }
+          "thumbprint=$($certificate.Thumbprint)" >> $env:GITHUB_OUTPUT
+          "signtool=$($signtool.FullName)" >> $env:GITHUB_OUTPUT
+          "private_key=$key" >> $env:GITHUB_OUTPUT
+
+      - name: Build signed rollback installer
+        shell: powershell
+        working-directory: previous
+        env:
+          IMAGEEDITOR_SIGNTOOL: ${{ steps.signing.outputs.signtool }}
+          IMAGEEDITOR_AUTHENTICODE_THUMBPRINT: ${{ steps.signing.outputs.thumbprint }}
+          IMAGEEDITOR_UPDATE_PRIVATE_KEY: ${{ steps.signing.outputs.private_key }}
+        run: |
+          .\build.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item release\LightImageEditor-Setup-x64-0.9.0.exe "$env:RUNNER_TEMP\rollback.exe"
+
+      - name: Build signed production candidate and enforce pre-publication gates
+        shell: powershell
+        working-directory: current
+        env:
+          IMAGEEDITOR_SIGNTOOL: ${{ steps.signing.outputs.signtool }}
+          IMAGEEDITOR_AUTHENTICODE_THUMBPRINT: ${{ steps.signing.outputs.thumbprint }}
+          IMAGEEDITOR_UPDATE_PRIVATE_KEY: ${{ steps.signing.outputs.private_key }}
+        run: |
+          .\build.ps1 -ProductionCandidate -RollbackInstaller "$env:RUNNER_TEMP\rollback.exe" -RollbackVersion 0.9.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Compress-Archive -Path release\LightImageEditor -DestinationPath release\LightImageEditor-Onedir-x64-1.0.0.zip -CompressionLevel Optimal
+
+      - name: Run standard performance and release soak gates
+        shell: powershell
+        working-directory: current
+        run: |
+          .\.venv\Scripts\python.exe benchmarks\run_benchmarks.py --profile standard --output release\PERFORMANCE.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv\Scripts\python.exe benchmarks\compare_results.py --baseline benchmarks\baselines\v0.8.0-windows-x64-standard.json --current release\PERFORMANCE.json --output release\PERFORMANCE_COMPARISON.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv\Scripts\python.exe -m scripts.run_soak_tests --profile release --output release\SOAK_TEST.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Attest final downloadable binaries
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            current/release/LightImageEditor-Setup-x64-1.0.0.exe
+            current/release/LightImageEditor-Portable-x64-1.0.0.exe
+            current/release/LightImageEditor-Rollback-x64-0.9.0.exe
+            current/release/LightImageEditor-Onedir-x64-1.0.0.zip
+
+      - name: Create mutable draft release for external false-positive review
+        shell: powershell
+        working-directory: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = Get-ChildItem release -File | ForEach-Object FullName
+          gh release create "${{ inputs.release_tag }}" @assets --verify-tag --draft --title 'Light Image Editor 1.0.0' --notes-file docs\release\RELEASE_PAGE-v1.0.0.md
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Remove protected material
+        if: always()
+        shell: powershell
+        run: |
+          Remove-Item -LiteralPath "$env:RUNNER_TEMP\publisher.pfx" -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath "$env:RUNNER_TEMP\update-private-key.json" -Force -ErrorAction SilentlyContinue
+          Get-ChildItem Cert:\CurrentUser\My | Where-Object Thumbprint -EQ '${{ steps.signing.outputs.thumbprint }}' | Remove-Item -Force
+

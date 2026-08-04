@@ -1,4 +1,4 @@
-name: Release candidate validation
+name: Release quality validation
 
 on:
   workflow_dispatch:
@@ -58,7 +58,7 @@ jobs:
       - name: Upload candidate evidence
         uses: actions/upload-artifact@v4
         with:
-          name: light-image-editor-v09-rc-evidence
+          name: light-image-editor-v10-release-evidence
           path: release/
           if-no-files-found: error
           retention-days: 30

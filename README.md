@@ -75,11 +75,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 构建完成后产物位于 `release`：
 
 - `LightImageEditor/`：供标准安装器使用的 `onedir` 应用目录
-- `LightImageEditor-Portable-x64-0.9.0.exe`：便携 `onefile` 版本
-- `LightImageEditor-Setup-x64-0.9.0.exe`：当前用户标准安装器，支持覆盖升级和“已安装的应用”卸载
+- `LightImageEditor-Portable-x64-1.0.0.exe`：便携 `onefile` 版本
+- `LightImageEditor-Setup-x64-1.0.0.exe`：当前用户标准安装器，支持覆盖升级和“已安装的应用”卸载
+- `LightImageEditor-Rollback-x64-0.9.0.exe`：生产构建附带的上一版本签名回滚包
 - `LICENSE`、`NOTICE.md`、`PRIVACY.md`、`THIRD_PARTY_LICENSES.md`：随发布物和安装程序提供的权属、隐私及第三方许可说明
 - `SBOM.cdx.json`：CycloneDX 1.6 软件物料清单
-- `RELEASE_NOTES-v0.9.0-rc.1.md`、`RELEASE_GATE_STATUS.json`：RC 说明与机器可读发布门禁
+- `RELEASE_NOTES-v1.0.0.md`、`RELEASE_GATE_STATUS.json`：正式版说明与机器可读发布门禁
 - `BUILD_PROVENANCE.json`、`LOCAL_SECURITY_SCAN.json`、`diagnostics/`：提交到产物的追溯、签名/杀软和诊断资料
 - `SHA256SUMS.txt`：本次构建产物的 SHA-256 校验值
 
@@ -87,15 +88,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
 公开发布还需要配置 `IMAGEEDITOR_SIGNTOOL`、`IMAGEEDITOR_AUTHENTICODE_THUMBPRINT` 和仓库外的 `IMAGEEDITOR_UPDATE_PRIVATE_KEY`。构建会签署并复验最终 EXE 后生成两个通道的签名清单；未配置时只生成带 `SIGNING_REQUIRED.txt` 的本地测试构建，不得上传到更新通道。更新安全模型与发布步骤见 `docs/release/UPDATE_SECURITY.md`。
 
-RC 还需运行标准性能比较和长稳测试：
+v1.0 正式发布采用签名草稿与公开发布两个阶段。草稿阶段要求上一版本签名回滚包并生成 GitHub artifact attestation；公开阶段下载同一批资产，绑定多引擎审核哈希并重新验证签名、Defender、SHA-256、SBOM、标签、提交和全部发布门禁。完整步骤见 `docs/release/PRODUCTION_RELEASE_RUNBOOK.md`，未通过 `RELEASE_GATE_STATUS.json` 时禁止创建公开稳定版。
+
+正式发布候选还需运行标准性能比较和长稳测试：
 
 ```powershell
-.\.venv\Scripts\python.exe benchmarks\run_benchmarks.py --profile standard --output "$env:TEMP\v09.json"
-.\.venv\Scripts\python.exe benchmarks\compare_results.py --baseline .\benchmarks\baselines\v0.8.0-windows-x64-standard.json --current "$env:TEMP\v09.json"
-.\.venv\Scripts\python.exe -m scripts.run_soak_tests --profile release --output "$env:TEMP\v09-soak.json"
+.\.venv\Scripts\python.exe benchmarks\run_benchmarks.py --profile standard --output "$env:TEMP\v10.json"
+.\.venv\Scripts\python.exe benchmarks\compare_results.py --baseline .\benchmarks\baselines\v0.8.0-windows-x64-standard.json --current "$env:TEMP\v10.json"
+.\.venv\Scripts\python.exe -m scripts.run_soak_tests --profile release --output "$env:TEMP\v10-soak.json"
 ```
 
-完整操作说明见 `docs/USER_MANUAL.md`，兼容矩阵和尚未满足的外部门禁见 `docs/release/COMPATIBILITY_MATRIX.md` 与 `docs/release/RC_GATES.json`。
+完整操作说明见 `docs/USER_MANUAL.md`，兼容矩阵和正式发布门禁见 `docs/release/COMPATIBILITY_MATRIX.md` 与 `docs/release/V1_RELEASE_GATES.json`。
 
 如需 HEIF/HEIC，可在开发环境中单独执行 `python -m pip install -r requirements-heif.lock`。该插件不会进入基础依赖或默认安装包；启用后应用会在启动时自动发现并注册解码器。
 

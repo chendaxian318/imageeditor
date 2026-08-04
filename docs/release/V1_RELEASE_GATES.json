@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "release": "1.0.0",
+  "feature_freeze": true,
+  "gates": [
+    {"id": "V1-TEST", "priority": "P0", "status": "blocked", "owner": "chendaxian318", "closure": "The tagged production build passes all tests, standard performance comparison and release soak"},
+    {"id": "V1-SIGN", "priority": "P0", "status": "blocked", "owner": "chendaxian318", "closure": "Every final and rollback EXE has a valid timestamped Authenticode signature from the approved publisher"},
+    {"id": "V1-RIGHTS", "priority": "P0", "status": "blocked", "owner": "chendaxian318", "closure": "First-party redistribution rights and the required commercial Inno Setup licence are archived"},
+    {"id": "V1-BETA", "priority": "P1", "status": "blocked", "owner": "chendaxian318", "closure": "At least 20 Beta users completed the checklist with no open P0/P1"},
+    {"id": "V1-STABILITY", "priority": "P0", "status": "blocked", "owner": "chendaxian318", "closure": "Seven consecutive dated RC entries contain no new or open P0/P1"},
+    {"id": "V1-CLEAN-VM", "priority": "P0", "status": "blocked", "owner": "chendaxian318", "closure": "Clean Windows 10 and Windows 11 install, upgrade, default-app and uninstall matrices pass"},
+    {"id": "V1-MALWARE", "priority": "P0", "status": "blocked", "owner": "chendaxian318", "closure": "The exact signed draft assets pass Defender and approved multi-engine false-positive review"},
+    {"id": "V1-ROLLBACK", "priority": "P0", "status": "blocked", "owner": "chendaxian318", "closure": "The signed previous-version rollback installer and stable manifest are exercised from a clean VM"},
+    {"id": "V1-DOCS", "priority": "P1", "status": "passed", "owner": "chendaxian318", "closure": "Release page, user/default-app help, privacy, licences, monitoring and hotfix runbook are versioned"}
+  ]
+}

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.0 — pending production gates
+
+- Added a fail-closed production build mode that requires a timestamped Authenticode publisher, protected update-manifest key and signed previous-version rollback installer.
+- Added a two-stage draft-to-public release process so external malware review validates the exact bytes that are ultimately published.
+- Added stable-channel rollback metadata, release-page content, Windows default-app help, a 72-hour monitoring plan and an emergency hotfix runbook.
+- Public `v1.0.0` remains blocked until the machine-readable rights, Beta, seven-day stability, clean-VM, signing, malware and rollback gates are closed with evidence.
+
 ## 0.9.0-rc.1 — 2026-08-04
 
 ### Release-candidate quality

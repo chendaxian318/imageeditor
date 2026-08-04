@@ -13,8 +13,8 @@ substitute for the authoritative licence text distributed by each component.
 - PyInstaller: 6.17.0
 - Source of version data: installed metadata in `.venv` plus `pip freeze --all`
 - Application artifacts checked: `release/LightImageEditor/ImageEditor.exe`,
-  `release/LightImageEditor-Portable-x64-0.9.0.exe` and
-  `release/LightImageEditor-Setup-x64-0.9.0.exe`
+  `release/LightImageEditor-Portable-x64-1.0.0.exe` and
+  `release/LightImageEditor-Setup-x64-1.0.0.exe`
 
 The virtual environment is not a release artifact. Paths below identify the
 authoritative files in the audited local installation so that the release
@@ -37,7 +37,7 @@ process can copy them into a distributable notice bundle.
 
 `pillow-heif==1.5.0` is pinned separately in `requirements-heif.lock` for users who
 choose HEIF/HEIC support. It is not installed by `build.ps1`, is not part of the
-base dependency closure, and is not bundled in the standard v0.9.0 artifacts.
+base dependency closure, and is not bundled in the standard v1.0.0 artifacts.
 Any future release that bundles it must add its licence and the complete native
 `libheif`/codec notice set to the distributed notice bundle.
 

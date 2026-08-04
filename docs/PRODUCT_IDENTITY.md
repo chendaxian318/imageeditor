@@ -14,7 +14,7 @@
 | 可执行文件 | ImageEditor.exe |
 | 注册表应用名 | LightImageEditor |
 | 文件类型 ProgID | LightImageEditor.Image |
-| 当前版本 | 0.1.0 |
+| 当前版本 | 1.0.0 |
 | 用户数据目录 | `%LOCALAPPDATA%\LightImageEditor`（迁移目标） |
 
 ## 稳定性规则

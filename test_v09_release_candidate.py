@@ -134,7 +134,7 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn("pyinstaller-warnings.txt", build)
         installer = (ROOT / "packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
         self.assertIn("docs\\USER_MANUAL.md", installer)
-        self.assertIn("RELEASE_NOTES-v0.9.0-rc.1.md", installer)
+        self.assertIn("RELEASE_NOTES-v1.0.0.md", installer)
 
 
 if __name__ == "__main__":
