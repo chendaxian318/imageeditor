@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
+import uuid
 from collections.abc import Sequence
 from concurrent.futures import Future
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import cast
 
 from PIL import Image, ImageGrab, ImageTk
 
@@ -28,6 +28,7 @@ from image_ops import (
     save_image,
 )
 
+from ..commands import EditCommand
 from ..document import Document, DocumentState
 from ..files import (
     copy_file,
@@ -46,10 +47,19 @@ from ..image_loader import ImageLoader, ImageLoadFailure
 from ..metadata import image_properties
 from ..navigation import NavigationSession
 from ..presets import EXPORT_PRESETS, apply_export_preset
-from ..preview import PreviewFrame, PreviewRenderer
+from ..preview import PreviewFrame, PreviewRenderer, color_manage_for_display
+from ..projects import (
+    ProjectError,
+    ProjectSourceMissing,
+    ProjectSourceModified,
+    load_project,
+    save_project,
+)
+from ..renderer import detect_straighten_angle, histogram, reduce_timeline, render_image
 from ..session import SessionStore
 from ..settings import SettingsStore
 from ..windows_drop import WindowsFileDrop
+from .curve_editor import CurveEditor
 
 APP_NAME = PRODUCT_NAME_ZH
 ZOOM_LEVELS = ("适应", "50%", "100%", "150%", "200%")
@@ -85,6 +95,8 @@ class ImageEditorApp(tk.Tk):
         self.pan_start_offset = (0, 0)
         self.zoom_mode = tk.StringVar(value="适应")
         self.compare_original = tk.BooleanVar(value=False)
+        self.split_compare_var = tk.BooleanVar(value=False)
+        self.split_compare_percent_var = tk.IntVar(value=50)
         self.reveal_after_save_var = tk.BooleanVar(value=False)
         self.crop_box: tuple[int, int, int, int] | None = None
         self.drag_start: tuple[int, int] | None = None
@@ -104,6 +116,7 @@ class ImageEditorApp(tk.Tk):
         self._autosave_job: str | None = None
         self._source_monitor_job: str | None = None
         self._syncing_document = False
+        self._active_slider_merge_key: str | None = None
         self._last_source_status = "unchanged"
         self._last_autosave_signature: tuple[object, ...] | None = None
 
@@ -139,13 +152,25 @@ class ImageEditorApp(tk.Tk):
         self.contrast_var = tk.IntVar(value=0)
         self.saturation_var = tk.IntVar(value=0)
         self.sharpness_var = tk.IntVar(value=0)
+        self.temperature_var = tk.IntVar(value=0)
+        self.tint_var = tk.IntVar(value=0)
+        self.shadows_var = tk.IntVar(value=0)
+        self.highlights_var = tk.IntVar(value=0)
+        self.denoise_var = tk.IntVar(value=0)
+        self.level_black_var = tk.IntVar(value=0)
+        self.level_white_var = tk.IntVar(value=255)
+        self.level_gamma_var = tk.DoubleVar(value=1.0)
+        self.fine_rotation_var = tk.DoubleVar(value=0.0)
+        self.fine_rotation_auto_crop_var = tk.BooleanVar(value=True)
+        self.fine_rotation_background_var = tk.StringVar(value="#ffffff")
+        self.curve_channel_var = tk.StringVar(value="rgb")
+        self._curve_points_by_channel: dict[str, tuple[tuple[float, float], ...]] = {
+            channel: ((0.0, 0.0), (1.0, 1.0)) for channel in ("rgb", "red", "green", "blue")
+        }
         self.grayscale_var = tk.BooleanVar(value=False)
         self.auto_contrast_var = tk.BooleanVar(value=False)
         self.recent_files: list[str] = []
         self.recent_directories: list[str] = []
-        self.undo_stack: list[dict[str, object]] = []
-        self.redo_stack: list[dict[str, object]] = []
-        self._restoring_history = False
         self.clean_signature: tuple[object, ...] | None = None
 
         self._load_config()
@@ -261,6 +286,21 @@ class ImageEditorApp(tk.Tk):
             variable=self.compare_original,
             command=self._refresh_preview,
         ).grid(row=0, column=12, padx=(0, 12))
+        ttk.Checkbutton(
+            self.edit_toolbar,
+            text="分屏对比",
+            variable=self.split_compare_var,
+            command=self._refresh_preview,
+        ).grid(row=0, column=13, padx=(0, 6))
+        ttk.Scale(
+            self.edit_toolbar,
+            from_=10,
+            to=90,
+            orient="horizontal",
+            variable=self.split_compare_percent_var,
+            command=lambda _value: self._refresh_preview(),
+            length=90,
+        ).grid(row=0, column=14, padx=(0, 6))
 
         canvas_frame = ttk.Frame(self, padding=(12, 0, 8, 12))
         canvas_frame.grid(row=2, column=0, sticky="nsew")
@@ -420,14 +460,13 @@ class ImageEditorApp(tk.Tk):
         self._slider(adjust_box, "亮度", self.brightness_var, -100, 100, 0, self._live_adjust)
         self._slider(adjust_box, "对比度", self.contrast_var, -100, 100, 1, self._live_adjust)
         self._slider(adjust_box, "饱和度", self.saturation_var, -100, 100, 2, self._live_adjust)
-        self._slider(adjust_box, "锐化", self.sharpness_var, -100, 100, 3, self._live_adjust)
+        self._slider(adjust_box, "锐化", self.sharpness_var, 0, 100, 3, self._live_adjust)
         adjust_actions = ttk.Frame(adjust_box)
         adjust_actions.grid(row=4, column=1, sticky="ew", pady=(8, 0))
         grayscale_check = ttk.Checkbutton(
             adjust_actions, text="黑白", variable=self.grayscale_var, command=self._live_adjust
         )
         grayscale_check.grid(row=0, column=0, sticky="w", padx=(0, 10))
-        grayscale_check.bind("<ButtonPress-1>", lambda _event: self._push_history())
         auto_check = ttk.Checkbutton(
             adjust_actions,
             text="自动优化",
@@ -435,10 +474,142 @@ class ImageEditorApp(tk.Tk):
             command=self._live_adjust,
         )
         auto_check.grid(row=0, column=1, sticky="w")
-        auto_check.bind("<ButtonPress-1>", lambda _event: self._push_history())
+
+        geometry_box = ttk.LabelFrame(panel, text="精细旋转", style="Panel.TLabelframe")
+        geometry_box.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        geometry_box.columnconfigure(1, weight=1)
+        ttk.Label(geometry_box, text="角度").grid(row=0, column=0, sticky="w", pady=5)
+        fine_scale = ttk.Scale(
+            geometry_box,
+            from_=-45,
+            to=45,
+            orient="horizontal",
+            variable=self.fine_rotation_var,
+            command=lambda _value: self._fine_rotation_changed(),
+        )
+        fine_scale.grid(row=0, column=1, sticky="ew", pady=5)
+        fine_scale.bind("<ButtonPress-1>", self._begin_slider_command)
+        fine_scale.bind("<ButtonRelease-1>", self._end_slider_command)
+        ttk.Label(geometry_box, textvariable=self.fine_rotation_var, width=6).grid(
+            row=0, column=2, sticky="e"
+        )
+        ttk.Checkbutton(
+            geometry_box,
+            text="自动裁去旋转空边",
+            variable=self.fine_rotation_auto_crop_var,
+            command=self._fine_rotation_changed,
+        ).grid(row=1, column=1, sticky="w")
+        ttk.Button(geometry_box, text="自动拉直", command=self.auto_straighten).grid(
+            row=1, column=2, padx=(6, 0)
+        )
+
+        tone_box = ttk.LabelFrame(panel, text="高级调色", style="Panel.TLabelframe")
+        tone_box.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        tone_box.columnconfigure(1, weight=1)
+        self._slider(
+            tone_box,
+            "色温",
+            self.temperature_var,
+            -100,
+            100,
+            0,
+            lambda: self._advanced_color_changed("temperature", self.temperature_var.get()),
+        )
+        self._slider(
+            tone_box,
+            "色调",
+            self.tint_var,
+            -100,
+            100,
+            1,
+            lambda: self._advanced_color_changed("tint", self.tint_var.get()),
+        )
+        self._slider(
+            tone_box,
+            "阴影",
+            self.shadows_var,
+            -100,
+            100,
+            2,
+            lambda: self._advanced_color_changed("shadows", self.shadows_var.get()),
+        )
+        self._slider(
+            tone_box,
+            "高光",
+            self.highlights_var,
+            -100,
+            100,
+            3,
+            lambda: self._advanced_color_changed("highlights", self.highlights_var.get()),
+        )
+        self._slider(
+            tone_box,
+            "降噪",
+            self.denoise_var,
+            0,
+            100,
+            4,
+            lambda: self._advanced_color_changed("denoise", self.denoise_var.get()),
+        )
+        self._slider(tone_box, "黑场", self.level_black_var, 0, 254, 5, self._levels_changed)
+        self._slider(tone_box, "白场", self.level_white_var, 1, 255, 6, self._levels_changed)
+        ttk.Label(tone_box, text="Gamma").grid(row=7, column=0, sticky="w", pady=5)
+        gamma_scale = ttk.Scale(
+            tone_box,
+            from_=0.1,
+            to=3.0,
+            orient="horizontal",
+            variable=self.level_gamma_var,
+            command=lambda _value: self._levels_changed(),
+        )
+        gamma_scale.grid(row=7, column=1, sticky="ew", pady=5)
+        gamma_scale.bind("<ButtonPress-1>", self._begin_slider_command)
+        gamma_scale.bind("<ButtonRelease-1>", self._end_slider_command)
+        ttk.Label(tone_box, textvariable=self.level_gamma_var, width=6).grid(row=7, column=2)
+
+        curve_box = ttk.LabelFrame(panel, text="曲线", style="Panel.TLabelframe")
+        curve_box.grid(row=5, column=0, sticky="ew", pady=(0, 10))
+        curve_box.columnconfigure(0, weight=1)
+        curve_header = ttk.Frame(curve_box)
+        curve_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        curve_header.columnconfigure(0, weight=1)
+        curve_channel = ttk.Combobox(
+            curve_header,
+            textvariable=self.curve_channel_var,
+            values=("rgb", "red", "green", "blue"),
+            state="readonly",
+            width=8,
+        )
+        curve_channel.grid(row=0, column=0, sticky="w")
+        curve_channel.bind("<<ComboboxSelected>>", lambda _event: self._curve_channel_changed())
+        ttk.Button(curve_header, text="重置通道", command=lambda: self.curve_editor.reset()).grid(
+            row=0, column=1, sticky="e"
+        )
+        self.curve_editor = CurveEditor(curve_box, command=self._curve_changed)
+        self.curve_editor.grid(row=1, column=0, sticky="ew")
+        ttk.Label(curve_box, text="左键添加/拖动，右键删除控制点").grid(
+            row=2, column=0, sticky="w", pady=(5, 0)
+        )
+
+        analysis_box = ttk.LabelFrame(panel, text="直方图与历史", style="Panel.TLabelframe")
+        analysis_box.grid(row=6, column=0, sticky="ew", pady=(0, 10))
+        analysis_box.columnconfigure(0, weight=1)
+        self.histogram_canvas = tk.Canvas(
+            analysis_box, height=105, background="#171b22", highlightthickness=0
+        )
+        self.histogram_canvas.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.history_tree = ttk.Treeview(
+            analysis_box,
+            columns=("step",),
+            show="tree",
+            height=8,
+            selectmode="browse",
+        )
+        self.history_tree.grid(row=1, column=0, sticky="ew")
+        self.history_tree.bind("<<TreeviewSelect>>", self._history_selected)
 
         watermark_box = ttk.LabelFrame(panel, text="文字水印", style="Panel.TLabelframe")
-        watermark_box.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        watermark_box.grid(row=7, column=0, sticky="ew", pady=(0, 10))
         watermark_box.columnconfigure(1, weight=1)
         ttk.Label(watermark_box, text="内容").grid(row=0, column=0, sticky="w", pady=5)
         watermark_entry = ttk.Entry(watermark_box, textvariable=self.watermark_text_var)
@@ -462,7 +633,7 @@ class ImageEditorApp(tk.Tk):
         )
 
         help_box = ttk.LabelFrame(panel, text="快捷键", style="Panel.TLabelframe")
-        help_box.grid(row=4, column=0, sticky="ew")
+        help_box.grid(row=8, column=0, sticky="ew")
         ttk.Label(
             help_box,
             text=(
@@ -484,6 +655,7 @@ class ImageEditorApp(tk.Tk):
         self.menu_bar = tk.Menu(self)
         file_menu = tk.Menu(self.menu_bar, tearoff=False)
         file_menu.add_command(label="打开...", accelerator="Ctrl+O", command=self.open_file)
+        file_menu.add_command(label="打开编辑项目...", command=self.open_project_dialog)
         file_menu.add_command(
             label="从剪贴板粘贴", accelerator="Ctrl+V", command=self.paste_from_clipboard
         )
@@ -504,6 +676,9 @@ class ImageEditorApp(tk.Tk):
         file_menu.add_command(label="打开回收站", command=open_recycle_bin)
         file_menu.add_separator()
         file_menu.add_command(label="保存为...", accelerator="Ctrl+S", command=self.save_as)
+        file_menu.add_command(
+            label="保存编辑项目...", accelerator="Ctrl+Shift+S", command=self.save_project_dialog
+        )
         file_menu.add_command(label="快速导出", accelerator="Ctrl+E", command=self.quick_export)
         file_menu.add_command(
             label="复制编辑结果", accelerator="Ctrl+Shift+C", command=self.copy_result
@@ -617,13 +792,21 @@ class ImageEditorApp(tk.Tk):
             command=lambda _v: command(),
         )
         scale.grid(row=0, column=0, sticky="ew")
-        scale.bind("<ButtonPress-1>", lambda _event: self._push_history())
+        scale.bind("<ButtonPress-1>", self._begin_slider_command)
+        scale.bind("<ButtonRelease-1>", self._end_slider_command)
         ttk.Label(frame, textvariable=var, width=4).grid(row=0, column=1, sticky="e")
+
+    def _begin_slider_command(self, _event: tk.Event) -> None:
+        self._active_slider_merge_key = uuid.uuid4().hex
+
+    def _end_slider_command(self, _event: tk.Event) -> None:
+        self._active_slider_merge_key = None
 
     def _bind_shortcuts(self) -> None:
         self.bind("<Control-o>", lambda _event: self.open_file())
         self.bind("<Control-v>", lambda _event: self.paste_from_clipboard())
         self.bind("<Control-s>", lambda _event: self.save_as())
+        self.bind("<Control-Shift-S>", lambda _event: self.save_project_dialog())
         self.bind("<Control-e>", lambda _event: self.quick_export())
         self.bind("<Control-Shift-C>", lambda _event: self.copy_result())
         self.bind("<Control-r>", lambda _event: self.rotate(90))
@@ -716,12 +899,207 @@ class ImageEditorApp(tk.Tk):
         if self._syncing_document or self.document is None:
             return
         self.document.update_state(f"set_{field}", **{field: value})
+        if field in {"width_text", "height_text", "max_side_text"}:
+            self._commit_resize_from_state()
+        elif field in {
+            "watermark_text",
+            "watermark_position",
+            "watermark_opacity",
+            "watermark_size_percent",
+        }:
+            state = self.document.state
+            self._commit_command(
+                EditCommand.create(
+                    "watermark",
+                    {
+                        "text": state.watermark_text,
+                        "position": state.watermark_position,
+                        "opacity": state.watermark_opacity,
+                        "size_percent": state.watermark_size_percent,
+                    },
+                    "调整文字水印",
+                    merge_key="ui:watermark",
+                ),
+                merge=True,
+                refresh=True,
+            )
+
+    def _commit_resize_from_state(self) -> None:
+        if self.document is None:
+            return
+        state = self.document.state
+
+        def positive(text: str) -> int | None:
+            try:
+                value = int(text.strip())
+            except ValueError:
+                return None
+            return value if value > 0 else None
+
+        width = positive(state.width_text)
+        height = positive(state.height_text)
+        max_side = positive(state.max_side_text)
+        if max_side is not None:
+            params = {
+                "exact_width": None,
+                "exact_height": None,
+                "max_width": max_side,
+                "max_height": max_side,
+            }
+        elif width is not None and height is not None:
+            params = {
+                "exact_width": width,
+                "exact_height": height,
+                "max_width": None,
+                "max_height": None,
+            }
+        else:
+            params = {
+                "exact_width": None,
+                "exact_height": None,
+                "max_width": width,
+                "max_height": height,
+            }
+        self._commit_command(
+            EditCommand.create("resize", params, "调整输出尺寸", merge_key="ui:resize"),
+            merge=True,
+            refresh=True,
+        )
 
     def _set_document_edit_field(self, field: str, value: object) -> None:
         if self._syncing_document or self.document is None:
             return
         edit_state = replace(self.document.state.edit_state, **{field: value})
         self.document.update_state(f"edit_{field}", edit_state=edit_state)
+        renderer_name = "sharpen" if field == "sharpness" else field
+        labels = {
+            "brightness": "亮度",
+            "contrast": "对比度",
+            "saturation": "饱和度",
+            "sharpen": "锐化",
+            "grayscale": "黑白",
+            "auto_contrast": "自动优化",
+        }
+        merge_key = (
+            f"{self._active_slider_merge_key}:{renderer_name}"
+            if self._active_slider_merge_key
+            else None
+        )
+        self._commit_command(
+            EditCommand.create(
+                "adjust",
+                {"name": renderer_name, "value": value},
+                f"调整{labels.get(renderer_name, renderer_name)}",
+                merge_key=merge_key,
+            ),
+            merge=merge_key is not None,
+            refresh=False,
+        )
+
+    def _commit_command(
+        self, command: EditCommand, *, merge: bool = False, refresh: bool = True
+    ) -> None:
+        if self._syncing_document or self.document is None:
+            return
+        if self.document.project_read_only:
+            self.status_var.set("项目包含当前版本不支持的操作，已按只读方式打开")
+            return
+        try:
+            self.document.commit_command(command, merge=merge)
+        except ValueError as error:
+            messagebox.showerror(APP_NAME, str(error))
+            return
+        self._refresh_history_panel()
+        if refresh:
+            self._refresh_preview()
+
+    def _advanced_color_changed(self, name: str, value: int) -> None:
+        if self._syncing_document or self.document is None:
+            return
+        merge_key = (
+            f"{self._active_slider_merge_key}:{name}" if self._active_slider_merge_key else None
+        )
+        self._commit_command(
+            EditCommand.create(
+                "adjust",
+                {"name": name, "value": value},
+                f"调整{name}",
+                merge_key=merge_key,
+            ),
+            merge=merge_key is not None,
+        )
+
+    def _levels_changed(self) -> None:
+        if self._syncing_document or self.document is None:
+            return
+        black = self.level_black_var.get()
+        white = self.level_white_var.get()
+        if black >= white:
+            return
+        merge_key = (
+            f"{self._active_slider_merge_key}:levels" if self._active_slider_merge_key else None
+        )
+        self._commit_command(
+            EditCommand.create(
+                "levels",
+                {"black": black, "white": white, "gamma": self.level_gamma_var.get()},
+                "调整色阶",
+                merge_key=merge_key,
+            ),
+            merge=merge_key is not None,
+        )
+
+    def _fine_rotation_changed(self) -> None:
+        if self._syncing_document or self.document is None:
+            return
+        merge_key = (
+            f"{self._active_slider_merge_key}:fine_rotate"
+            if self._active_slider_merge_key
+            else None
+        )
+        self._commit_command(
+            EditCommand.create(
+                "fine_rotate",
+                {
+                    "angle": round(self.fine_rotation_var.get(), 2),
+                    "auto_crop": self.fine_rotation_auto_crop_var.get(),
+                    "background": self.fine_rotation_background_var.get(),
+                },
+                "精细旋转",
+                merge_key=merge_key,
+            ),
+            merge=merge_key is not None,
+        )
+
+    def auto_straighten(self) -> None:
+        if self.document is None:
+            return
+        self.status_var.set("正在分析画面中的水平线和垂直线…")
+        self.update_idletasks()
+        source = render_image(self.document.image, self.document.timeline)
+        result = detect_straighten_angle(source)
+        if not result.reliable:
+            self.status_var.set("没有检测到可信的拉直角度")
+            return
+        current_angle = reduce_timeline(self.document.timeline).geometry.fine_angle
+        self.fine_rotation_var.set(max(-45.0, min(45.0, current_angle + result.angle)))
+        self._fine_rotation_changed()
+        self.status_var.set(f"已自动拉直 {result.angle:+.2f}°（置信度 {result.confidence:.2f}）")
+
+    def _curve_channel_changed(self) -> None:
+        channel = self.curve_channel_var.get()
+        self.curve_editor.set_points(self._curve_points_by_channel[channel])
+
+    def _curve_changed(self, points: tuple[tuple[float, float], ...]) -> None:
+        channel = self.curve_channel_var.get()
+        self._curve_points_by_channel[channel] = points
+        self._commit_command(
+            EditCommand.create(
+                "curve",
+                {"channel": channel, "points": [[x, y] for x, y in points]},
+                f"调整 {channel.upper()} 曲线",
+            )
+        )
 
     def _update_document_geometry(self, kind: str) -> None:
         if self._syncing_document or self.document is None:
@@ -765,6 +1143,144 @@ class ImageEditorApp(tk.Tk):
             self.export_preset_var.set(state.export_preset)
         finally:
             self._syncing_document = False
+
+    def _sync_controls_from_timeline(self) -> None:
+        if self.document is None:
+            return
+        was_dirty = self.document.dirty
+        plan = reduce_timeline(self.document.timeline)
+        self._syncing_document = True
+        try:
+            self.rotation = plan.geometry.rotation
+            self.flip_h = plan.geometry.flip_horizontal
+            self.flip_v = plan.geometry.flip_vertical
+            self.fine_rotation_var.set(plan.geometry.fine_angle)
+            self.fine_rotation_auto_crop_var.set(plan.geometry.auto_crop)
+            self.fine_rotation_background_var.set(plan.geometry.background)
+            self.brightness_var.set(plan.color.brightness)
+            self.contrast_var.set(plan.color.contrast)
+            self.saturation_var.set(plan.color.saturation)
+            self.sharpness_var.set(plan.color.sharpen)
+            self.grayscale_var.set(plan.color.grayscale)
+            self.auto_contrast_var.set(plan.color.auto_contrast)
+            self.temperature_var.set(plan.color.temperature)
+            self.tint_var.set(plan.color.tint)
+            self.shadows_var.set(plan.color.shadows)
+            self.highlights_var.set(plan.color.highlights)
+            self.denoise_var.set(plan.color.denoise)
+            self.level_black_var.set(plan.color.level_black)
+            self.level_white_var.set(plan.color.level_white)
+            self.level_gamma_var.set(plan.color.level_gamma)
+            self._curve_points_by_channel = dict(plan.color.curves)
+            if hasattr(self, "curve_editor"):
+                self.curve_editor.set_points(
+                    self._curve_points_by_channel[self.curve_channel_var.get()]
+                )
+            self.watermark_text_var.set(plan.annotation.watermark_text)
+            self.watermark_position_var.set(plan.annotation.watermark_position)
+            self.watermark_opacity_var.set(plan.annotation.watermark_opacity)
+            self.watermark_size_var.set(plan.annotation.watermark_size_percent)
+        finally:
+            self._syncing_document = False
+        width_text = ""
+        height_text = ""
+        max_side_text = ""
+        if plan.size.exact_width is not None and plan.size.exact_height is not None:
+            width_text = str(plan.size.exact_width)
+            height_text = str(plan.size.exact_height)
+        elif plan.size.max_width is not None and plan.size.max_width == plan.size.max_height:
+            max_side_text = str(plan.size.max_width)
+        else:
+            width_text = str(plan.size.max_width or "")
+            height_text = str(plan.size.max_height or "")
+        synchronized = replace(
+            self.document.state,
+            edit_state=EditState(
+                rotation=plan.geometry.rotation,
+                flip_horizontal=plan.geometry.flip_horizontal,
+                flip_vertical=plan.geometry.flip_vertical,
+                brightness=plan.color.brightness,
+                contrast=plan.color.contrast,
+                saturation=plan.color.saturation,
+                sharpness=plan.color.sharpen,
+                grayscale=plan.color.grayscale,
+                auto_contrast=plan.color.auto_contrast,
+            ),
+            crop_box=None,
+            width_text=width_text,
+            height_text=height_text,
+            max_side_text=max_side_text,
+            watermark_text=plan.annotation.watermark_text,
+            watermark_position=plan.annotation.watermark_position,
+            watermark_opacity=plan.annotation.watermark_opacity,
+            watermark_size_percent=plan.annotation.watermark_size_percent,
+        )
+        self._syncing_document = True
+        try:
+            self.width_var.set(width_text)
+            self.height_var.set(height_text)
+            self.max_side_var.set(max_side_text)
+        finally:
+            self._syncing_document = False
+        self.document.set_state("sync_timeline", synchronized)
+        self.crop_box = None
+        if not was_dirty:
+            self.document.mark_clean()
+
+    def _refresh_history_panel(self) -> None:
+        if not hasattr(self, "history_tree"):
+            return
+        tree = self.history_tree
+        selected = self.document.timeline.cursor if self.document is not None else 0
+        tree.delete(*tree.get_children())
+        tree.insert("", "end", iid="history:0", text="0  原图")
+        if self.document is not None:
+            for index, command in enumerate(self.document.timeline.commands, start=1):
+                marker = "" if index <= self.document.timeline.cursor else "（已撤销）"
+                tree.insert(
+                    "",
+                    "end",
+                    iid=f"history:{index}",
+                    text=f"{index}  {command.label}{marker}",
+                )
+        iid = f"history:{selected}"
+        if tree.exists(iid):
+            tree.selection_set(iid)
+            tree.see(iid)
+
+    def _history_selected(self, _event: tk.Event) -> None:
+        if self.document is None:
+            return
+        selection = self.history_tree.selection()
+        if not selection:
+            return
+        try:
+            cursor = int(selection[0].split(":", 1)[1])
+        except (IndexError, ValueError):
+            return
+        if cursor == self.document.timeline.cursor:
+            return
+        self.document.jump_history(cursor)
+        self._sync_controls_from_timeline()
+        self._refresh_history_panel()
+        self._refresh_preview()
+        self.status_var.set(f"已跳转到历史步骤 {cursor}")
+
+    def _draw_histogram(self, image: Image.Image) -> None:
+        if not hasattr(self, "histogram_canvas"):
+            return
+        values = histogram(image)
+        canvas = self.histogram_canvas
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        for channel, color in (("red", "#ef4444"), ("green", "#22c55e"), ("blue", "#3b82f6")):
+            bins = values[channel]
+            peak = max(1, max(bins))
+            points: list[float] = []
+            for index, count in enumerate(bins):
+                points.extend((index * (width - 1) / 255, height - count * (height - 2) / peak))
+            canvas.create_line(*points, fill=color, width=1)
 
     def _new_document_state(self, image: Image.Image) -> DocumentState:
         return DocumentState(
@@ -855,10 +1371,127 @@ class ImageEditorApp(tk.Tk):
             return
         self.open_paths(paths, confirm=False)
 
+    def open_project_dialog(self) -> None:
+        path = filedialog.askopenfilename(
+            title="打开编辑项目",
+            filetypes=[("轻量图片编辑器项目", "*.lieproj"), ("所有文件", "*.*")],
+        )
+        if path:
+            self.open_project_path(Path(path))
+
+    def open_project_path(self, path: str | Path, *, confirm: bool = True) -> None:
+        if confirm and not self._confirm_discard_changes():
+            return
+        project_path = Path(path)
+        try:
+            loaded = load_project(project_path)
+        except ProjectSourceMissing:
+            source = filedialog.askopenfilename(
+                title="重新定位项目引用的原图",
+                initialdir=str(project_path.parent),
+                filetypes=[
+                    ("图片文件", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.gif"),
+                    ("所有文件", "*.*"),
+                ],
+            )
+            if not source:
+                return
+            try:
+                loaded = load_project(project_path, source_override=source)
+            except ProjectSourceModified:
+                loaded = load_project(
+                    project_path, source_override=source, allow_modified_source=True
+                )
+            except ProjectError as error:
+                messagebox.showerror(APP_NAME, str(error))
+                return
+        except ProjectSourceModified:
+            if not messagebox.askyesno(
+                APP_NAME,
+                "项目引用的原图已发生变化。继续打开可能导致渲染结果变化，是否只读确认后打开？",
+            ):
+                return
+            try:
+                loaded = load_project(project_path, allow_modified_source=True)
+            except ProjectError as retry_error:
+                messagebox.showerror(APP_NAME, str(retry_error))
+                return
+        except ProjectError as error:
+            messagebox.showerror(APP_NAME, str(error))
+            return
+        self.stop_slideshow()
+        self.document = loaded.document
+        self.original = loaded.document.image
+        self.image_path = loaded.document.source_path
+        self.navigation = NavigationSession.from_activation([self.image_path])
+        self._load_current_image(project_path.name, recovered=True)
+        if loaded.unsupported_commands:
+            self.status_var.set(
+                "项目含不支持的命令，已只读打开：" + ", ".join(loaded.unsupported_commands)
+            )
+        elif loaded.migrated_from:
+            self.status_var.set("旧项目已迁移到 v0.4 格式；保存时会写入新格式")
+        else:
+            self.status_var.set(f"已打开编辑项目：{project_path.name}")
+
+    def save_project_dialog(self) -> None:
+        if self.document is None:
+            messagebox.showinfo(APP_NAME, "请先打开或粘贴一张图片。")
+            return
+        if self.document.project_read_only:
+            messagebox.showwarning(APP_NAME, "该项目包含当前版本不支持的命令，不能覆盖保存。")
+            return
+        if self.document.source_path is None:
+            base_path = filedialog.asksaveasfilename(
+                title="先保存项目原图（无损 PNG）",
+                defaultextension=".png",
+                initialfile="project-source.png",
+                filetypes=[("PNG", "*.png")],
+            )
+            if not base_path:
+                return
+            base_target = Path(base_path)
+            if base_target.exists() and not messagebox.askyesno(
+                APP_NAME, f"原图文件已存在：\n{base_target}\n\n是否覆盖？"
+            ):
+                return
+            try:
+                self.document.image.save(base_target, "PNG")
+                self.document.mark_clean(base_target)
+                self.document.timeline.mark_dirty()
+                self.image_path = base_target
+            except OSError as error:
+                messagebox.showerror(APP_NAME, f"保存项目原图失败：{error}")
+                return
+        initial = (
+            self.document.project_path.name
+            if self.document.project_path is not None
+            else f"{self.document.source_path.stem}.lieproj"
+        )
+        target = filedialog.asksaveasfilename(
+            title="保存编辑项目",
+            defaultextension=".lieproj",
+            initialfile=initial,
+            filetypes=[("轻量图片编辑器项目", "*.lieproj")],
+        )
+        if not target:
+            return
+        try:
+            saved = save_project(self.document, target)
+        except ProjectError as error:
+            messagebox.showerror(APP_NAME, str(error))
+            return
+        self.session_store.clear()
+        self.status_var.set(f"编辑项目已保存：{saved}")
+
     def open_path(self, path: str | Path, confirm: bool = True) -> None:
         self.open_paths([path], confirm=confirm)
 
     def open_paths(self, paths: Sequence[str | Path], confirm: bool = True) -> None:
+        normalized = [Path(path) for path in paths]
+        if len(normalized) == 1 and normalized[0].suffix.casefold() == ".lieproj":
+            self.open_project_path(normalized[0], confirm=confirm)
+            return
         if confirm and not self._confirm_discard_changes():
             return
         session = NavigationSession.from_activation(paths)
@@ -1053,17 +1686,17 @@ class ImageEditorApp(tk.Tk):
             return
         self.title(f"{display_name} — {APP_NAME}")
         self._apply_document_state(self.document.state)
+        self._sync_controls_from_timeline()
         self.info_var.set(
             self._image_info_text()
             if self.image_path is not None
             else f"{display_name}  {self.original.width} x {self.original.height}"
         )
         self.crop_var.set("未设置裁剪")
-        self.undo_stack.clear()
-        self.redo_stack.clear()
         self.pan_offset = (0, 0)
         self.zoom_mode.set("适应")
         self._refresh_preview()
+        self._refresh_history_panel()
         if not recovered:
             self._mark_clean()
 
@@ -1403,6 +2036,7 @@ class ImageEditorApp(tk.Tk):
                     conflict_policy=conflict_policy,
                     backup_on_overwrite=self.document.state.backup_on_overwrite,
                     source_passthrough=self.document.base_revision == 0,
+                    timeline=self.document.timeline,
                     allow_animation_flatten=allow_animation_flatten,
                     allow_transparency_flatten=allow_transparency_flatten,
                 )
@@ -1448,7 +2082,11 @@ class ImageEditorApp(tk.Tk):
         if options is None:
             return
         try:
-            result = prepare_image(self.original, options)
+            result = (
+                render_image(self.original, self.document.timeline)
+                if self.document
+                else prepare_image(self.original, options)
+            )
             copy_image_to_clipboard(result)
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"复制失败：{exc}")
@@ -1678,7 +2316,12 @@ class ImageEditorApp(tk.Tk):
     def _state_signature(self) -> tuple[object, ...] | None:
         if self.document is None:
             return None
-        return (self.document.state, self.document.base_revision)
+        return (
+            self.document.state,
+            self.document.base_revision,
+            self.document.timeline.active_signature(),
+            self.document.project_path,
+        )
 
     def _mark_clean(self, saved_path: Path | None = None) -> None:
         if self.document is not None:
@@ -1797,74 +2440,31 @@ class ImageEditorApp(tk.Tk):
                 self._last_source_status = status.kind
         self._source_monitor_job = self.after(2000, self._monitor_source_file)
 
-    def _snapshot(self, include_image: bool = False) -> dict[str, object]:
-        if self.document is None:
-            return {}
-        snapshot: dict[str, object] = {
-            "document_state": self.document.state,
-            "base_revision": self.document.base_revision,
-        }
-        if include_image:
-            snapshot["original_image"] = self.original.copy()
-            snapshot["image_path"] = self.image_path
-        return snapshot
-
-    def _restore_snapshot(self, snapshot: dict[str, object]) -> None:
-        if self.document is None or "document_state" not in snapshot:
-            return
-        self._restoring_history = True
-        try:
-            if "original_image" in snapshot:
-                restored_image = cast(Image.Image, snapshot["original_image"]).copy()
-                self.document.replace_image(restored_image, "history_image_restore")
-                self.document.base_revision = int(snapshot.get("base_revision", 0))
-                self.original = self.document.image
-                self.image_path = cast(Path | None, snapshot.get("image_path"))
-            state = cast(DocumentState, snapshot["document_state"])
-            self.document.set_state("history_state_restore", state)
-            self._apply_document_state(state)
-        finally:
-            self._restoring_history = False
-        if self.crop_box:
-            self._update_crop_label()
-        else:
-            self.crop_var.set("未设置裁剪")
-        self._refresh_preview()
-
-    def _push_history(self, include_image: bool = False) -> None:
-        if self._restoring_history or self.original is None:
-            return
-        snapshot = self._snapshot(include_image=include_image)
-        if self.undo_stack and self.undo_stack[-1] == snapshot:
-            return
-        self.undo_stack.append(snapshot)
-        self.undo_stack = self.undo_stack[-60:]
-        self.redo_stack.clear()
-
     def undo(self) -> None:
-        if not self.undo_stack:
+        if self.document is None or self.document.undo_command() is None:
             self.status_var.set("没有可撤销的操作")
             return
-        self.redo_stack.append(self._snapshot(include_image=True))
-        snapshot = self.undo_stack.pop()
-        self._restore_snapshot(snapshot)
+        self._sync_controls_from_timeline()
+        self._refresh_history_panel()
+        self._refresh_preview()
         self.status_var.set("已撤销一步")
 
     def redo(self) -> None:
-        if not self.redo_stack:
+        if self.document is None or self.document.redo_command() is None:
             self.status_var.set("没有可重做的操作")
             return
-        self.undo_stack.append(self._snapshot(include_image=True))
-        snapshot = self.redo_stack.pop()
-        self._restore_snapshot(snapshot)
+        self._sync_controls_from_timeline()
+        self._refresh_history_panel()
+        self._refresh_preview()
         self.status_var.set("已重做一步")
 
     def edit_state(self) -> EditState:
         return self.document.state.edit_state if self.document is not None else EditState()
 
     def reset_edits(self, refresh: bool = True) -> None:
-        if refresh:
-            self._push_history()
+        if self.document is None:
+            return
+        self._syncing_document = True
         self.rotation = 0
         self.flip_h = False
         self.flip_v = False
@@ -1874,62 +2474,68 @@ class ImageEditorApp(tk.Tk):
         self.sharpness_var.set(0)
         self.grayscale_var.set(False)
         self.auto_contrast_var.set(False)
-        self._update_document_geometry("reset_edits")
+        self._syncing_document = False
+        for name, value in (
+            ("brightness", 0),
+            ("contrast", 0),
+            ("saturation", 0),
+            ("sharpen", 0),
+            ("grayscale", False),
+            ("auto_contrast", False),
+        ):
+            self._commit_command(
+                EditCommand.create("adjust", {"name": name, "value": value}, "重置快速编辑"),
+                refresh=False,
+            )
         if refresh:
-            self.status_var.set("已撤销所有快速编辑")
+            self.status_var.set("已重置快速编辑")
             self._refresh_preview()
 
     def reset_crop(self) -> None:
-        self._push_history()
         self.crop_box = None
-        if self.document is not None:
-            self.document.update_state("reset_crop", crop_box=None)
+        self._commit_command(EditCommand.create("crop", {"box": None}, "重置裁剪"))
         self.crop_var.set("未设置裁剪")
-        self._refresh_preview()
 
     def apply_crop(self) -> None:
-        if self.original is None:
+        if self.original is None or self.document is None:
             return
         if self.crop_box is None:
             self.status_var.set("没有可应用的裁剪区域")
             return
-        self._push_history(include_image=True)
-        options = ExportOptions(
-            output_format=self.format_var.get(),
-            quality=self.quality_var.get(),
-            crop_box=self.crop_box,
-            edit_state=self.edit_state(),
+        reference = self.base_preview_image
+        if reference is None:
+            return
+        left, top, right, bottom = self.crop_box
+        normalized = (
+            left / reference.width,
+            top / reference.height,
+            right / reference.width,
+            bottom / reference.height,
         )
-        cropped = prepare_image(self.original, options)
-        if self.document is not None:
-            self.document.replace_image(cropped, "apply_crop")
-            state = replace(
-                self.document.state,
-                edit_state=EditState(),
-                crop_box=None,
-                width_text=str(cropped.width),
-                height_text=str(cropped.height),
-                max_side_text="",
+        existing = reduce_timeline(self.document.timeline).crop_box
+        if existing is not None:
+            existing_width = existing[2] - existing[0]
+            existing_height = existing[3] - existing[1]
+            normalized = (
+                existing[0] + normalized[0] * existing_width,
+                existing[1] + normalized[1] * existing_height,
+                existing[0] + normalized[2] * existing_width,
+                existing[1] + normalized[3] * existing_height,
             )
-            self.document.set_state("apply_crop_reset", state)
-            self.original = self.document.image
-            self._apply_document_state(state)
-        else:
-            self.original = cropped
-            self.reset_edits(refresh=False)
-            self.crop_box = None
+        self._commit_command(
+            EditCommand.create("crop", {"box": list(normalized)}, "应用裁剪"),
+            refresh=False,
+        )
+        self.crop_box = None
+        self.document.update_state("apply_crop", crop_box=None)
         self.crop_var.set("未设置裁剪")
-        self.width_var.set(str(self.original.width))
-        self.height_var.set(str(self.original.height))
-        self.info_var.set(self._image_info_text())
-        self.status_var.set("已应用裁剪，可继续编辑")
+        self.status_var.set("已非破坏应用裁剪，可从历史面板恢复")
         self._refresh_preview()
 
     def center_crop(self) -> None:
         image = self.base_preview_image or self._current_working_image()
         if image is None:
             return
-        self._push_history()
         ratio = self._crop_ratio_value()
         if ratio is None:
             ratio = image.width / image.height
@@ -1955,7 +2561,6 @@ class ImageEditorApp(tk.Tk):
         if image is None or ratio is None:
             self._update_crop_label()
             return
-        self._push_history()
         left, top, right, bottom = self.crop_box
         width = right - left
         height = max(4, round(width / ratio))
@@ -1972,32 +2577,32 @@ class ImageEditorApp(tk.Tk):
         self._refresh_preview()
 
     def rotate(self, degrees: int) -> None:
-        if self.original is None:
+        if self.original is None or self.document is None:
             return
-        self._push_history()
-        self.rotation = (self.rotation + degrees) % 360
         self.crop_box = None
-        self._update_document_geometry("rotate")
+        self._commit_command(
+            EditCommand.create("rotate", {"degrees": degrees}, f"旋转 {degrees:+d}°"),
+            refresh=False,
+        )
+        self._sync_controls_from_timeline()
         self.status_var.set(f"已旋转到 {self.rotation}°")
         self._refresh_preview()
 
     def flip_horizontal(self) -> None:
         if self.original is None:
             return
-        self._push_history()
-        self.flip_h = not self.flip_h
         self.crop_box = None
-        self._update_document_geometry("flip_horizontal")
+        self._commit_command(EditCommand.create("flip_horizontal", {}, "水平翻转"), refresh=False)
+        self._sync_controls_from_timeline()
         self.status_var.set("已切换水平翻转")
         self._refresh_preview()
 
     def flip_vertical(self) -> None:
         if self.original is None:
             return
-        self._push_history()
-        self.flip_v = not self.flip_v
         self.crop_box = None
-        self._update_document_geometry("flip_vertical")
+        self._commit_command(EditCommand.create("flip_vertical", {}, "垂直翻转"), refresh=False)
+        self._sync_controls_from_timeline()
         self.status_var.set("已切换垂直翻转")
         self._refresh_preview()
 
@@ -2005,7 +2610,6 @@ class ImageEditorApp(tk.Tk):
         source = self._current_working_image()
         if source is None:
             return
-        self._push_history()
         self._ratio_lock = True
         if value == "original":
             self.width_var.set(str(source.width))
@@ -2041,6 +2645,8 @@ class ImageEditorApp(tk.Tk):
     def _current_working_image(self) -> Image.Image | None:
         if self.original is None:
             return None
+        if self.document is not None:
+            return render_image(self.original, self.document.timeline)
         return apply_edits(self.original, self.edit_state())
 
     def _width_changed(self, _event: tk.Event) -> None:
@@ -2123,10 +2729,6 @@ class ImageEditorApp(tk.Tk):
         self._save_config()
         self._update_estimate()
 
-    def _history_live_adjust(self) -> None:
-        self._push_history()
-        self._live_adjust()
-
     def _set_compare(self, enabled: bool) -> None:
         if self.original is None:
             return
@@ -2199,6 +2801,7 @@ class ImageEditorApp(tk.Tk):
             compare_original=self.compare_original.get(),
             canvas_size=(canvas_w, canvas_h),
             zoom_percent=zoom_percent,
+            timeline=self.document.timeline if self.document is not None else None,
         )
         self.after(10, self._poll_preview, generation, future, canvas_w, canvas_h)
 
@@ -2227,6 +2830,17 @@ class ImageEditorApp(tk.Tk):
     def _display_preview(self, frame: PreviewFrame, canvas_w: int, canvas_h: int) -> None:
         self.base_preview_image = frame.working
         image = frame.image
+        split_x: int | None = None
+        if self.split_compare_var.get() and not self.compare_original.get() and self.original:
+            before = self.original.resize(image.size, Image.Resampling.LANCZOS)
+            before = color_manage_for_display(
+                before,
+                self.document.metadata.icc_profile if self.document else None,
+            )
+            composite = image.copy()
+            split_x = round(image.width * self.split_compare_percent_var.get() / 100)
+            composite.paste(before.crop((0, 0, split_x, image.height)), (0, 0))
+            image = composite
         self.preview = ImageTk.PhotoImage(image)
         self.preview_scale = frame.scale
         centered_x = (canvas_w - image.width) // 2
@@ -2245,8 +2859,33 @@ class ImageEditorApp(tk.Tk):
         self.canvas.create_image(
             self.preview_offset[0], self.preview_offset[1], image=self.preview, anchor="nw"
         )
+        if split_x is not None:
+            divider_x = self.preview_offset[0] + split_x
+            self.canvas.create_line(
+                divider_x,
+                self.preview_offset[1],
+                divider_x,
+                self.preview_offset[1] + image.height,
+                fill="#fbbf24",
+                width=2,
+            )
+            self.canvas.create_text(
+                self.preview_offset[0] + 8,
+                self.preview_offset[1] + 8,
+                text="编辑前",
+                fill="#fbbf24",
+                anchor="nw",
+            )
+            self.canvas.create_text(
+                self.preview_offset[0] + image.width - 8,
+                self.preview_offset[1] + 8,
+                text="编辑后",
+                fill="#5eead4",
+                anchor="ne",
+            )
         self._draw_checker_bounds(image.width, image.height)
         self._draw_crop()
+        self._draw_histogram(frame.working)
         if self.edit_panel_visible_var.get():
             self.after_idle(self._update_estimate)
 
@@ -2272,7 +2911,6 @@ class ImageEditorApp(tk.Tk):
     def _start_crop(self, event: tk.Event) -> None:
         if self.base_preview_image is None:
             return
-        self._push_history()
         self.drag_start = self._canvas_to_image(event.x, event.y)
         self.crop_drag_start_box = self.crop_box
         self.crop_action = self._hit_test_crop(event.x, event.y)
@@ -2513,8 +3151,12 @@ class ImageEditorApp(tk.Tk):
             self.size_var.set("预计输出大小：等待有效尺寸")
             return
         try:
-            prepared = prepare_image(self.original, options)
-            size = estimate_save_size(self.original, options)
+            if self.document is not None:
+                prepared = render_image(self.original, self.document.timeline)
+                size = estimate_save_size(self.original, options, timeline=self.document.timeline)
+            else:
+                prepared = prepare_image(self.original, options)
+                size = estimate_save_size(self.original, options)
         except Exception:
             self.size_var.set("预计输出大小：无法计算")
             return

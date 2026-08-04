@@ -4,6 +4,8 @@ from pathlib import Path
 from installer import (
     APP_REGISTRY_NAME,
     LEGAL_DOCUMENTS,
+    PROJECT_EXTENSION,
+    PROJECT_PROG_ID,
     SUPPORTED_EXTENSIONS,
     default_apps_uri,
     open_command,
@@ -26,6 +28,13 @@ class InstallerTests(unittest.TestCase):
     def test_open_command_quotes_executable_and_file(self) -> None:
         target = Path(r"C:\Users\Test User\LightImageEditor\ImageEditor.exe")
         self.assertEqual(open_command(target), f'"{target}" "%1"')
+
+    def test_non_destructive_project_has_its_own_file_type(self) -> None:
+        self.assertEqual(PROJECT_EXTENSION, ".lieproj")
+        self.assertEqual(PROJECT_PROG_ID, "LightImageEditor.Project")
+        script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
+        self.assertIn("LightImageEditor.Project", script)
+        self.assertIn(r"Software\Classes\.lieproj", script)
 
     def test_default_apps_uri_targets_per_user_registration_on_windows_11(self) -> None:
         self.assertEqual(

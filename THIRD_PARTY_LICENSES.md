@@ -9,11 +9,12 @@ substitute for the authoritative licence text distributed by each component.
 - Platform: Windows x64
 - Python: 3.12.10
 - Pillow: 11.3.0
+- NumPy: 2.5.1
 - PyInstaller: 6.17.0
 - Source of version data: installed metadata in `.venv` plus `pip freeze --all`
 - Application artifacts checked: `release/LightImageEditor/ImageEditor.exe`,
-  `release/LightImageEditor-Portable-x64-0.3.0.exe` and
-  `release/LightImageEditor-Setup-x64-0.3.0.exe`
+  `release/LightImageEditor-Portable-x64-0.4.0.exe` and
+  `release/LightImageEditor-Setup-x64-0.4.0.exe`
 
 The virtual environment is not a release artifact. Paths below identify the
 authoritative files in the audited local installation so that the release
@@ -26,6 +27,7 @@ process can copy them into a distributable notice bundle.
 | Python | 3.12.10 | Embedded interpreter/runtime | PSF License Version 2 and bundled notices | Python installation `LICENSE.txt` |
 | Tcl/Tk | 8.6 | Tkinter GUI runtime | Tcl/Tk licence | Python installation `tcl`/`tk` licence files; verify during packaging |
 | Pillow | 11.3.0 | Image decode, processing and encode | MIT-CMU, plus bundled native-library terms | `.venv/Lib/site-packages/pillow-11.3.0.dist-info/licenses/LICENSE` |
+| NumPy | 2.5.1 | Float32 colour processing, curves, histograms and analysis | BSD-3-Clause, plus bundled third-party terms | `.venv/Lib/site-packages/numpy-2.5.1.dist-info/licenses/` |
 | PyInstaller | 6.17.0 | Build tool and embedded bootloader/runtime hooks | GPL-2.0-or-later WITH Bootloader-exception; runtime hooks Apache-2.0 | `.venv/Lib/site-packages/pyinstaller-6.17.0.dist-info/licenses/COPYING.txt` |
 | pyinstaller-hooks-contrib | 2026.6 | PyInstaller hook set | Standard hooks GPL-2.0-or-later; runtime hooks Apache-2.0 | `.venv/Lib/site-packages/pyinstaller_hooks_contrib-2026.6.dist-info/licenses/LICENSE` |
 | Inno Setup | 7.0.2 | Windows installer compiler | Free for non-commercial use; commercial use requires a licence | Verified compiler under `.tools/inno`; authoritative terms at `jrsoftware.org` |

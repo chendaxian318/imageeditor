@@ -12,6 +12,7 @@ from typing import Any
 
 from PIL import Image
 
+from .commands import EditTimeline
 from .document import (
     Document,
     DocumentOperation,
@@ -20,6 +21,7 @@ from .document import (
     SourceMetadata,
     attach_source_metadata,
 )
+from .projects import timeline_from_legacy_state
 
 SESSION_PATH = Path.home() / ".light_image_editor_session.json"
 
@@ -47,7 +49,7 @@ class SessionStore:
         recovery_image = str(recovery_path)
 
         payload: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "source_path": str(document.source_path) if document.source_path else None,
             "source_fingerprint": (
                 {
@@ -61,6 +63,8 @@ class SessionStore:
             ),
             "metadata": document.metadata.to_json(),
             "state": document.state.to_json(),
+            "timeline": document.timeline.to_json(),
+            "project_path": str(document.project_path) if document.project_path else None,
             "operations": [operation.to_json() for operation in document.operations],
             "base_revision": document.base_revision,
             "recovery_image": recovery_image,
@@ -77,7 +81,8 @@ class SessionStore:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             return None
-        if payload.get("schema_version") != 1:
+        schema_version = payload.get("schema_version")
+        if schema_version not in {1, 2}:
             return None
         try:
             metadata = SourceMetadata.from_json(dict(payload.get("metadata", {})))
@@ -126,6 +131,13 @@ class SessionStore:
                 source_fingerprint=fingerprint,
                 base_revision=int(payload.get("base_revision", 0)),
             )
+            if schema_version == 2:
+                document.timeline = EditTimeline.from_json(dict(payload.get("timeline", {})))
+                project_value = payload.get("project_path")
+                if isinstance(project_value, str) and project_value:
+                    document.project_path = Path(project_value)
+            else:
+                document.timeline = timeline_from_legacy_state(state, image.size)
         except (TypeError, ValueError):
             return None
         operations: list[DocumentOperation] = []

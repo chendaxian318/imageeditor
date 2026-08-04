@@ -23,6 +23,8 @@ APP_NAME = PRODUCT_NAME_ZH
 EXE_NAME = EXECUTABLE_NAME
 APP_REGISTRY_NAME = REGISTRY_NAME
 SUPPORTED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif")
+PROJECT_EXTENSION = ".lieproj"
+PROJECT_PROG_ID = "LightImageEditor.Project"
 CONTEXT_MENU_KEY = r"Software\Classes\SystemFileAssociations\image\shell\LightImageEditor"
 CAPABILITIES_KEY = rf"Software\{APP_REGISTRY_NAME}\Capabilities"
 REGISTERED_APPLICATIONS_KEY = r"Software\RegisteredApplications"
@@ -130,6 +132,18 @@ def register_file_associations(target: Path) -> None:
         for extension in SUPPORTED_EXTENSIONS:
             winreg.SetValueEx(key, extension, 0, winreg.REG_SZ, "")
 
+    project_key = rf"Software\Classes\{PROJECT_PROG_ID}"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, project_key) as key:
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"{APP_NAME} 编辑项目")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, project_key + r"\DefaultIcon") as key:
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'"{target}",0')
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, project_key + r"\shell\open\command") as key:
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, command)
+    with winreg.CreateKey(
+        winreg.HKEY_CURRENT_USER, rf"Software\Classes\{PROJECT_EXTENSION}"
+    ) as key:
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, PROJECT_PROG_ID)
+
     for extension in SUPPORTED_EXTENSIONS:
         with winreg.CreateKey(
             winreg.HKEY_CURRENT_USER,
@@ -169,6 +183,8 @@ def unregister_file_associations() -> None:
     delete_registry_tree(winreg.HKEY_CURRENT_USER, PROG_ID_KEY)
     delete_registry_tree(winreg.HKEY_CURRENT_USER, rf"Software\{APP_REGISTRY_NAME}")
     delete_registry_tree(winreg.HKEY_CURRENT_USER, APPLICATION_KEY)
+    delete_registry_tree(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{PROJECT_PROG_ID}")
+    delete_registry_tree(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{PROJECT_EXTENSION}")
     delete_registry_value(winreg.HKEY_CURRENT_USER, REGISTERED_APPLICATIONS_KEY, APP_REGISTRY_NAME)
     for extension in SUPPORTED_EXTENSIONS:
         delete_registry_value(

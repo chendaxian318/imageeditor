@@ -15,6 +15,7 @@
 #define MyAppExeName "ImageEditor.exe"
 #define RegistryName "LightImageEditor"
 #define ProgId "LightImageEditor.Image"
+#define ProjectProgId "LightImageEditor.Project"
 
 [Setup]
 AppId={#MyAppId}
@@ -88,6 +89,11 @@ Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; Va
 Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".gif"; ValueData: "{#ProgId}"
 Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#RegistryName}"; ValueData: "Software\{#RegistryName}\Capabilities"; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExeName}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\{#ProjectProgId}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppName} 编辑项目"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\{#ProjectProgId}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"",0"
+Root: HKCU; Subkey: "Software\Classes\{#ProjectProgId}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\.lieproj"; ValueType: string; ValueName: ""; ValueData: "{#ProjectProgId}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\.lieproj\OpenWithProgids"; ValueType: none; ValueName: "{#ProjectProgId}"; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\image\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\image\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\image\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu

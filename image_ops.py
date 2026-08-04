@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps, PngImagePlugin
 
 if TYPE_CHECKING:
+    from light_image_editor.commands import EditTimeline
     from light_image_editor.document import SourceFingerprint, SourceMetadata
 
 SUPPORTED_INPUTS = {
@@ -254,8 +255,15 @@ def watermark_xy(
     return (max(0, x), max(0, y))
 
 
-def estimate_save_size(image: Image.Image, options: ExportOptions) -> int:
-    result = prepare_image(image, options)
+def estimate_save_size(
+    image: Image.Image, options: ExportOptions, *, timeline: EditTimeline | None = None
+) -> int:
+    if timeline is not None:
+        from light_image_editor.renderer import render_image
+
+        result = render_image(image, timeline)
+    else:
+        result = prepare_image(image, options)
     output_format = normalize_format(options.output_format)
     result = convert_for_format(result, output_format)
     return len(encode_image(result, output_format, options))
@@ -356,6 +364,7 @@ def save_image(
     conflict_policy: ConflictPolicy = ConflictPolicy.ERROR,
     backup_on_overwrite: bool = False,
     source_passthrough: bool = False,
+    timeline: EditTimeline | None = None,
     allow_animation_flatten: bool = False,
     allow_transparency_flatten: bool = False,
     before_replace: Callable[[Path, Path], object] | None = None,
@@ -393,6 +402,7 @@ def save_image(
         and metadata.original_format == output_format
         and options.preserve_metadata
         and _has_no_rendering_changes(options)
+        and (timeline is None or timeline.cursor == 0)
     ):
         if not source_is_current:
             raise SourceChangedError("源文件已被外部修改、移动或删除，不能按原质量复制。")
@@ -414,7 +424,12 @@ def save_image(
     ):
         raise TransparencyFlatteningRequired("目标格式不支持透明通道，需要明确确认使用白色背景。")
 
-    result = prepare_image(image, options)
+    if timeline is not None:
+        from light_image_editor.renderer import render_image
+
+        result = render_image(image, timeline)
+    else:
+        result = prepare_image(image, options)
     result = convert_for_format(result, output_format)
     metadata_kwargs = (
         metadata_save_kwargs(output_format, metadata)

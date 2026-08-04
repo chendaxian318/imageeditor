@@ -13,6 +13,8 @@ from PIL import Image
 
 from image_ops import EditState, ExportOptions
 
+from .commands import EditCommand, EditTimeline
+
 ORIENTATION_TAG = 274
 SOURCE_METADATA_KEY = "_light_image_editor_source_metadata"
 
@@ -173,7 +175,11 @@ class Document:
     state: DocumentState = DocumentState()
     source_fingerprint: SourceFingerprint | None = None
     operations: list[DocumentOperation] = field(default_factory=list)
+    timeline: EditTimeline = field(default_factory=EditTimeline)
     base_revision: int = 0
+    project_path: Path | None = None
+    project_read_only: bool = False
+    project_extra_fields: dict[str, Any] = field(default_factory=dict)
     _clean_state: DocumentState = field(init=False, repr=False)
     _clean_base_revision: int = field(init=False, repr=False)
 
@@ -204,7 +210,23 @@ class Document:
 
     @property
     def dirty(self) -> bool:
-        return self.state != self._clean_state or self.base_revision != self._clean_base_revision
+        return (
+            self.state != self._clean_state
+            or self.base_revision != self._clean_base_revision
+            or self.timeline.dirty
+        )
+
+    def commit_command(self, command: EditCommand, *, merge: bool = False) -> None:
+        self.timeline.commit(command, merge=merge)
+
+    def undo_command(self) -> EditCommand | None:
+        return self.timeline.undo()
+
+    def redo_command(self) -> EditCommand | None:
+        return self.timeline.redo()
+
+    def jump_history(self, cursor: int) -> None:
+        self.timeline.jump(cursor)
 
     def update_state(self, kind: str, **changes: Any) -> None:
         updated = replace(self.state, **changes)
@@ -247,6 +269,7 @@ class Document:
                 self.source_fingerprint = None
         self._clean_state = self.state
         self._clean_base_revision = self.base_revision
+        self.timeline.mark_clean()
 
     def rebind_source(self, new_path: str | Path) -> None:
         """Track a renamed/moved source without changing whether edits are dirty."""
@@ -260,6 +283,7 @@ class Document:
     def mark_recovered_dirty(self) -> None:
         self._clean_state = DocumentState()
         self._clean_base_revision = -1
+        self.timeline.mark_dirty()
 
     def source_status(self) -> SourceStatus:
         if self.source_path is None or self.source_fingerprint is None:

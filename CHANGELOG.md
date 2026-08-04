@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.0 — 2026-08-04
+
+### Non-destructive editing core
+
+- Added a serializable command timeline with deterministic stage ordering: geometry, crop, colour, annotation, size and export.
+- Added stable undo/redo for 100+ operations, branch truncation, slider-command merging and direct jumps from the history panel.
+- Added one renderer shared by preview, export, size estimation and clipboard copy so full-resolution preview/export pixels stay aligned.
+- Added fine rotation with optional automatic edge crop, projection-based automatic straighten, histogram analysis and before/after split comparison.
+- Added levels, per-channel RGB curves, colour temperature, tint, shadows, highlights, bounded sharpening and edge-preserving denoise.
+
+### Persistent projects
+
+- Added versioned `.lieproj` JSON projects with external source references, relative-path fallback, source SHA-256 validation and atomic writes.
+- Added schema migration for legacy document state, tolerant unknown top-level fields and safe read-only opening for unsupported future commands.
+- Added timeline-aware crash recovery and project-file registration in the Windows installer.
+
+### Validation
+
+- 79 automated tests pass, including 100-operation undo/redo, project round trips and migration, unknown-field compatibility, auto-straighten confidence, histogram counts and preview/export pixel identity.
+
 ## 0.3.0 — 2026-08-04
 
 ### Fidelity and document model

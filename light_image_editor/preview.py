@@ -10,7 +10,9 @@ from io import BytesIO
 from PIL import Image, ImageCms
 
 from image_ops import EditState, apply_edits
+from light_image_editor.commands import EditTimeline
 from light_image_editor.document import metadata_from_image
+from light_image_editor.renderer import render_image
 
 _DISPLAY_PROFILE = ImageCms.createProfile("sRGB")
 
@@ -31,11 +33,14 @@ def render_preview(
     compare_original: bool,
     canvas_size: tuple[int, int],
     zoom_percent: int | None,
+    timeline: EditTimeline | None = None,
 ) -> PreviewFrame:
     """Apply edits and resize without touching Tk from the worker thread."""
 
     if compare_original:
         working = original
+    elif timeline is not None:
+        working = render_image(original, timeline)
     elif edit_state == EditState():
         working = original
     else:
@@ -100,6 +105,7 @@ class PreviewRenderer:
         compare_original: bool,
         canvas_size: tuple[int, int],
         zoom_percent: int | None,
+        timeline: EditTimeline | None = None,
     ) -> Future[PreviewFrame]:
         with self._lock:
             if self._pending is not None and not self._pending.running():
@@ -111,6 +117,7 @@ class PreviewRenderer:
                 compare_original=compare_original,
                 canvas_size=canvas_size,
                 zoom_percent=zoom_percent,
+                timeline=timeline,
             )
             self._pending = future
             return future
