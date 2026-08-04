@@ -5,6 +5,7 @@ import time
 import tkinter as tk
 import unittest
 from pathlib import Path
+from tkinter import ttk
 from typing import cast
 from unittest.mock import Mock, patch
 
@@ -19,7 +20,11 @@ from light_image_editor.renderer import reduce_timeline, render_image
 from light_image_editor.session import SessionStore
 from light_image_editor.settings import SettingsStore
 from light_image_editor.thumbnails import THUMBNAIL_SIZE, ThumbnailLoader, generate_thumbnail
-from light_image_editor.ui.main_window import ImageEditorApp, _timeline_with_annotation_draft
+from light_image_editor.ui.main_window import (
+    ZOOM_LEVELS,
+    ImageEditorApp,
+    _timeline_with_annotation_draft,
+)
 
 
 class ThumbnailGenerationTests(unittest.TestCase):
@@ -264,6 +269,45 @@ class InteractionLogicTests(unittest.TestCase):
                 if app.winfo_exists():
                     app._shutdown_services()
                     app.destroy()
+
+    def test_zoom_combobox_popdown_and_fit_selection_do_not_raise_callback_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = SettingsStore(root / "settings.json")
+            settings.save({"schema_version": 1, "onboarding_completed": True})
+            app = ImageEditorApp(
+                settings_store=settings,
+                session_store=SessionStore(root / "session.json"),
+            )
+            zoom_box: ttk.Combobox | None = None
+            try:
+                self._cancel_startup_jobs(app)
+                app.update()
+                zoom_box = next(
+                    widget
+                    for widget in app.toolbar.winfo_children()
+                    if isinstance(widget, ttk.Combobox)
+                    and tuple(widget.cget("values")) == ZOOM_LEVELS
+                )
+                app.set_zoom("100%")
+                app.pan_offset = (11, 13)
+
+                app.tk.call("ttk::combobox::Post", str(zoom_box))
+                app.update()
+                zoom_box.current(0)
+                zoom_box.event_generate("<<ComboboxSelected>>")
+                app.update()
+
+                self.assertEqual(app.zoom_mode.get(), "适应")
+                self.assertEqual(app.pan_offset, (0, 0))
+                self.assertEqual(self.callback_errors, [])
+            finally:
+                if zoom_box is not None:
+                    try:
+                        app.tk.call("ttk::combobox::Unpost", str(zoom_box))
+                    except tk.TclError:
+                        pass
+                self._close_app(app)
 
     def test_size_preset_uses_rotated_and_cropped_content_before_resize(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

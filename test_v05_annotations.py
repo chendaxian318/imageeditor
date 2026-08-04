@@ -71,7 +71,10 @@ class AnnotationModelTests(unittest.TestCase):
         self.assertEqual((diagonal.x2, diagonal.y2), (0.9, 0.8))
 
     def test_custom_crop_ratio_accepts_decimal_dimensions(self) -> None:
-        self.assertAlmostEqual(parse_crop_ratio("2.39:1"), 2.39)
+        ratio = parse_crop_ratio("2.39:1")
+        self.assertIsNotNone(ratio)
+        assert ratio is not None
+        self.assertAlmostEqual(ratio, 2.39)
         self.assertIsNone(parse_crop_ratio("自由"))
         with self.assertRaises(ValueError):
             parse_crop_ratio("3/2")

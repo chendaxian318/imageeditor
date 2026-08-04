@@ -184,6 +184,12 @@ class Localizer:
     def bind_mapped_windows(self, root: tk.Misc) -> None:
         def mapped(event: tk.Event) -> None:
             widget = event.widget
+            # Tcl-created windows such as a ttk.Combobox popdown are not
+            # registered as Tkinter widget objects.  Tkinter consequently
+            # exposes their path as a plain string for global <Map> bindings.
+            # They have no Python widget tree to localise, so ignore them.
+            if not isinstance(widget, tk.Misc):
+                return
             try:
                 widget.after_idle(lambda: self.apply_widget_tree(widget))
             except tk.TclError:

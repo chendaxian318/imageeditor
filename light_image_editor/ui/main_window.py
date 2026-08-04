@@ -483,8 +483,14 @@ class ImageEditorApp(tk.Tk):
         )
 
     def _on_accessible_widget_map(self, event: tk.Event) -> None:
+        widget = event.widget
+        # A ttk.Combobox drop-down is created directly by Tcl.  Its <Map>
+        # event carries a string widget path rather than a Tkinter object and
+        # there is no Python-side child tree on which to set accessible names.
+        if not isinstance(widget, tk.Misc):
+            return
         try:
-            event.widget.after_idle(lambda: self._name_interactive_widgets(event.widget))
+            widget.after_idle(lambda: self._name_interactive_widgets(widget))
         except tk.TclError:
             pass
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.3 — 2026-08-04
+
+- Fixed the zoom and other combo-box drop-downs reporting callback errors when Tcl maps
+  their internal popdown windows.
+- Added a real Tk regression test that opens the zoom list, selects Fit and verifies that
+  the view resets without any callback exception.
+
 ## 1.1.2 — 2026-08-04
 
 - Added throttled, non-committing preview timelines so annotations follow the pointer while they are created, moved or resized.
