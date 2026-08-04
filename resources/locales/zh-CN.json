@@ -55,7 +55,9 @@
     "accessibility_toolbar": "查看工具栏",
     "accessibility_edit_tools": "编辑工具栏",
     "accessibility_panel": "编辑参数面板",
-    "accessibility_status": "状态栏"
+    "accessibility_status": "状态栏",
+    "accessibility_thumbnails": "当前目录图片缩略图列表",
+    "thumbnail_directory": "当前目录"
   },
   "replacements": {
     "app": "轻量图片编辑器",
@@ -82,6 +84,8 @@
     "slideshow": "幻灯片",
     "immersive": "沉浸式看图",
     "show_edit_tools": "显示编辑工具",
+    "show_thumbnail_sidebar": "显示缩略图侧栏",
+    "thumbnails": "缩略图",
     "undo": "撤销",
     "redo": "重做",
     "copy": "复制",

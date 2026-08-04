@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0 — in development
+
+- Added a left thumbnail sidebar for the current directory or explicit multi-file browsing sequence.
+- Kept thumbnail decoding off the Tk thread and virtualized the list so only visible rows plus a small buffer are rendered.
+- Added current-image highlighting, click-to-open with unsaved-edit protection, automatic scroll tracking and synchronization after rename, move or recycle-bin deletion.
+- Added a persistent visibility preference, Ctrl+B toggle, dark/light theme colours, bilingual labels and an accessible region name.
+
 ## 1.0.0 — pending production gates
 
 - Added a fail-closed production build mode that requires a timestamped Authenticode publisher, protected update-manifest key and signed previous-version rollback installer.

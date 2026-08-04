@@ -268,7 +268,8 @@ try {
         "test_architecture.py", "test_build_metadata.py", "test_identity_resources.py",
         "test_image_ops.py", "test_installer.py", "test_v03_safety.py",
         "test_viewer_services.py", "test_v07_experience.py", "test_v08_release_system.py",
-        "test_v09_release_candidate.py", "test_v10_production_release.py"
+        "test_v09_release_candidate.py", "test_v10_production_release.py",
+        "test_v11_thumbnail_sidebar.py"
     )
 
     if (-not $SkipTests) {

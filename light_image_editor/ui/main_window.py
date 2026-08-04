@@ -83,7 +83,8 @@ from ..renderer import (
 )
 from ..session import SessionStore
 from ..settings import SETTINGS_SCHEMA_VERSION, SettingsStore
-from ..theme import ThemeManager, resolve_theme
+from ..theme import ThemeManager, ThemeTokens, resolve_theme
+from ..thumbnails import ThumbnailLoader
 from ..update_security import load_trusted_keys, trusted_keys_path
 from ..updater import (
     UpdateCache,
@@ -95,6 +96,7 @@ from ..updater import (
 from ..version import __version__
 from ..windows_drop import WindowsFileDrop
 from .curve_editor import CurveEditor
+from .thumbnail_sidebar import ThumbnailSidebar
 
 APP_NAME = PRODUCT_NAME_ZH
 ZOOM_LEVELS = ("适应", "50%", "100%", "150%", "200%")
@@ -225,6 +227,7 @@ class ImageEditorApp(tk.Tk):
         self.crop_var = tk.StringVar(value="未设置裁剪")
         self.size_var = tk.StringVar(value="预计输出大小：-")
         self.edit_panel_visible_var = tk.BooleanVar(value=False)
+        self.thumbnail_sidebar_visible_var = tk.BooleanVar(value=True)
         self.slideshow_interval_var = tk.DoubleVar(value=3.0)
         self.slideshow_loop_var = tk.BooleanVar(value=True)
         self.preserve_metadata_var = tk.BooleanVar(value=True)
@@ -339,6 +342,7 @@ class ImageEditorApp(tk.Tk):
 
     def _setup_experience(self) -> None:
         tokens = self.theme_manager.apply(self.theme_mode_var.get())
+        self._apply_thumbnail_palette(tokens)
         self._last_theme_name = tokens.name
         for variable in (
             self.status_var,
@@ -351,13 +355,21 @@ class ImageEditorApp(tk.Tk):
             self.localizer.register_variable(variable)
         self.localizer.bind_mapped_windows(self)
         self.localizer.set_locale(self.locale_var.get(), self)
+        self.thumbnail_sidebar.set_title(self.localizer.gettext("thumbnail_directory"))
         self.title(self.localizer.translate_text(APP_NAME))
         self._refresh_accessible_names()
         toolbar_target = self.toolbar.winfo_children()[0]
         edit_target = self.edit_toolbar.winfo_children()[0]
         self.focus_navigator = FocusNavigator(
             self,
-            (toolbar_target, edit_target, self.canvas, self.panel_canvas, self.status_label),
+            (
+                toolbar_target,
+                self.thumbnail_sidebar.canvas,
+                edit_target,
+                self.canvas,
+                self.panel_canvas,
+                self.status_label,
+            ),
         )
         self._name_interactive_widgets(self)
         self.bind_all("<Map>", self._on_accessible_widget_map, add="+")
@@ -386,6 +398,20 @@ class ImageEditorApp(tk.Tk):
         set_accessible_name(self.edit_toolbar, self.localizer.gettext("accessibility_edit_tools"))
         set_accessible_name(self.panel_canvas, self.localizer.gettext("accessibility_panel"))
         set_accessible_name(self.status_label, self.localizer.gettext("accessibility_status"))
+        set_accessible_name(
+            self.thumbnail_sidebar.canvas,
+            self.localizer.gettext("accessibility_thumbnails"),
+        )
+
+    def _apply_thumbnail_palette(self, tokens: ThemeTokens) -> None:
+        self.thumbnail_sidebar.apply_palette(
+            surface=tokens.surface,
+            surface_alt=tokens.surface_alt,
+            foreground=tokens.foreground,
+            muted=tokens.muted,
+            accent=tokens.accent,
+            border=tokens.border,
+        )
 
     def _on_accessible_widget_map(self, event: tk.Event) -> None:
         try:
@@ -429,6 +455,7 @@ class ImageEditorApp(tk.Tk):
             if resolved.name != self._last_theme_name:
                 tokens = self.theme_manager.apply("system")
                 self._last_theme_name = tokens.name
+                self._apply_thumbnail_palette(tokens)
                 self.localizer.apply_widget_tree(self)
         self._theme_poll_job = self.after(2000, self._poll_system_theme)
 
@@ -504,15 +531,16 @@ class ImageEditorApp(tk.Tk):
         style.configure("Accent.TButton", padding=(12, 8), font=("Microsoft YaHei UI", 9, "bold"))
         style.configure("Panel.TLabelframe", padding=12)
 
-        self.columnconfigure(0, weight=1)
-        self.columnconfigure(1, weight=0)
+        self.columnconfigure(0, weight=0)
+        self.columnconfigure(1, weight=1)
+        self.columnconfigure(2, weight=0)
         self.rowconfigure(2, weight=1)
 
         self._build_menu()
 
         self.toolbar = ttk.Frame(self, padding=(12, 10))
-        self.toolbar.grid(row=0, column=0, columnspan=2, sticky="ew")
-        self.toolbar.columnconfigure(10, weight=1)
+        self.toolbar.grid(row=0, column=0, columnspan=3, sticky="ew")
+        self.toolbar.columnconfigure(11, weight=1)
 
         ttk.Button(self.toolbar, text="打开", command=self.open_file).grid(
             row=0, column=0, padx=(0, 8)
@@ -541,16 +569,22 @@ class ImageEditorApp(tk.Tk):
             variable=self.edit_panel_visible_var,
             command=self.toggle_edit_panel,
         ).grid(row=0, column=7, padx=(0, 12))
-        ttk.Label(self.toolbar, text="缩放").grid(row=0, column=8, padx=(0, 4))
+        ttk.Checkbutton(
+            self.toolbar,
+            text="缩略图",
+            variable=self.thumbnail_sidebar_visible_var,
+            command=self.toggle_thumbnail_sidebar,
+        ).grid(row=0, column=8, padx=(0, 12))
+        ttk.Label(self.toolbar, text="缩放").grid(row=0, column=9, padx=(0, 4))
         zoom = ttk.Combobox(
             self.toolbar, textvariable=self.zoom_mode, values=ZOOM_LEVELS, state="readonly", width=7
         )
-        zoom.grid(row=0, column=9, padx=(0, 8))
+        zoom.grid(row=0, column=10, padx=(0, 8))
         zoom.bind("<<ComboboxSelected>>", lambda _event: self._zoom_changed())
-        ttk.Label(self.toolbar, textvariable=self.info_var).grid(row=0, column=10, sticky="e")
+        ttk.Label(self.toolbar, textvariable=self.info_var).grid(row=0, column=11, sticky="e")
 
         self.edit_toolbar = ttk.Frame(self, padding=(12, 0, 12, 8))
-        self.edit_toolbar.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.edit_toolbar.grid(row=1, column=0, columnspan=3, sticky="ew")
         ttk.Button(self.edit_toolbar, text="粘贴", command=self.paste_from_clipboard).grid(
             row=0, column=0, padx=(0, 8)
         )
@@ -625,8 +659,18 @@ class ImageEditorApp(tk.Tk):
         self.favorite_toolbar.grid(row=2, column=0, columnspan=15, sticky="ew", pady=(6, 0))
         self._refresh_favorite_toolbar()
 
-        canvas_frame = ttk.Frame(self, padding=(12, 0, 8, 12))
-        canvas_frame.grid(row=2, column=0, sticky="nsew")
+        self.thumbnail_sidebar = ThumbnailSidebar(
+            self,
+            self._activate_thumbnail,
+            loader=ThumbnailLoader(
+                max_workers=max(1, min(4, self.decode_workers_var.get())), cache_size=96
+            ),
+            title=self.localizer.gettext("thumbnail_directory"),
+        )
+        self.thumbnail_sidebar.grid(row=2, column=0, sticky="ns")
+
+        canvas_frame = ttk.Frame(self, padding=(8, 0, 8, 12))
+        canvas_frame.grid(row=2, column=1, sticky="nsew")
         canvas_frame.rowconfigure(0, weight=1)
         canvas_frame.columnconfigure(0, weight=1)
 
@@ -657,7 +701,7 @@ class ImageEditorApp(tk.Tk):
         self.canvas.bind("<Alt-Down>", lambda _event: self._nudge_selected(0, 1))
 
         self.panel_shell = ttk.Frame(self, padding=(0, 0, 8, 12), width=360)
-        self.panel_shell.grid(row=2, column=1, sticky="ns")
+        self.panel_shell.grid(row=2, column=2, sticky="ns")
         self.panel_shell.rowconfigure(0, weight=1)
         self.panel_shell.columnconfigure(0, weight=1)
         panel_canvas = tk.Canvas(self.panel_shell, width=340, highlightthickness=0)
@@ -1105,10 +1149,12 @@ class ImageEditorApp(tk.Tk):
         self.status_label = ttk.Label(
             self, textvariable=self.status_var, anchor="w", padding=(12, 6)
         )
-        self.status_label.grid(row=3, column=0, columnspan=2, sticky="ew")
+        self.status_label.grid(row=3, column=0, columnspan=3, sticky="ew")
         if not self.edit_panel_visible_var.get():
             self.edit_toolbar.grid_remove()
             self.panel_shell.grid_remove()
+        if not self.thumbnail_sidebar_visible_var.get():
+            self.thumbnail_sidebar.grid_remove()
         self.after_idle(self._show_empty_state)
 
     def _build_menu(self) -> None:
@@ -1200,6 +1246,12 @@ class ImageEditorApp(tk.Tk):
             label="显示编辑工具",
             variable=self.edit_panel_visible_var,
             command=self.toggle_edit_panel,
+        )
+        view_menu.add_checkbutton(
+            label="显示缩略图侧栏",
+            accelerator="Ctrl+B",
+            variable=self.thumbnail_sidebar_visible_var,
+            command=self.toggle_thumbnail_sidebar,
         )
         view_menu.add_command(label="全屏", accelerator="F11", command=self.toggle_fullscreen)
         view_menu.add_command(
@@ -1622,9 +1674,11 @@ class ImageEditorApp(tk.Tk):
                 bounded_int(selected_cache, self.preview_cache_var.get(), 1, 20)
             )
             self.localizer.set_locale(locale, self)
+            self.thumbnail_sidebar.set_title(self.localizer.gettext("thumbnail_directory"))
             self.title(self.localizer.translate_text(APP_NAME))
             tokens = self.theme_manager.apply(theme_mode)
             self._last_theme_name = tokens.name
+            self._apply_thumbnail_palette(tokens)
             self._refresh_accessible_names()
             if self.original is None:
                 self._show_empty_state()
@@ -1914,6 +1968,7 @@ class ImageEditorApp(tk.Tk):
         self.bind("<Control-y>", lambda _event: self.redo())
         self.bind("<Control-0>", lambda _event: self.reset_view())
         self.bind("<Control-1>", lambda _event: self.set_zoom("100%"))
+        self.bind("<Control-b>", lambda _event: self.toggle_thumbnail_sidebar_from_shortcut())
         self.bind("<Control-plus>", lambda _event: self.step_zoom(1))
         self.bind("<Control-equal>", lambda _event: self.step_zoom(1))
         self.bind("<Control-minus>", lambda _event: self.step_zoom(-1))
@@ -2521,6 +2576,7 @@ class ImageEditorApp(tk.Tk):
             self.annotation_tool_var.set(saved_tool)
             self.current_tool_label_var.set(f"当前：{ANNOTATION_TOOL_LABELS[saved_tool]}")
         self.edit_panel_visible_var.set(bool(data.get("edit_panel_visible", False)))
+        self.thumbnail_sidebar_visible_var.set(bool(data.get("thumbnail_sidebar_visible", True)))
         self.slideshow_interval_var.set(float(data.get("slideshow_interval", 3.0)))
         self.slideshow_loop_var.set(bool(data.get("slideshow_loop", True)))
         self.preserve_metadata_var.set(bool(data.get("preserve_metadata", True)))
@@ -2570,6 +2626,7 @@ class ImageEditorApp(tk.Tk):
                 "last_project": self.last_project,
                 "annotation_tool": self.annotation_tool_var.get(),
                 "edit_panel_visible": self.edit_panel_visible_var.get(),
+                "thumbnail_sidebar_visible": self.thumbnail_sidebar_visible_var.get(),
                 "slideshow_interval": self.slideshow_interval_var.get(),
                 "slideshow_loop": self.slideshow_loop_var.get(),
                 "preserve_metadata": self.preserve_metadata_var.get(),
@@ -2754,6 +2811,7 @@ class ImageEditorApp(tk.Tk):
             return
         self.stop_slideshow()
         self.navigation = session
+        self.thumbnail_sidebar.set_paths(session.files, session.current)
         self._failed_navigation_paths.clear()
         self._begin_image_load(session.current, notify_error=True)
 
@@ -2777,6 +2835,7 @@ class ImageEditorApp(tk.Tk):
         skip_direction: int = 0,
     ) -> None:
         self._stop_animation_playback()
+        self.thumbnail_sidebar.select(path)
         self._load_generation += 1
         generation = self._load_generation
         self.status_var.set(f"正在后台解码：{path.name}")
@@ -3047,6 +3106,24 @@ class ImageEditorApp(tk.Tk):
         if target is not None:
             self._begin_image_load(target, notify_error=True)
 
+    def _activate_thumbnail(self, path: Path) -> bool:
+        current = self.navigation.current
+        if current is not None:
+            try:
+                if current.resolve() == path.resolve():
+                    return True
+            except OSError:
+                if current.absolute() == path.absolute():
+                    return True
+        if not self._confirm_discard_changes():
+            return False
+        if not self.navigation.select(path):
+            self.status_var.set("图片已不在当前浏览序列中")
+            return False
+        self.stop_slideshow()
+        self._begin_image_load(path, notify_error=True)
+        return True
+
     def paste_from_clipboard(self) -> None:
         if not self._confirm_discard_changes():
             return
@@ -3140,6 +3217,22 @@ class ImageEditorApp(tk.Tk):
         self._save_config()
         self._schedule_preview()
 
+    def toggle_thumbnail_sidebar_from_shortcut(self) -> str:
+        self.thumbnail_sidebar_visible_var.set(not self.thumbnail_sidebar_visible_var.get())
+        self.toggle_thumbnail_sidebar()
+        return "break"
+
+    def toggle_thumbnail_sidebar(self) -> None:
+        if self.thumbnail_sidebar_visible_var.get() and not self._is_immersive:
+            self.thumbnail_sidebar.grid()
+            self.thumbnail_sidebar.select(self.navigation.current)
+            self.status_var.set("已显示当前目录缩略图")
+        else:
+            self.thumbnail_sidebar.grid_remove()
+            self.status_var.set("已隐藏缩略图侧栏")
+        self._save_config()
+        self._schedule_preview()
+
     def toggle_fullscreen(self) -> None:
         if self._is_immersive:
             self.toggle_immersive()
@@ -3159,6 +3252,7 @@ class ImageEditorApp(tk.Tk):
             self.toolbar.grid_remove()
             self.edit_toolbar.grid_remove()
             self.panel_shell.grid_remove()
+            self.thumbnail_sidebar.grid_remove()
             self.status_label.grid_remove()
         else:
             self._is_fullscreen = False
@@ -3166,6 +3260,8 @@ class ImageEditorApp(tk.Tk):
             self.config(menu=self.menu_bar)
             self.toolbar.grid()
             self.status_label.grid()
+            if self.thumbnail_sidebar_visible_var.get():
+                self.thumbnail_sidebar.grid()
             if self.edit_panel_visible_var.get():
                 self.edit_toolbar.grid()
                 self.panel_shell.grid()
@@ -3269,7 +3365,9 @@ class ImageEditorApp(tk.Tk):
             messagebox.showerror(APP_NAME, f"重命名失败：{error}")
             return
         self.image_loader.invalidate(path)
+        self.thumbnail_sidebar.invalidate(path)
         self.navigation.files[self.navigation.index] = target
+        self.thumbnail_sidebar.set_paths(self.navigation.files, target)
         self.image_path = target
         if self.document is not None:
             self.document.rebind_source(target)
@@ -3304,6 +3402,7 @@ class ImageEditorApp(tk.Tk):
             messagebox.showerror(APP_NAME, f"移动失败：{error}")
             return
         self.image_loader.invalidate(path)
+        self.thumbnail_sidebar.invalidate(path)
         self.status_var.set(f"已移动到：{target}")
         self.open_paths([target], confirm=False)
 
@@ -3323,7 +3422,9 @@ class ImageEditorApp(tk.Tk):
             messagebox.showerror(APP_NAME, f"无法移入回收站：{error}")
             return
         self.image_loader.invalidate(path)
+        self.thumbnail_sidebar.invalidate(path)
         target = self.navigation.remove(path)
+        self.thumbnail_sidebar.set_paths(self.navigation.files, target)
         self.original = None
         self.document = None
         self.image_path = None
@@ -4141,6 +4242,7 @@ class ImageEditorApp(tk.Tk):
         self._startup_jobs.clear()
         self._save_config()
         self._drop_target.disable()
+        self.thumbnail_sidebar.shutdown()
         self.image_loader.shutdown()
         self.preview_renderer.shutdown()
         self._release_base_preview()

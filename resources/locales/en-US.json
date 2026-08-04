@@ -55,7 +55,9 @@
     "accessibility_toolbar": "Viewing toolbar",
     "accessibility_edit_tools": "Editing toolbar",
     "accessibility_panel": "Editing options panel",
-    "accessibility_status": "Status bar"
+    "accessibility_status": "Status bar",
+    "accessibility_thumbnails": "Image thumbnails in the current folder",
+    "thumbnail_directory": "Current folder"
   },
   "replacements": {
     "app": "Light Image Editor",
@@ -82,6 +84,8 @@
     "slideshow": "Slideshow",
     "immersive": "Immersive view",
     "show_edit_tools": "Show editing tools",
+    "show_thumbnail_sidebar": "Show thumbnail sidebar",
+    "thumbnails": "Thumbnails",
     "undo": "Undo",
     "redo": "Redo",
     "copy": "Copy",
