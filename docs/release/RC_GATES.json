@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "candidate": "0.9.0-rc.1",
+  "feature_freeze": true,
+  "gates": [
+    {"id": "RC-TEST", "priority": "P0", "status": "passed", "owner": "chendaxian318", "closure": "120 automated tests, release soak and performance comparison passed; see v0.9.0-rc.1-validation.json"},
+    {"id": "RC-SIGN", "priority": "P0", "status": "blocked", "owner": "chendaxian318", "closure": "All final EXE signatures are Valid and match the manifest thumbprint"},
+    {"id": "RC-RIGHTS", "priority": "P1", "status": "blocked", "owner": "chendaxian318", "closure": "First-party source rights and commercial Inno Setup use are documented"},
+    {"id": "RC-BETA", "priority": "P1", "status": "blocked", "owner": "chendaxian318", "closure": "At least 20 Beta users complete the checklist with no open P0/P1"},
+    {"id": "RC-STABILITY", "priority": "P0", "status": "blocked", "owner": "chendaxian318", "closure": "Seven consecutive dated entries contain no new P0/P1 and all P0/P1 are closed"},
+    {"id": "RC-CLEAN-VM", "priority": "P0", "status": "blocked", "owner": "chendaxian318", "closure": "Windows 10 and Windows 11 clean-VM lifecycle matrix passes"},
+    {"id": "RC-MALWARE", "priority": "P0", "status": "blocked", "owner": "chendaxian318", "closure": "Signed final artifacts pass current Defender and approved multi-engine false-positive review"}
+  ]
+}

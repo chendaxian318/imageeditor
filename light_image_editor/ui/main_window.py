@@ -162,6 +162,7 @@ class ImageEditorApp(tk.Tk):
         self.original: Image.Image | None = None
         self.document: Document | None = None
         self.base_preview_image: Image.Image | None = None
+        self._base_preview_owned = False
         self.preview: ImageTk.PhotoImage | None = None
         self.preview_scale = 1.0
         self.preview_offset = (0, 0)
@@ -4142,6 +4143,7 @@ class ImageEditorApp(tk.Tk):
         self._drop_target.disable()
         self.image_loader.shutdown()
         self.preview_renderer.shutdown()
+        self._release_base_preview()
 
     def _autosave_session(self) -> None:
         self._autosave_job = None
@@ -4576,6 +4578,7 @@ class ImageEditorApp(tk.Tk):
         canvas_h: int,
     ) -> None:
         if generation != self._preview_generation:
+            self._discard_preview_when_ready(future)
             return
         if not future.done():
             self.after(10, self._poll_preview, generation, future, canvas_w, canvas_h)
@@ -4586,12 +4589,33 @@ class ImageEditorApp(tk.Tk):
             self.status_var.set(f"无法生成预览：{error}")
             return
         if generation != self._preview_generation:
+            frame.close()
             return
         self._display_preview(frame, canvas_w, canvas_h)
         self.preview_ready_generation += 1
 
+    @staticmethod
+    def _discard_preview_when_ready(future: Future[PreviewFrame]) -> None:
+        def discard(completed: Future[PreviewFrame]) -> None:
+            if completed.cancelled() or completed.exception() is not None:
+                return
+            completed.result().close()
+
+        if future.done():
+            discard(future)
+        else:
+            future.add_done_callback(discard)
+
+    def _release_base_preview(self) -> None:
+        if self._base_preview_owned and self.base_preview_image is not None:
+            self.base_preview_image.close()
+        self.base_preview_image = None
+        self._base_preview_owned = False
+
     def _display_preview(self, frame: PreviewFrame, canvas_w: int, canvas_h: int) -> None:
+        self._release_base_preview()
         self.base_preview_image = frame.working
+        self._base_preview_owned = frame.owns_working
         image = frame.image
         split_x: int | None = None
         if self.split_compare_var.get() and not self.compare_original.get() and self.original:
@@ -4603,6 +4627,7 @@ class ImageEditorApp(tk.Tk):
             composite = image.copy()
             split_x = round(image.width * self.split_compare_percent_var.get() / 100)
             composite.paste(before.crop((0, 0, split_x, image.height)), (0, 0))
+            before.close()
             image = composite
         self.preview = ImageTk.PhotoImage(image)
         self.preview_scale = frame.scale
@@ -4652,6 +4677,9 @@ class ImageEditorApp(tk.Tk):
         self._draw_histogram(frame.working)
         if self.edit_panel_visible_var.get():
             self.after_idle(self._update_estimate)
+        if image is not frame.image:
+            image.close()
+        frame.image.close()
 
     def _draw_checker_bounds(self, width: int, height: int) -> None:
         ox, oy = self.preview_offset

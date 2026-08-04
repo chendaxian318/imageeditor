@@ -9,6 +9,7 @@ No repository file is modified unless ``--output`` is supplied explicitly.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import platform
@@ -157,16 +158,56 @@ def _benchmark_large_open(image_path: Path, repetitions: int) -> dict[str, Any]:
 def _benchmark_switching(image_paths: list[Path], repetitions: int) -> dict[str, Any]:
     samples: list[float] = []
     round_totals: list[float] = []
+    peak_rss: list[float] = []
+    final_growth: list[float] = []
     for _ in range(repetitions):
         payload, _ = _read_worker(_worker_command("switch", *(str(path) for path in image_paths)))
         current = [float(value) for value in payload["switch_samples_ms"]]
         samples.extend(current)
         round_totals.append(sum(current))
+        peak_rss.append(float(payload["peak_rss_bytes"]) / (1024 * 1024))
+        final_growth.append(float(payload["final_growth_bytes"]) / (1024 * 1024))
     return {
         "definition": "open first folder image, then switch through remaining files with open_path",
         "per_image": _metric(samples),
         "round_total": _metric(round_totals),
         "images_per_round": len(image_paths) - 1,
+        "peak_rss": _metric(peak_rss, "MiB"),
+        "final_rss_growth": _metric(final_growth, "MiB"),
+    }
+
+
+def _benchmark_zoom(image_path: Path, repetitions: int) -> dict[str, Any]:
+    samples: list[float] = []
+    for _ in range(repetitions):
+        payload, _ = _read_worker(_worker_command("zoom", str(image_path)))
+        samples.extend(float(value) for value in payload["zoom_samples_ms"])
+    return {
+        "definition": "render the same decoded image at 50%, 100%, 150%, 200% and fit",
+        "per_change": _metric(samples),
+    }
+
+
+def _benchmark_export(image_path: Path, output_root: Path, repetitions: int) -> dict[str, Any]:
+    from image_ops import ExportOptions, open_image, save_image
+
+    samples: list[float] = []
+    sizes: list[int] = []
+    options = ExportOptions(output_format="JPEG", quality=90)
+    source = open_image(image_path)
+    try:
+        for repetition in range(repetitions):
+            target = output_root / f"export-{repetition + 1}.jpg"
+            started = time.perf_counter()
+            save_image(source, target, options)
+            samples.append((time.perf_counter() - started) * 1000.0)
+            sizes.append(target.stat().st_size)
+    finally:
+        source.close()
+    return {
+        "definition": "full-resolution JPEG export at quality 90",
+        "save": _metric(samples),
+        "output_bytes": sizes,
     }
 
 
@@ -265,6 +306,8 @@ def run(profile_name: str) -> dict[str, Any]:
             "startup": _benchmark_startup(repetitions),
             "open_large_image": _benchmark_large_open(large_image, repetitions),
             "switch_images": _benchmark_switching(switch_images, repetitions),
+            "zoom": _benchmark_zoom(switch_images[0], repetitions),
+            "export": _benchmark_export(large_image, output_dir, repetitions),
             "batch_process": _benchmark_batch(batch_images, output_dir, repetitions),
         }
 
@@ -291,6 +334,8 @@ def run(profile_name: str) -> dict[str, Any]:
                 "startup.launch_to_ready",
                 "open_large_image.open_and_render",
                 "switch_images.per_image",
+                "zoom.per_change",
+                "export.save",
                 "batch_process.round_total",
             ],
             "higher_is_better": ["batch_process.throughput"],
@@ -364,6 +409,8 @@ def _worker_switch(paths: list[Path]) -> dict[str, Any]:
     app = _create_ui_application()
     app.withdraw()
     samples: list[float] = []
+    initial_rss = _process_rss_bytes()
+    peak_rss = initial_rss
     try:
         previous_generation = app.preview_ready_generation
         app.open_path(paths[0], confirm=False)
@@ -373,9 +420,68 @@ def _worker_switch(paths: list[Path]) -> dict[str, Any]:
             started = time.perf_counter()
             app.open_path(path, confirm=False)
             samples.append(_wait_for_preview(app, previous_generation, started=started))
-        return {"switch_samples_ms": samples}
+            peak_rss = max(peak_rss, _process_rss_bytes())
+        return {
+            "switch_samples_ms": samples,
+            "peak_rss_bytes": peak_rss,
+            "final_growth_bytes": max(0, _process_rss_bytes() - initial_rss),
+        }
     finally:
         _destroy_ui_application(app)
+
+
+def _worker_zoom(path: Path) -> dict[str, Any]:
+    app = _create_ui_application()
+    app.withdraw()
+    samples: list[float] = []
+    try:
+        generation = app.preview_ready_generation
+        app.open_path(path, confirm=False)
+        _wait_for_preview(app, generation)
+        for mode in ("50%", "100%", "150%", "200%", "适应"):
+            generation = app.preview_ready_generation
+            app.zoom_mode.set(mode)
+            started = time.perf_counter()
+            app._refresh_preview()
+            samples.append(_wait_for_preview(app, generation, started=started))
+        return {"zoom_samples_ms": samples}
+    finally:
+        _destroy_ui_application(app)
+
+
+def _process_rss_bytes() -> int:
+    if os.name != "nt":
+        return 0
+
+    class ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", ctypes.c_ulong),
+            ("PageFaultCount", ctypes.c_ulong),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    counters = ProcessMemoryCounters()
+    counters.cb = ctypes.sizeof(counters)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    psapi.GetProcessMemoryInfo.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ProcessMemoryCounters),
+        ctypes.c_ulong,
+    ]
+    psapi.GetProcessMemoryInfo.restype = ctypes.c_int
+    process = kernel32.GetCurrentProcess()
+    if not psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
+        return 0
+    return int(counters.WorkingSetSize)
 
 
 def _run_worker(arguments: list[str]) -> int:
@@ -387,6 +493,8 @@ def _run_worker(arguments: list[str]) -> int:
         payload = _worker_open(Path(arguments[1]))
     elif mode == "switch":
         payload = _worker_switch([Path(value) for value in arguments[1:]])
+    elif mode == "zoom":
+        payload = _worker_zoom(Path(arguments[1]))
     else:
         raise ValueError(f"unknown worker mode: {mode}")
     print(json.dumps(payload, ensure_ascii=False), flush=True)

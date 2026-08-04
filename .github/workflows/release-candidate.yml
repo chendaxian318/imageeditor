@@ -1,0 +1,64 @@
+name: Release candidate validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      soak_profile:
+        description: Soak profile
+        required: true
+        default: release
+        type: choice
+        options: [quick, release]
+
+permissions:
+  contents: read
+
+jobs:
+  rc-validation:
+    name: Windows x64 RC performance and soak
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          architecture: x64
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - name: Build and run full regression suite
+        shell: powershell
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Standard performance comparison
+        shell: powershell
+        run: |
+          .\.venv\Scripts\python.exe benchmarks\run_benchmarks.py --profile standard --output release\PERFORMANCE.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv\Scripts\python.exe benchmarks\compare_results.py `
+            --baseline benchmarks\baselines\v0.8.0-windows-x64-standard.json `
+            --current release\PERFORMANCE.json `
+            --output release\PERFORMANCE_COMPARISON.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Long-session and failure-injection validation
+        shell: powershell
+        run: |
+          .\.venv\Scripts\python.exe -m scripts.run_soak_tests `
+            --profile "${{ inputs.soak_profile }}" `
+            --output release\SOAK_TEST.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload candidate evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: light-image-editor-v09-rc-evidence
+          path: release/
+          if-no-files-found: error
+          retention-days: 30

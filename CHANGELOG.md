@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0-rc.1 — 2026-08-04
+
+### Release-candidate quality
+
+- Froze features and added machine-readable RC gates, a seven-day stability ledger, Windows 10/11 compatibility matrix and disposable-profile lifecycle requirements.
+- Added repeatable startup, first-image, switching, zoom, export, batch and RSS measurements plus a same-machine 15% regression gate against the accepted v0.8.0 baseline.
+- Added configurable 20,000-switch and 1,000-item batch soak testing with bounded-memory and injected damaged/missing-file checks.
+- Released stale preview frames and owned intermediate images deterministically to reduce long-session memory retention.
+- Added local Defender scanning, final Authenticode inspection, source-to-artifact provenance, PyInstaller diagnostic evidence and fail-closed RC verification.
+- Completed the user manual and updated privacy, release, licence and third-party inventory references for 0.9.0.
+
+### Remaining external gates
+
+- Public release remains blocked by publisher code signing, first-party rights confirmation, the 20-user Beta minimum, seven consecutive P0/P1-free days, Windows 10/11 clean-VM evidence and approved multi-engine false-positive review.
+
 ## 0.8.0 — 2026-08-04
 
 ### Beta release system

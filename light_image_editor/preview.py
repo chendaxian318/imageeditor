@@ -24,6 +24,14 @@ class PreviewFrame:
     working: Image.Image
     image: Image.Image
     scale: float
+    owns_working: bool = False
+
+    def close(self) -> None:
+        """Release worker-owned pixels when a stale preview is discarded."""
+
+        self.image.close()
+        if self.owns_working:
+            self.working.close()
 
 
 def render_preview(
@@ -39,12 +47,16 @@ def render_preview(
 
     if compare_original:
         working = original
+        owns_working = False
     elif timeline is not None:
         working = render_image(original, timeline)
+        owns_working = True
     elif edit_state == EditState():
         working = original
+        owns_working = False
     else:
         working = apply_edits(original, edit_state)
+        owns_working = True
 
     canvas_w = max(100, canvas_size[0])
     canvas_h = max(100, canvas_size[1])
@@ -60,9 +72,18 @@ def render_preview(
     if preview_size == working.size:
         display = working.copy()
     else:
-        display = working.resize(preview_size, Image.Resampling.LANCZOS)
+        display = working.resize(
+            preview_size,
+            Image.Resampling.LANCZOS,
+            reducing_gap=3.0 if scale < 1.0 else None,
+        )
     display = color_manage_for_display(display, metadata_from_image(original).icc_profile)
-    return PreviewFrame(working=working, image=display, scale=display.width / working.width)
+    return PreviewFrame(
+        working=working,
+        image=display,
+        scale=display.width / working.width,
+        owns_working=owns_working,
+    )
 
 
 def color_manage_for_display(image: Image.Image, icc_profile: bytes | None) -> Image.Image:

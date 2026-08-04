@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "candidate": "0.9.0-rc.1",
+  "captured_utc": "2026-08-04T05:38:32.752813+00:00",
+  "automated_tests": {
+    "count": 120,
+    "passed": 120,
+    "failed": 0,
+    "ruff": "passed",
+    "mypy": "passed"
+  },
+  "performance": {
+    "baseline_version": "0.8.0",
+    "profile": "standard",
+    "maximum_regression_percent": 15.0,
+    "passed": true,
+    "metrics": {
+      "startup_ms": 1948.888,
+      "startup_regression_percent": 13.569,
+      "open_48mp_ms": 2751.710,
+      "open_48mp_regression_percent": 4.448,
+      "switch_2k_ms": 370.543,
+      "switch_regression_percent": -0.610,
+      "zoom_change_ms": 362.884,
+      "export_48mp_ms": 473.626,
+      "batch_20_ms": 3628.738,
+      "batch_regression_percent": -6.455,
+      "switch_peak_rss_mib": 147.824,
+      "switch_final_growth_mib": 91.793
+    }
+  },
+  "release_soak": {
+    "passed": true,
+    "browse_iterations": 20000,
+    "browse_elapsed_seconds": 116.074,
+    "browse_cache_items": 3,
+    "browse_peak_rss_mib": 41.871,
+    "browse_final_growth_mib": 10.375,
+    "batch_succeeded": 1000,
+    "injected_failures_isolated": 2,
+    "batch_elapsed_seconds": 41.116
+  },
+  "external_gates_are_not_covered": [
+    "seven-day stability window",
+    "Windows 11 clean VM",
+    "publisher Authenticode certificate",
+    "multi-engine false-positive review",
+    "first-party rights confirmation",
+    "20-user Beta minimum"
+  ]
+}

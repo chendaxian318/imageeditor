@@ -18,12 +18,17 @@ $AppSpec = Join-Path $Root "packaging\windows\image_editor.spec"
 $PortableSpec = Join-Path $Root "packaging\windows\image_editor_portable.spec"
 $InnoScript = Join-Path $Root "packaging\windows\LightImageEditor.iss"
 $LegalDocuments = @("LICENSE", "NOTICE.md", "PRIVACY.md", "THIRD_PARTY_LICENSES.md")
-$BetaDocuments = @(
-    "docs\beta\RELEASE_NOTES-v0.8.0-beta.md",
+$ReleaseDocuments = @(
+    "docs\release\RELEASE_NOTES-v0.9.0-rc.1.md",
     "docs\beta\KNOWN_ISSUES.md",
     "docs\beta\BETA_PLAN.md",
     "docs\beta\P0_P1_REGISTER.md",
-    "docs\release\UPDATE_SECURITY.md"
+    "docs\release\UPDATE_SECURITY.md",
+    "docs\release\COMPATIBILITY_MATRIX.md",
+    "docs\release\RC_STABILITY_LOG.json",
+    "docs\release\RC_GATES.json",
+    "docs\release\v0.9.0-rc.1-validation.json",
+    "docs\USER_MANUAL.md"
 )
 $InnoVersion = "7.0.2"
 $InnoInstallerUrl = "https://github.com/jrsoftware/issrc/releases/download/is-7_0_2/innosetup-7.0.2-x64.exe"
@@ -246,7 +251,8 @@ try {
         "light_image_editor", "scripts", "benchmarks",
         "test_architecture.py", "test_build_metadata.py", "test_identity_resources.py",
         "test_image_ops.py", "test_installer.py", "test_v03_safety.py",
-        "test_viewer_services.py", "test_v07_experience.py", "test_v08_release_system.py"
+        "test_viewer_services.py", "test_v07_experience.py", "test_v08_release_system.py",
+        "test_v09_release_candidate.py"
     )
 
     if (-not $SkipTests) {
@@ -341,8 +347,8 @@ try {
         }
     }
 
-    foreach ($betaDocument in $BetaDocuments) {
-        $documentSource = Join-Path $Root $betaDocument
+    foreach ($releaseDocument in $ReleaseDocuments) {
+        $documentSource = Join-Path $Root $releaseDocument
         if (-not (Test-Path -LiteralPath $documentSource -PathType Leaf)) {
             throw "Required Beta document is missing: $documentSource"
         }
@@ -354,6 +360,12 @@ try {
         "--lock", (Join-Path $Root "requirements.lock"),
         "--output", (Join-Path $Release "SBOM.cdx.json")
     )
+
+    $diagnosticsDirectory = Join-Path $Release "diagnostics"
+    New-Item -ItemType Directory -Path $diagnosticsDirectory -Force | Out-Null
+    Copy-Item `
+        -LiteralPath (Join-Path $Build "pyinstaller\app\image_editor\warn-image_editor.txt") `
+        -Destination (Join-Path $diagnosticsDirectory "pyinstaller-warnings.txt")
 
     $signingReady = (
         $env:IMAGEEDITOR_SIGNTOOL -and
@@ -390,6 +402,32 @@ try {
         )
         Write-Warning "Unsigned local build created. Public Beta release remains blocked."
     }
+
+    $securityScanScript = Join-Path $Root "scripts\inspect_release.ps1"
+    Invoke-Checked "powershell.exe" @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", $securityScanScript,
+        "-ReleasePath", $Release,
+        "-Output", (Join-Path $Release "LOCAL_SECURITY_SCAN.json"),
+        "-AllowUnsignedLocal",
+        "-AllowUnavailableLocal"
+    )
+
+    Invoke-Checked $Python @(
+        "-m", "scripts.generate_release_evidence",
+        "--root", $Root,
+        "--release", $Release,
+        "--output", (Join-Path $Release "BUILD_PROVENANCE.json"),
+        "--tests-executed", $(if ($SkipTests) { "false" } else { "true" })
+    )
+    Invoke-Checked $Python @(
+        "-m", "scripts.verify_release_candidate",
+        "--gates", (Join-Path $Root "docs\release\RC_GATES.json"),
+        "--stability", (Join-Path $Root "docs\release\RC_STABILITY_LOG.json"),
+        "--evidence", (Join-Path $Release "BUILD_PROVENANCE.json"),
+        "--output", (Join-Path $Release "RELEASE_GATE_STATUS.json"),
+        "--allow-blocked"
+    )
 
     $checksumPath = Join-Path $Release "SHA256SUMS.txt"
     $releasePrefix = [System.IO.Path]::GetFullPath($Release).TrimEnd("\") + "\"

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "candidate": "0.9.0-rc.1",
+  "required_consecutive_days": 7,
+  "entries": [
+    {
+      "date": "2026-08-04",
+      "new_p0": 0,
+      "new_p1": 0,
+      "open_p0": 1,
+      "open_p1": 2,
+      "owner": "chendaxian318",
+      "evidence": "Local 113-test v0.8 regression plus v0.9 RC validation in progress"
+    }
+  ]
+}

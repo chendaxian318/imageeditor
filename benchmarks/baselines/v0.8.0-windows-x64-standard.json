@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "profile": "standard",
+  "source_version": "0.8.0",
+  "source_commit": "02d9576d32a66ade04af521744f76d0565260b71",
+  "captured_at_utc": "2026-08-04T05:23:43.608690+00:00",
+  "environment": {
+    "os": "Windows-10-10.0.19045-SP0",
+    "machine": "AMD64",
+    "python": "3.12.10",
+    "pillow": "11.3.0"
+  },
+  "metrics": {
+    "startup.launch_to_ready": 1716.037,
+    "open_large_image.open_and_render": 2634.520,
+    "switch_images.per_image": 372.816,
+    "batch_process.round_total": 3879.152,
+    "batch_process.throughput": 5.156
+  }
+}
