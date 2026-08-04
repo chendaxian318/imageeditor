@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import os
 import re
-from collections.abc import Iterable
+import shutil
+import tempfile
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from enum import StrEnum
 from io import BytesIO
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps, PngImagePlugin
+
+if TYPE_CHECKING:
+    from light_image_editor.document import SourceFingerprint, SourceMetadata
 
 SUPPORTED_INPUTS = {
     ".jpg",
@@ -16,6 +24,7 @@ SUPPORTED_INPUTS = {
     ".bmp",
     ".tif",
     ".tiff",
+    ".gif",
 }
 
 SUPPORTED_FORMATS = ("JPEG", "PNG", "WEBP", "BMP", "TIFF")
@@ -50,11 +59,35 @@ class ExportOptions:
     watermark_position: str = "右下"
     watermark_opacity: int = 35
     watermark_size_percent: int = 5
+    preserve_metadata: bool = True
+
+
+class ConflictPolicy(StrEnum):
+    ERROR = "error"
+    OVERWRITE = "overwrite"
+    UNIQUE = "unique"
+
+
+class SaveSafetyError(RuntimeError):
+    """Base class for a save that requires an explicit user decision."""
+
+
+class AnimationFlatteningRequired(SaveSafetyError):
+    pass
+
+
+class TransparencyFlatteningRequired(SaveSafetyError):
+    pass
+
+
+class SourceChangedError(SaveSafetyError):
+    pass
 
 
 def open_image(path: str | Path) -> Image.Image:
-    image = Image.open(path)
-    return ImageOps.exif_transpose(image)
+    from light_image_editor.image_loader import decode_image
+
+    return decode_image(path)
 
 
 def normalize_format(value: str) -> str:
@@ -228,18 +261,35 @@ def estimate_save_size(image: Image.Image, options: ExportOptions) -> int:
     return len(encode_image(result, output_format, options))
 
 
-def encode_image(image: Image.Image, output_format: str, options: ExportOptions) -> bytes:
+def encode_image(
+    image: Image.Image,
+    output_format: str,
+    options: ExportOptions,
+    extra_kwargs: dict[str, object] | None = None,
+) -> bytes:
+    kwargs = save_kwargs_for(output_format, options.quality)
+    if extra_kwargs:
+        kwargs.update(extra_kwargs)
     if options.target_size_kb and output_format in {"JPEG", "WEBP"}:
         return encode_to_target_size(
-            image, output_format, options.quality, options.target_size_kb * 1024
+            image,
+            output_format,
+            options.quality,
+            options.target_size_kb * 1024,
+            extra_kwargs=extra_kwargs,
         )
     buffer = BytesIO()
-    image.save(buffer, output_format, **save_kwargs_for(output_format, options.quality))
+    image.save(buffer, output_format, **kwargs)
     return buffer.getvalue()
 
 
 def encode_to_target_size(
-    image: Image.Image, output_format: str, max_quality: int, target_bytes: int
+    image: Image.Image,
+    output_format: str,
+    max_quality: int,
+    target_bytes: int,
+    *,
+    extra_kwargs: dict[str, object] | None = None,
 ) -> bytes:
     low = 1
     high = max(1, min(100, int(max_quality)))
@@ -249,7 +299,10 @@ def encode_to_target_size(
     while low <= high:
         quality = (low + high) // 2
         buffer = BytesIO()
-        image.save(buffer, output_format, **save_kwargs_for(output_format, quality))
+        kwargs = save_kwargs_for(output_format, quality)
+        if extra_kwargs:
+            kwargs.update(extra_kwargs)
+        image.save(buffer, output_format, **kwargs)
         data = buffer.getvalue()
         if len(data) <= target_bytes:
             best_under = data
@@ -263,7 +316,10 @@ def encode_to_target_size(
     if best_over is not None:
         return best_over
     buffer = BytesIO()
-    image.save(buffer, output_format, **save_kwargs_for(output_format, 1))
+    kwargs = save_kwargs_for(output_format, 1)
+    if extra_kwargs:
+        kwargs.update(extra_kwargs)
+    image.save(buffer, output_format, **kwargs)
     return buffer.getvalue()
 
 
@@ -289,15 +345,189 @@ def convert_for_format(image: Image.Image, output_format: str) -> Image.Image:
     return image
 
 
-def save_image(image: Image.Image, target: str | Path, options: ExportOptions) -> Path:
+def save_image(
+    image: Image.Image,
+    target: str | Path,
+    options: ExportOptions,
+    *,
+    metadata: SourceMetadata | None = None,
+    source_path: str | Path | None = None,
+    source_fingerprint: SourceFingerprint | None = None,
+    conflict_policy: ConflictPolicy = ConflictPolicy.ERROR,
+    backup_on_overwrite: bool = False,
+    source_passthrough: bool = False,
+    allow_animation_flatten: bool = False,
+    allow_transparency_flatten: bool = False,
+    before_replace: Callable[[Path, Path], object] | None = None,
+) -> Path:
     output_format = normalize_format(options.output_format)
     target_path = Path(target)
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    if metadata is None:
+        from light_image_editor.document import metadata_from_image
+
+        inferred = metadata_from_image(image)
+        metadata = inferred if inferred.original_format is not None else None
+
+    source_is_current = True
+    if source_path is not None and source_fingerprint is not None:
+        source_is_current = source_fingerprint.matches(source_path)
+        try:
+            same_target = target_path.resolve() == Path(source_path).resolve()
+        except OSError:
+            same_target = target_path.absolute() == Path(source_path).absolute()
+        if same_target and not source_is_current:
+            raise SourceChangedError("源文件已被外部修改、移动或删除，不能直接覆盖。")
+
+    if target_path.exists():
+        if conflict_policy == ConflictPolicy.ERROR:
+            raise FileExistsError(f"目标文件已存在：{target_path}")
+        if conflict_policy == ConflictPolicy.UNIQUE:
+            target_path = _unique_target(target_path)
+
+    if (
+        source_passthrough
+        and source_path is not None
+        and source_fingerprint is not None
+        and metadata is not None
+        and metadata.original_format == output_format
+        and options.preserve_metadata
+        and _has_no_rendering_changes(options)
+    ):
+        if not source_is_current:
+            raise SourceChangedError("源文件已被外部修改、移动或删除，不能按原质量复制。")
+        _atomic_copy_file(
+            Path(source_path),
+            target_path,
+            backup_on_overwrite=backup_on_overwrite,
+            before_replace=before_replace,
+        )
+        return target_path
+
+    if metadata is not None and metadata.is_animated and not allow_animation_flatten:
+        raise AnimationFlatteningRequired("动画图片将被导出为单帧，需要明确确认。")
+    if (
+        metadata is not None
+        and metadata.has_alpha
+        and output_format in {"JPEG", "BMP"}
+        and not allow_transparency_flatten
+    ):
+        raise TransparencyFlatteningRequired("目标格式不支持透明通道，需要明确确认使用白色背景。")
 
     result = prepare_image(image, options)
     result = convert_for_format(result, output_format)
-    target_path.write_bytes(encode_image(result, output_format, options))
+    metadata_kwargs = (
+        metadata_save_kwargs(output_format, metadata)
+        if options.preserve_metadata and metadata is not None
+        else {}
+    )
+    encoded = encode_image(result, output_format, options, metadata_kwargs)
+    _atomic_replace_bytes(
+        target_path,
+        encoded,
+        backup_on_overwrite=backup_on_overwrite,
+        before_replace=before_replace,
+    )
     return target_path
+
+
+def metadata_save_kwargs(output_format: str, metadata: SourceMetadata | None) -> dict[str, object]:
+    if metadata is None:
+        return {}
+    kwargs: dict[str, object] = {}
+    if output_format in {"JPEG", "PNG", "WEBP", "TIFF"} and metadata.icc_profile:
+        kwargs["icc_profile"] = metadata.icc_profile
+    if output_format in {"JPEG", "PNG", "WEBP"} and metadata.exif:
+        kwargs["exif"] = metadata.exif
+    if output_format in {"JPEG", "PNG", "TIFF"} and metadata.dpi:
+        kwargs["dpi"] = metadata.dpi
+    if output_format in {"JPEG", "WEBP"} and metadata.xmp:
+        kwargs["xmp"] = metadata.xmp
+    if output_format == "PNG" and metadata.xmp:
+        png_info = PngImagePlugin.PngInfo()
+        png_info.add_itxt("XML:com.adobe.xmp", metadata.xmp.decode("utf-8", errors="replace"))
+        kwargs["pnginfo"] = png_info
+    return kwargs
+
+
+def _unique_target(path: Path) -> Path:
+    for index in range(1, 10_000):
+        candidate = path.with_name(f"{path.stem}_{index}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"无法为目标生成不冲突的文件名：{path}")
+
+
+def _backup_target(path: Path) -> Path:
+    candidate = path.with_name(path.name + ".bak")
+    if not candidate.exists():
+        return candidate
+    return _unique_target(candidate)
+
+
+def _atomic_replace_bytes(
+    target: Path,
+    data: bytes,
+    *,
+    backup_on_overwrite: bool,
+    before_replace: Callable[[Path, Path], object] | None,
+) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with open(descriptor, "wb", closefd=True) as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if before_replace is not None:
+            before_replace(temporary, target)
+        if target.exists() and backup_on_overwrite:
+            shutil.copy2(target, _backup_target(target))
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _has_no_rendering_changes(options: ExportOptions) -> bool:
+    return (
+        options.edit_state == EditState()
+        and options.crop_box is None
+        and options.max_width is None
+        and options.max_height is None
+        and options.exact_width is None
+        and options.exact_height is None
+        and options.target_size_kb is None
+        and not options.watermark_text.strip()
+    )
+
+
+def _atomic_copy_file(
+    source: Path,
+    target: Path,
+    *,
+    backup_on_overwrite: bool,
+    before_replace: Callable[[Path, Path], object] | None,
+) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with source.open("rb") as input_stream, os.fdopen(descriptor, "wb") as output_stream:
+            shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
+        if before_replace is not None:
+            before_replace(temporary, target)
+        if target.exists() and backup_on_overwrite:
+            shutil.copy2(target, _backup_target(target))
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def iter_image_files(paths: Iterable[str | Path]) -> list[Path]:

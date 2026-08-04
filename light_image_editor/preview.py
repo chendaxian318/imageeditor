@@ -5,10 +5,14 @@ from __future__ import annotations
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from io import BytesIO
 
-from PIL import Image
+from PIL import Image, ImageCms
 
 from image_ops import EditState, apply_edits
+from light_image_editor.document import metadata_from_image
+
+_DISPLAY_PROFILE = ImageCms.createProfile("sRGB")
 
 
 @dataclass(frozen=True)
@@ -52,7 +56,32 @@ def render_preview(
         display = working.copy()
     else:
         display = working.resize(preview_size, Image.Resampling.LANCZOS)
+    display = color_manage_for_display(display, metadata_from_image(original).icc_profile)
     return PreviewFrame(working=working, image=display, scale=display.width / working.width)
+
+
+def color_manage_for_display(image: Image.Image, icc_profile: bytes | None) -> Image.Image:
+    """Convert an embedded source profile to the Windows/Tk sRGB display space."""
+
+    if not icc_profile:
+        return image
+    try:
+        source_profile = ImageCms.ImageCmsProfile(BytesIO(icc_profile))
+        alpha = image.getchannel("A") if "A" in image.getbands() else None
+        converted = ImageCms.profileToProfile(
+            image.convert("RGB"),
+            source_profile,
+            _DISPLAY_PROFILE,
+            outputMode="RGB",
+        )
+        if converted is None:
+            return image
+        if alpha is not None:
+            converted.putalpha(alpha)
+        return converted
+    except (OSError, SyntaxError, TypeError, ValueError):
+        # A malformed optional profile must not prevent the image from being viewed.
+        return image
 
 
 class PreviewRenderer:

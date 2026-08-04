@@ -20,7 +20,7 @@ class InstallerTests(unittest.TestCase):
     def test_supported_extensions_cover_documented_image_formats(self) -> None:
         self.assertEqual(
             SUPPORTED_EXTENSIONS,
-            (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"),
+            (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif"),
         )
 
     def test_open_command_quotes_executable_and_file(self) -> None:

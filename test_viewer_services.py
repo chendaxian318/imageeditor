@@ -12,11 +12,13 @@ from PIL import Image
 
 from image_ops import EditState
 from light_image_editor.app import _dispatch_ui_command
+from light_image_editor.document import Document
 from light_image_editor.files import FOF_ALLOWUNDO, FOF_NOCONFIRMATION, rename_file
 from light_image_editor.image_loader import ImageLoader, ImageLoadFailure, decode_image
 from light_image_editor.metadata import image_properties
 from light_image_editor.navigation import NavigationSession, expand_activation_paths
 from light_image_editor.preview import PreviewRenderer, render_preview
+from light_image_editor.session import SessionStore
 from light_image_editor.settings import SettingsStore
 from light_image_editor.single_instance import SingleInstanceController, activation_message
 from light_image_editor.ui.main_window import ImageEditorApp
@@ -222,12 +224,19 @@ class SingleInstanceTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "real Tk upgrade-safety integration")
     def test_real_ui_preserves_unsaved_work_when_upgrade_is_cancelled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            app = ImageEditorApp(settings_store=SettingsStore(Path(directory) / "settings.json"))
+            app = ImageEditorApp(
+                settings_store=SettingsStore(Path(directory) / "settings.json"),
+                session_store=SessionStore(Path(directory) / "session.json"),
+            )
             app.withdraw()
             try:
-                app.original = Image.new("RGB", (80, 60), "navy")
+                original = Image.new("RGB", (80, 60), "navy")
+                app.document = Document.from_decoded(
+                    original, None, app._new_document_state(original)
+                )
+                app.original = app.document.image
                 app._load_current_image("unsaved.png")
-                app.rotation = 90
+                app.rotate(90)
                 self.assertTrue(app.has_unsaved_changes())
 
                 with patch(

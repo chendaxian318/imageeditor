@@ -22,7 +22,7 @@ from light_image_editor.single_instance import request_running_app_exit
 APP_NAME = PRODUCT_NAME_ZH
 EXE_NAME = EXECUTABLE_NAME
 APP_REGISTRY_NAME = REGISTRY_NAME
-SUPPORTED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
+SUPPORTED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif")
 CONTEXT_MENU_KEY = r"Software\Classes\SystemFileAssociations\image\shell\LightImageEditor"
 CAPABILITIES_KEY = rf"Software\{APP_REGISTRY_NAME}\Capabilities"
 REGISTERED_APPLICATIONS_KEY = r"Software\RegisteredApplications"

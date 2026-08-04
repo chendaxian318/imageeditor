@@ -4,6 +4,7 @@ import threading
 import tkinter as tk
 from collections.abc import Sequence
 from concurrent.futures import Future
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -12,8 +13,12 @@ from typing import cast
 from PIL import Image, ImageGrab, ImageTk
 
 from image_ops import (
+    AnimationFlatteningRequired,
+    ConflictPolicy,
     EditState,
     ExportOptions,
+    SourceChangedError,
+    TransparencyFlatteningRequired,
     apply_edits,
     estimate_save_size,
     extension_for_format,
@@ -23,6 +28,7 @@ from image_ops import (
     save_image,
 )
 
+from ..document import Document, DocumentState
 from ..files import (
     copy_file,
     copy_image_to_clipboard,
@@ -39,7 +45,9 @@ from ..identity import PRODUCT_NAME_ZH
 from ..image_loader import ImageLoader, ImageLoadFailure
 from ..metadata import image_properties
 from ..navigation import NavigationSession
+from ..presets import EXPORT_PRESETS, apply_export_preset
 from ..preview import PreviewFrame, PreviewRenderer
+from ..session import SessionStore
 from ..settings import SettingsStore
 from ..windows_drop import WindowsFileDrop
 
@@ -53,11 +61,13 @@ class ImageEditorApp(tk.Tk):
         settings_store: SettingsStore | None = None,
         image_loader: ImageLoader | None = None,
         preview_renderer: PreviewRenderer | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         super().__init__()
         self.settings_store = settings_store or SettingsStore()
         self.image_loader = image_loader or ImageLoader()
         self.preview_renderer = preview_renderer or PreviewRenderer()
+        self.session_store = session_store or SessionStore()
         self.navigation = NavigationSession([])
         self.title(APP_NAME)
         self.geometry("1240x780")
@@ -65,6 +75,7 @@ class ImageEditorApp(tk.Tk):
 
         self.image_path: Path | None = None
         self.original: Image.Image | None = None
+        self.document: Document | None = None
         self.base_preview_image: Image.Image | None = None
         self.preview: ImageTk.PhotoImage | None = None
         self.preview_scale = 1.0
@@ -90,6 +101,11 @@ class ImageEditorApp(tk.Tk):
         self._is_fullscreen = False
         self._is_immersive = False
         self._slideshow_job: str | None = None
+        self._autosave_job: str | None = None
+        self._source_monitor_job: str | None = None
+        self._syncing_document = False
+        self._last_source_status = "unchanged"
+        self._last_autosave_signature: tuple[object, ...] | None = None
 
         self.format_var = tk.StringVar(value="JPEG")
         self.quality_var = tk.IntVar(value=85)
@@ -112,6 +128,9 @@ class ImageEditorApp(tk.Tk):
         self.edit_panel_visible_var = tk.BooleanVar(value=False)
         self.slideshow_interval_var = tk.DoubleVar(value=3.0)
         self.slideshow_loop_var = tk.BooleanVar(value=True)
+        self.preserve_metadata_var = tk.BooleanVar(value=True)
+        self.backup_on_overwrite_var = tk.BooleanVar(value=True)
+        self.export_preset_var = tk.StringVar(value="自定义")
 
         self.rotation = 0
         self.flip_h = False
@@ -130,6 +149,7 @@ class ImageEditorApp(tk.Tk):
         self.clean_signature: tuple[object, ...] | None = None
 
         self._load_config()
+        self._bind_document_variables()
         if self._saved_geometry:
             try:
                 self.geometry(self._saved_geometry)
@@ -141,6 +161,9 @@ class ImageEditorApp(tk.Tk):
         self.after(0, self._drop_target.enable)
         self.bind("<Configure>", self._on_configure)
         self.protocol("WM_DELETE_WINDOW", self.close)
+        self._autosave_job = self.after(2000, self._autosave_session)
+        self._source_monitor_job = self.after(2000, self._monitor_source_file)
+        self.after(250, self._offer_session_recovery)
 
     def _build_ui(self) -> None:
         style = ttk.Style(self)
@@ -294,36 +317,57 @@ class ImageEditorApp(tk.Tk):
         export_box = ttk.LabelFrame(panel, text="导出", style="Panel.TLabelframe")
         export_box.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         export_box.columnconfigure(1, weight=1)
-        ttk.Label(export_box, text="格式").grid(row=0, column=0, sticky="w", pady=5)
+        ttk.Label(export_box, text="预设").grid(row=0, column=0, sticky="w", pady=5)
+        export_preset = ttk.Combobox(
+            export_box,
+            textvariable=self.export_preset_var,
+            values=EXPORT_PRESETS,
+            state="readonly",
+        )
+        export_preset.grid(row=0, column=1, sticky="ew", pady=5)
+        export_preset.bind("<<ComboboxSelected>>", lambda _event: self._apply_export_preset())
+        ttk.Label(export_box, text="格式").grid(row=1, column=0, sticky="w", pady=5)
         fmt = ttk.Combobox(
             export_box,
             textvariable=self.format_var,
             values=("JPEG", "PNG", "WEBP", "BMP", "TIFF"),
             state="readonly",
         )
-        fmt.grid(row=0, column=1, sticky="ew", pady=5)
-        fmt.bind("<<ComboboxSelected>>", lambda _event: self._update_estimate())
-        self._slider(export_box, "质量", self.quality_var, 1, 100, 1, self._update_estimate)
-        ttk.Label(export_box, text="目标 KB").grid(row=2, column=0, sticky="w", pady=5)
+        fmt.grid(row=1, column=1, sticky="ew", pady=5)
+        fmt.bind("<<ComboboxSelected>>", lambda _event: self._custom_export_changed())
+        self._slider(export_box, "质量", self.quality_var, 1, 100, 2, self._custom_export_changed)
+        ttk.Label(export_box, text="目标 KB").grid(row=3, column=0, sticky="w", pady=5)
         target_entry = ttk.Entry(export_box, textvariable=self.target_size_var)
-        target_entry.grid(row=2, column=1, sticky="ew", pady=5)
-        target_entry.bind("<KeyRelease>", lambda _event: self._update_estimate())
-        ttk.Label(export_box, text="文件前缀").grid(row=3, column=0, sticky="w", pady=5)
+        target_entry.grid(row=3, column=1, sticky="ew", pady=5)
+        target_entry.bind("<KeyRelease>", lambda _event: self._custom_export_changed())
+        ttk.Label(export_box, text="文件前缀").grid(row=4, column=0, sticky="w", pady=5)
         prefix_entry = ttk.Entry(export_box, textvariable=self.filename_prefix_var)
-        prefix_entry.grid(row=3, column=1, sticky="ew", pady=5)
+        prefix_entry.grid(row=4, column=1, sticky="ew", pady=5)
         prefix_entry.bind("<KeyRelease>", lambda _event: self._save_config())
-        ttk.Label(export_box, text="文件后缀").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Label(export_box, text="文件后缀").grid(row=5, column=0, sticky="w", pady=5)
         suffix_entry = ttk.Entry(export_box, textvariable=self.filename_suffix_var)
-        suffix_entry.grid(row=4, column=1, sticky="ew", pady=5)
+        suffix_entry.grid(row=5, column=1, sticky="ew", pady=5)
         suffix_entry.bind("<KeyRelease>", lambda _event: self._save_config())
+        ttk.Checkbutton(
+            export_box,
+            text="保留 EXIF / ICC / DPI / XMP",
+            variable=self.preserve_metadata_var,
+            command=self._custom_export_changed,
+        ).grid(row=6, column=1, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(
+            export_box,
+            text="覆盖前创建 .bak 备份",
+            variable=self.backup_on_overwrite_var,
+            command=self._save_config,
+        ).grid(row=7, column=1, sticky="w", pady=(4, 0))
         ttk.Checkbutton(
             export_box,
             text="保存后定位文件",
             variable=self.reveal_after_save_var,
             command=self._save_config,
-        ).grid(row=5, column=1, sticky="w", pady=(8, 0))
+        ).grid(row=8, column=1, sticky="w", pady=(4, 0))
         ttk.Label(export_box, textvariable=self.size_var).grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(8, 0)
+            row=9, column=0, columnspan=2, sticky="w", pady=(8, 0)
         )
 
         resize_box = ttk.LabelFrame(panel, text="尺寸", style="Panel.TLabelframe")
@@ -608,6 +652,138 @@ class ImageEditorApp(tk.Tk):
         self.bind("<Control-Shift-E>", lambda _event: self.reveal_current())
         self.bind("<Alt-Return>", lambda _event: self.show_properties())
 
+    def _bind_document_variables(self) -> None:
+        text_fields = (
+            (self.format_var, "output_format"),
+            (self.target_size_var, "target_size_text"),
+            (self.filename_prefix_var, "filename_prefix"),
+            (self.filename_suffix_var, "filename_suffix"),
+            (self.width_var, "width_text"),
+            (self.height_var, "height_text"),
+            (self.max_side_var, "max_side_text"),
+            (self.crop_ratio_var, "crop_ratio"),
+            (self.watermark_text_var, "watermark_text"),
+            (self.watermark_position_var, "watermark_position"),
+            (self.export_preset_var, "export_preset"),
+        )
+        integer_fields = (
+            (self.quality_var, "quality"),
+            (self.watermark_opacity_var, "watermark_opacity"),
+            (self.watermark_size_var, "watermark_size_percent"),
+        )
+        boolean_fields = (
+            (self.preserve_metadata_var, "preserve_metadata"),
+            (self.backup_on_overwrite_var, "backup_on_overwrite"),
+        )
+        for variable, field in text_fields:
+            variable.trace_add(
+                "write",
+                lambda *_args, current=variable, name=field: self._set_document_field(
+                    name, current.get()
+                ),
+            )
+        for variable, field in integer_fields:
+            variable.trace_add(
+                "write",
+                lambda *_args, current=variable, name=field: self._set_document_field(
+                    name, int(current.get())
+                ),
+            )
+        for variable, field in boolean_fields:
+            variable.trace_add(
+                "write",
+                lambda *_args, current=variable, name=field: self._set_document_field(
+                    name, bool(current.get())
+                ),
+            )
+        edit_fields = (
+            (self.brightness_var, "brightness"),
+            (self.contrast_var, "contrast"),
+            (self.saturation_var, "saturation"),
+            (self.sharpness_var, "sharpness"),
+            (self.grayscale_var, "grayscale"),
+            (self.auto_contrast_var, "auto_contrast"),
+        )
+        for variable, field in edit_fields:
+            variable.trace_add(
+                "write",
+                lambda *_args, current=variable, name=field: self._set_document_edit_field(
+                    name, current.get()
+                ),
+            )
+
+    def _set_document_field(self, field: str, value: object) -> None:
+        if self._syncing_document or self.document is None:
+            return
+        self.document.update_state(f"set_{field}", **{field: value})
+
+    def _set_document_edit_field(self, field: str, value: object) -> None:
+        if self._syncing_document or self.document is None:
+            return
+        edit_state = replace(self.document.state.edit_state, **{field: value})
+        self.document.update_state(f"edit_{field}", edit_state=edit_state)
+
+    def _update_document_geometry(self, kind: str) -> None:
+        if self._syncing_document or self.document is None:
+            return
+        edit_state = replace(
+            self.document.state.edit_state,
+            rotation=self.rotation,
+            flip_horizontal=self.flip_h,
+            flip_vertical=self.flip_v,
+        )
+        self.document.update_state(kind, edit_state=edit_state, crop_box=self.crop_box)
+
+    def _apply_document_state(self, state: DocumentState) -> None:
+        self._syncing_document = True
+        try:
+            self.rotation = state.edit_state.rotation
+            self.flip_h = state.edit_state.flip_horizontal
+            self.flip_v = state.edit_state.flip_vertical
+            self.brightness_var.set(state.edit_state.brightness)
+            self.contrast_var.set(state.edit_state.contrast)
+            self.saturation_var.set(state.edit_state.saturation)
+            self.sharpness_var.set(state.edit_state.sharpness)
+            self.grayscale_var.set(state.edit_state.grayscale)
+            self.auto_contrast_var.set(state.edit_state.auto_contrast)
+            self.crop_box = state.crop_box
+            self.crop_ratio_var.set(state.crop_ratio)
+            self.width_var.set(state.width_text)
+            self.height_var.set(state.height_text)
+            self.max_side_var.set(state.max_side_text)
+            self.format_var.set(state.output_format)
+            self.quality_var.set(state.quality)
+            self.target_size_var.set(state.target_size_text)
+            self.filename_prefix_var.set(state.filename_prefix)
+            self.filename_suffix_var.set(state.filename_suffix)
+            self.watermark_text_var.set(state.watermark_text)
+            self.watermark_position_var.set(state.watermark_position)
+            self.watermark_opacity_var.set(state.watermark_opacity)
+            self.watermark_size_var.set(state.watermark_size_percent)
+            self.preserve_metadata_var.set(state.preserve_metadata)
+            self.backup_on_overwrite_var.set(state.backup_on_overwrite)
+            self.export_preset_var.set(state.export_preset)
+        finally:
+            self._syncing_document = False
+
+    def _new_document_state(self, image: Image.Image) -> DocumentState:
+        return DocumentState(
+            width_text="",
+            height_text="",
+            output_format=self.format_var.get(),
+            quality=self.quality_var.get(),
+            target_size_text=self.target_size_var.get(),
+            filename_prefix=self.filename_prefix_var.get(),
+            filename_suffix=self.filename_suffix_var.get(),
+            watermark_text=self.watermark_text_var.get(),
+            watermark_position=self.watermark_position_var.get(),
+            watermark_opacity=self.watermark_opacity_var.get(),
+            watermark_size_percent=self.watermark_size_var.get(),
+            preserve_metadata=self.preserve_metadata_var.get(),
+            backup_on_overwrite=self.backup_on_overwrite_var.get(),
+            export_preset=self.export_preset_var.get(),
+        )
+
     def _load_config(self) -> None:
         data = self.settings_store.load()
         self.format_var.set(data.get("format", "JPEG"))
@@ -629,6 +805,10 @@ class ImageEditorApp(tk.Tk):
         self.edit_panel_visible_var.set(bool(data.get("edit_panel_visible", False)))
         self.slideshow_interval_var.set(float(data.get("slideshow_interval", 3.0)))
         self.slideshow_loop_var.set(bool(data.get("slideshow_loop", True)))
+        self.preserve_metadata_var.set(bool(data.get("preserve_metadata", True)))
+        self.backup_on_overwrite_var.set(bool(data.get("backup_on_overwrite", True)))
+        preset = str(data.get("export_preset", "自定义"))
+        self.export_preset_var.set(preset if preset in EXPORT_PRESETS else "自定义")
         geometry = data.get("window_geometry", "")
         self._saved_geometry = str(geometry) if isinstance(geometry, str) else ""
 
@@ -649,6 +829,9 @@ class ImageEditorApp(tk.Tk):
             "edit_panel_visible": self.edit_panel_visible_var.get(),
             "slideshow_interval": self.slideshow_interval_var.get(),
             "slideshow_loop": self.slideshow_loop_var.get(),
+            "preserve_metadata": self.preserve_metadata_var.get(),
+            "backup_on_overwrite": self.backup_on_overwrite_var.get(),
+            "export_preset": self.export_preset_var.get(),
             "window_geometry": self._saved_geometry or self.geometry(),
         }
         self.settings_store.save(data)
@@ -664,7 +847,7 @@ class ImageEditorApp(tk.Tk):
         paths = filedialog.askopenfilenames(
             title="选择一张或多张图片",
             filetypes=[
-                ("图片文件", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff"),
+                ("图片文件", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.gif"),
                 ("所有文件", "*.*"),
             ],
         )
@@ -682,7 +865,7 @@ class ImageEditorApp(tk.Tk):
         if session.current is None:
             self.status_var.set("没有找到可打开的受支持图片")
             messagebox.showwarning(
-                APP_NAME, "所选路径中没有可打开的 JPG、PNG、WEBP、BMP 或 TIFF 图片。"
+                APP_NAME, "所选路径中没有可打开的 JPG、PNG、WEBP、BMP、TIFF 或 GIF 图片。"
             )
             return
         self.stop_slideshow()
@@ -757,8 +940,10 @@ class ImageEditorApp(tk.Tk):
             self._handle_load_failure(failure, notify_error, skip_direction)
             return
 
-        self.original = image
-        self.image_path = path
+        self.document = Document.from_decoded(image, path, self._new_document_state(image))
+        self._last_source_status = "unchanged"
+        self.original = self.document.image
+        self.image_path = self.document.source_path
         self._load_current_image(path.name)
         self._remember_file(path)
         self.status_var.set(f"图片已载入 · {self.navigation.source_label or path.parent}")
@@ -795,7 +980,10 @@ class ImageEditorApp(tk.Tk):
         name = self.image_path.name if self.image_path is not None else "剪贴板图片"
         position = self.navigation.position
         suffix = f"  {position[0]} / {position[1]}" if position and position[1] > 1 else ""
-        return f"{name}{suffix}  {self.original.width} x {self.original.height}"
+        animation = ""
+        if self.document is not None and self.document.metadata.is_animated:
+            animation = f"  动画图片 · {self.document.metadata.frame_count} 帧"
+        return f"{name}{suffix}  {self.original.width} x {self.original.height}{animation}"
 
     def navigate_folder(self, direction: int, *, wrap: bool = True) -> bool:
         if len(self.navigation.files) <= 1:
@@ -831,10 +1019,14 @@ class ImageEditorApp(tk.Tk):
             return
 
         if isinstance(clipboard, Image.Image):
-            self.original = clipboard.copy()
+            copied = clipboard.copy()
+            self.document = Document.from_decoded(copied, None, self._new_document_state(copied))
+            self.document.base_revision = 1
+            self.document.mark_recovered_dirty()
+            self.original = self.document.image
             self.image_path = None
             self.navigation = NavigationSession([])
-            self._load_current_image("剪贴板图片")
+            self._load_current_image("剪贴板图片", recovered=True)
             self.status_var.set("已从剪贴板粘贴图片")
             return
 
@@ -849,21 +1041,18 @@ class ImageEditorApp(tk.Tk):
                     ".bmp",
                     ".tif",
                     ".tiff",
+                    ".gif",
                 }:
                     self.open_paths([path], confirm=False)
                     return
 
         messagebox.showinfo(APP_NAME, "剪贴板里没有可粘贴的图片。")
 
-    def _load_current_image(self, display_name: str) -> None:
-        if self.original is None:
+    def _load_current_image(self, display_name: str, *, recovered: bool = False) -> None:
+        if self.original is None or self.document is None:
             return
         self.title(f"{display_name} — {APP_NAME}")
-        self.reset_edits(refresh=False)
-        self.crop_box = None
-        self.width_var.set(str(self.original.width))
-        self.height_var.set(str(self.original.height))
-        self.max_side_var.set("")
+        self._apply_document_state(self.document.state)
         self.info_var.set(
             self._image_info_text()
             if self.image_path is not None
@@ -875,7 +1064,8 @@ class ImageEditorApp(tk.Tk):
         self.pan_offset = (0, 0)
         self.zoom_mode.set("适应")
         self._refresh_preview()
-        self._mark_clean()
+        if not recovered:
+            self._mark_clean()
 
     def _remember_file(self, path: Path) -> None:
         value = str(path)
@@ -1001,7 +1191,7 @@ class ImageEditorApp(tk.Tk):
 
     def rename_current(self) -> None:
         path = self._current_file()
-        if path is None or not self._confirm_discard_changes():
+        if path is None:
             return
         name = simpledialog.askstring(
             APP_NAME,
@@ -1019,6 +1209,8 @@ class ImageEditorApp(tk.Tk):
         self.image_loader.invalidate(path)
         self.navigation.files[self.navigation.index] = target
         self.image_path = target
+        if self.document is not None:
+            self.document.rebind_source(target)
         self.info_var.set(self._image_info_text())
         self._remember_file(target)
         self.status_var.set(f"已重命名为：{target.name}")
@@ -1071,7 +1263,9 @@ class ImageEditorApp(tk.Tk):
         self.image_loader.invalidate(path)
         target = self.navigation.remove(path)
         self.original = None
+        self.document = None
         self.image_path = None
+        self.session_store.clear()
         self.preview = None
         self.canvas.delete("all")
         if target is not None:
@@ -1087,7 +1281,11 @@ class ImageEditorApp(tk.Tk):
         if path is None or self.original is None:
             return
         try:
-            properties = image_properties(path, self.original)
+            properties = image_properties(
+                path,
+                self.original,
+                self.document.metadata if self.document is not None else None,
+            )
         except OSError as error:
             messagebox.showerror(APP_NAME, f"无法读取图片属性：{error}")
             return
@@ -1138,13 +1336,16 @@ class ImageEditorApp(tk.Tk):
         if not target:
             return
         try:
-            saved = save_image(self.original, target, options)
+            saved = self._save_document_image(Path(target), options)
+            if saved is None:
+                return
             self._save_config()
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"保存失败：{exc}")
             return
         self.status_var.set(f"已保存：{saved}")
-        self._mark_clean()
+        self._mark_clean(saved)
+        self.session_store.clear()
         if self.reveal_after_save_var.get():
             self._reveal_file(saved)
 
@@ -1171,15 +1372,73 @@ class ImageEditorApp(tk.Tk):
             extension_for_format(options.output_format),
         )
         try:
-            saved = save_image(self.original, target, options)
+            saved = self._save_document_image(target, options)
+            if saved is None:
+                return
             self._save_config()
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"快速导出失败：{exc}")
             return
         self.status_var.set(f"已快速导出：{saved}")
         self._mark_clean()
+        self.session_store.clear()
         if self.reveal_after_save_var.get():
             self._reveal_file(saved)
+
+    def _save_document_image(self, target: Path, options: ExportOptions) -> Path | None:
+        if self.original is None or self.document is None:
+            return None
+        allow_animation_flatten = False
+        allow_transparency_flatten = False
+        conflict_policy = ConflictPolicy.ERROR
+        while True:
+            try:
+                return save_image(
+                    self.original,
+                    target,
+                    options,
+                    metadata=self.document.metadata,
+                    source_path=self.document.source_path,
+                    source_fingerprint=self.document.source_fingerprint,
+                    conflict_policy=conflict_policy,
+                    backup_on_overwrite=self.document.state.backup_on_overwrite,
+                    source_passthrough=self.document.base_revision == 0,
+                    allow_animation_flatten=allow_animation_flatten,
+                    allow_transparency_flatten=allow_transparency_flatten,
+                )
+            except AnimationFlatteningRequired:
+                if not messagebox.askyesno(
+                    APP_NAME,
+                    "这是动画图片。当前编辑器只会导出当前显示帧，动画帧将丢失。\n\n"
+                    "是否确认另存为单帧图片？原动画不会被直接修改。",
+                ):
+                    return None
+                allow_animation_flatten = True
+            except TransparencyFlatteningRequired:
+                if not messagebox.askyesno(
+                    APP_NAME,
+                    "目标格式不支持透明通道，透明区域将使用白色背景。是否继续？",
+                ):
+                    return None
+                allow_transparency_flatten = True
+            except FileExistsError:
+                if not messagebox.askyesno(
+                    APP_NAME,
+                    f"目标文件已存在：\n{target}\n\n是否覆盖？"
+                    + (
+                        "覆盖前会创建 .bak 备份。"
+                        if self.document.state.backup_on_overwrite
+                        else ""
+                    ),
+                ):
+                    return None
+                conflict_policy = ConflictPolicy.OVERWRITE
+            except SourceChangedError as error:
+                messagebox.showerror(
+                    APP_NAME,
+                    f"{error}\n\n请另存为新文件，或重新打开源文件确认外部更改。",
+                )
+                return None
 
     def copy_result(self) -> None:
         if self.original is None:
@@ -1201,9 +1460,14 @@ class ImageEditorApp(tk.Tk):
         return unique_export_path(folder, stem, extension)
 
     def _read_filename_affixes(self) -> tuple[str, str] | None:
+        state = self.document.state if self.document is not None else None
         try:
-            prefix = validate_filename_affix("文件前缀", self.filename_prefix_var.get())
-            suffix = validate_filename_affix("文件后缀", self.filename_suffix_var.get())
+            prefix = validate_filename_affix(
+                "文件前缀", state.filename_prefix if state is not None else ""
+            )
+            suffix = validate_filename_affix(
+                "文件后缀", state.filename_suffix if state is not None else ""
+            )
         except ValueError as exc:
             messagebox.showerror(APP_NAME, str(exc))
             return None
@@ -1218,11 +1482,12 @@ class ImageEditorApp(tk.Tk):
         prefix: str | None = None,
         suffix: str | None = None,
     ) -> str:
+        state = self.document.state if self.document is not None else DocumentState()
         clean_prefix = validate_filename_affix(
-            "文件前缀", self.filename_prefix_var.get() if prefix is None else prefix
+            "文件前缀", state.filename_prefix if prefix is None else prefix
         )
         clean_suffix = validate_filename_affix(
-            "文件后缀", self.filename_suffix_var.get() if suffix is None else suffix
+            "文件后缀", state.filename_suffix if suffix is None else suffix
         )
         return f"{clean_prefix}{stem}{clean_suffix or fallback_suffix}"
 
@@ -1230,7 +1495,7 @@ class ImageEditorApp(tk.Tk):
         paths = filedialog.askopenfilenames(
             title="选择要批量处理的图片",
             filetypes=[
-                ("图片文件", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff"),
+                ("图片文件", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.gif"),
                 ("所有文件", "*.*"),
             ],
         )
@@ -1411,48 +1676,34 @@ class ImageEditorApp(tk.Tk):
         return f"增大 {self._format_bytes(abs(saved))} ({abs(percent):.1f}%)"
 
     def _state_signature(self) -> tuple[object, ...] | None:
-        if self.original is None:
+        if self.document is None:
             return None
-        return (
-            self.original.size,
-            self.rotation,
-            self.flip_h,
-            self.flip_v,
-            self.brightness_var.get(),
-            self.contrast_var.get(),
-            self.saturation_var.get(),
-            self.sharpness_var.get(),
-            self.grayscale_var.get(),
-            self.auto_contrast_var.get(),
-            self.crop_box,
-            self.crop_ratio_var.get(),
-            self.width_var.get(),
-            self.height_var.get(),
-            self.max_side_var.get(),
-            self.format_var.get(),
-            self.quality_var.get(),
-            self.target_size_var.get(),
-            self.filename_prefix_var.get(),
-            self.filename_suffix_var.get(),
-            self.watermark_text_var.get(),
-            self.watermark_position_var.get(),
-            self.watermark_opacity_var.get(),
-            self.watermark_size_var.get(),
-        )
+        return (self.document.state, self.document.base_revision)
 
-    def _mark_clean(self) -> None:
+    def _mark_clean(self, saved_path: Path | None = None) -> None:
+        if self.document is not None:
+            same_source = bool(
+                saved_path is not None
+                and self.document.source_path is not None
+                and saved_path.resolve() == self.document.source_path.resolve()
+            )
+            self.document.mark_clean(saved_path if same_source else None)
         self.clean_signature = self._state_signature()
 
     def has_unsaved_changes(self) -> bool:
-        return self.original is not None and self.clean_signature != self._state_signature()
+        return self.document is not None and self.document.dirty
 
     def _confirm_discard_changes(self) -> bool:
         if not self.has_unsaved_changes():
             return True
-        return messagebox.askyesno(APP_NAME, "当前图片有未保存的修改。要放弃这些修改吗？")
+        discard = messagebox.askyesno(APP_NAME, "当前图片有未保存的修改。要放弃这些修改吗？")
+        if discard:
+            self.session_store.clear()
+        return discard
 
     def close(self) -> None:
         if self._confirm_discard_changes():
+            self.session_store.clear()
             self._shutdown_services()
             self.destroy()
 
@@ -1472,6 +1723,8 @@ class ImageEditorApp(tk.Tk):
                 if self.has_unsaved_changes():
                     self.status_var.set("修改尚未保存，升级已取消")
                     return False
+            else:
+                self.session_store.clear()
         self.after(50, self._finish_upgrade_exit)
         return True
 
@@ -1481,71 +1734,95 @@ class ImageEditorApp(tk.Tk):
 
     def _shutdown_services(self) -> None:
         self.stop_slideshow()
+        if self._autosave_job is not None:
+            self.after_cancel(self._autosave_job)
+            self._autosave_job = None
+        if self._source_monitor_job is not None:
+            self.after_cancel(self._source_monitor_job)
+            self._source_monitor_job = None
         self._save_config()
         self._drop_target.disable()
         self.image_loader.shutdown()
         self.preview_renderer.shutdown()
 
+    def _autosave_session(self) -> None:
+        self._autosave_job = None
+        try:
+            signature = self._state_signature()
+            if self.document is not None and self.document.dirty:
+                if signature != self._last_autosave_signature:
+                    self.session_store.save(self.document)
+                    self._last_autosave_signature = signature
+            elif self.document is None or not self.document.dirty:
+                self.session_store.clear()
+                self._last_autosave_signature = None
+        except OSError as error:
+            self.status_var.set(f"自动保存会话失败：{error}")
+        finally:
+            self._autosave_job = self.after(2000, self._autosave_session)
+
+    def _offer_session_recovery(self) -> None:
+        recovery = self.session_store.load()
+        if recovery is None:
+            return
+        message = "检测到上次异常退出时未完成的编辑。是否恢复？"
+        if recovery.source_changed:
+            message += "\n\n源文件在异常退出后发生过变化，恢复后请另存为新文件。"
+        if not messagebox.askyesno(APP_NAME, message):
+            self.session_store.clear()
+            return
+        self.document = recovery.document
+        self.original = recovery.document.image
+        self.image_path = recovery.document.source_path
+        self.navigation = (
+            NavigationSession.from_activation([self.image_path])
+            if self.image_path is not None
+            else NavigationSession([])
+        )
+        display_name = self.image_path.name if self.image_path is not None else "恢复的剪贴板图片"
+        self._load_current_image(display_name, recovered=True)
+        self.status_var.set("已恢复上次未完成编辑；可继续编辑、另存或安全放弃")
+
+    def _monitor_source_file(self) -> None:
+        self._source_monitor_job = None
+        if self.document is not None:
+            status = self.document.source_status()
+            if status.kind != self._last_source_status:
+                if status.kind == "modified":
+                    self.status_var.set("源文件已被其他程序修改；覆盖保存已禁用，请重新打开或另存")
+                elif status.kind == "renamed":
+                    self.status_var.set(f"源文件已被外部重命名为：{status.path}")
+                elif status.kind == "missing":
+                    self.status_var.set("源文件已被移动或删除；当前编辑仍可另存为新文件")
+                self._last_source_status = status.kind
+        self._source_monitor_job = self.after(2000, self._monitor_source_file)
+
     def _snapshot(self, include_image: bool = False) -> dict[str, object]:
+        if self.document is None:
+            return {}
         snapshot: dict[str, object] = {
-            "rotation": self.rotation,
-            "flip_h": self.flip_h,
-            "flip_v": self.flip_v,
-            "brightness": self.brightness_var.get(),
-            "contrast": self.contrast_var.get(),
-            "saturation": self.saturation_var.get(),
-            "sharpness": self.sharpness_var.get(),
-            "grayscale": self.grayscale_var.get(),
-            "auto_contrast": self.auto_contrast_var.get(),
-            "crop_box": self.crop_box,
-            "crop_ratio": self.crop_ratio_var.get(),
-            "width": self.width_var.get(),
-            "height": self.height_var.get(),
-            "max_side": self.max_side_var.get(),
-            "format": self.format_var.get(),
-            "quality": self.quality_var.get(),
-            "target_size_kb": self.target_size_var.get(),
-            "filename_prefix": self.filename_prefix_var.get(),
-            "filename_suffix": self.filename_suffix_var.get(),
-            "watermark_text": self.watermark_text_var.get(),
-            "watermark_position": self.watermark_position_var.get(),
-            "watermark_opacity": self.watermark_opacity_var.get(),
-            "watermark_size_percent": self.watermark_size_var.get(),
+            "document_state": self.document.state,
+            "base_revision": self.document.base_revision,
         }
-        if include_image and self.original is not None:
+        if include_image:
             snapshot["original_image"] = self.original.copy()
             snapshot["image_path"] = self.image_path
         return snapshot
 
     def _restore_snapshot(self, snapshot: dict[str, object]) -> None:
+        if self.document is None or "document_state" not in snapshot:
+            return
         self._restoring_history = True
         try:
             if "original_image" in snapshot:
-                self.original = cast(Image.Image, snapshot["original_image"]).copy()
+                restored_image = cast(Image.Image, snapshot["original_image"]).copy()
+                self.document.replace_image(restored_image, "history_image_restore")
+                self.document.base_revision = int(snapshot.get("base_revision", 0))
+                self.original = self.document.image
                 self.image_path = cast(Path | None, snapshot.get("image_path"))
-            self.rotation = int(cast(int, snapshot["rotation"]))
-            self.flip_h = bool(snapshot["flip_h"])
-            self.flip_v = bool(snapshot["flip_v"])
-            self.brightness_var.set(int(cast(int, snapshot["brightness"])))
-            self.contrast_var.set(int(cast(int, snapshot["contrast"])))
-            self.saturation_var.set(int(cast(int, snapshot["saturation"])))
-            self.sharpness_var.set(int(cast(int, snapshot["sharpness"])))
-            self.grayscale_var.set(bool(snapshot["grayscale"]))
-            self.auto_contrast_var.set(bool(snapshot["auto_contrast"]))
-            self.crop_box = cast(tuple[int, int, int, int] | None, snapshot["crop_box"])
-            self.crop_ratio_var.set(str(snapshot["crop_ratio"]))
-            self.width_var.set(str(snapshot["width"]))
-            self.height_var.set(str(snapshot["height"]))
-            self.max_side_var.set(str(snapshot.get("max_side", "")))
-            self.format_var.set(str(snapshot["format"]))
-            self.quality_var.set(int(cast(int, snapshot["quality"])))
-            self.target_size_var.set(str(snapshot.get("target_size_kb", "")))
-            self.filename_prefix_var.set(str(snapshot.get("filename_prefix", "")))
-            self.filename_suffix_var.set(str(snapshot.get("filename_suffix", "")))
-            self.watermark_text_var.set(str(snapshot.get("watermark_text", "")))
-            self.watermark_position_var.set(str(snapshot.get("watermark_position", "右下")))
-            self.watermark_opacity_var.set(int(cast(int, snapshot.get("watermark_opacity", 35))))
-            self.watermark_size_var.set(int(cast(int, snapshot.get("watermark_size_percent", 5))))
+            state = cast(DocumentState, snapshot["document_state"])
+            self.document.set_state("history_state_restore", state)
+            self._apply_document_state(state)
         finally:
             self._restoring_history = False
         if self.crop_box:
@@ -1583,17 +1860,7 @@ class ImageEditorApp(tk.Tk):
         self.status_var.set("已重做一步")
 
     def edit_state(self) -> EditState:
-        return EditState(
-            rotation=self.rotation,
-            flip_horizontal=self.flip_h,
-            flip_vertical=self.flip_v,
-            brightness=self.brightness_var.get(),
-            contrast=self.contrast_var.get(),
-            saturation=self.saturation_var.get(),
-            sharpness=self.sharpness_var.get(),
-            grayscale=self.grayscale_var.get(),
-            auto_contrast=self.auto_contrast_var.get(),
-        )
+        return self.document.state.edit_state if self.document is not None else EditState()
 
     def reset_edits(self, refresh: bool = True) -> None:
         if refresh:
@@ -1607,6 +1874,7 @@ class ImageEditorApp(tk.Tk):
         self.sharpness_var.set(0)
         self.grayscale_var.set(False)
         self.auto_contrast_var.set(False)
+        self._update_document_geometry("reset_edits")
         if refresh:
             self.status_var.set("已撤销所有快速编辑")
             self._refresh_preview()
@@ -1614,6 +1882,8 @@ class ImageEditorApp(tk.Tk):
     def reset_crop(self) -> None:
         self._push_history()
         self.crop_box = None
+        if self.document is not None:
+            self.document.update_state("reset_crop", crop_box=None)
         self.crop_var.set("未设置裁剪")
         self._refresh_preview()
 
@@ -1630,9 +1900,24 @@ class ImageEditorApp(tk.Tk):
             crop_box=self.crop_box,
             edit_state=self.edit_state(),
         )
-        self.original = prepare_image(self.original, options)
-        self.reset_edits(refresh=False)
-        self.crop_box = None
+        cropped = prepare_image(self.original, options)
+        if self.document is not None:
+            self.document.replace_image(cropped, "apply_crop")
+            state = replace(
+                self.document.state,
+                edit_state=EditState(),
+                crop_box=None,
+                width_text=str(cropped.width),
+                height_text=str(cropped.height),
+                max_side_text="",
+            )
+            self.document.set_state("apply_crop_reset", state)
+            self.original = self.document.image
+            self._apply_document_state(state)
+        else:
+            self.original = cropped
+            self.reset_edits(refresh=False)
+            self.crop_box = None
         self.crop_var.set("未设置裁剪")
         self.width_var.set(str(self.original.width))
         self.height_var.set(str(self.original.height))
@@ -1656,6 +1941,8 @@ class ImageEditorApp(tk.Tk):
         left = max(0, (image.width - width) // 2)
         top = max(0, (image.height - height) // 2)
         self.crop_box = (left, top, left + width, top + height)
+        if self.document is not None:
+            self.document.update_state("center_crop", crop_box=self.crop_box)
         self._update_crop_label()
         self._refresh_preview()
         self.status_var.set("已设置居中裁剪")
@@ -1679,6 +1966,8 @@ class ImageEditorApp(tk.Tk):
             width = image.width - left
             height = round(width / ratio)
         self.crop_box = (left, top, min(image.width, left + width), min(image.height, top + height))
+        if self.document is not None:
+            self.document.update_state("crop_ratio", crop_box=self.crop_box)
         self._update_crop_label()
         self._refresh_preview()
 
@@ -1688,6 +1977,7 @@ class ImageEditorApp(tk.Tk):
         self._push_history()
         self.rotation = (self.rotation + degrees) % 360
         self.crop_box = None
+        self._update_document_geometry("rotate")
         self.status_var.set(f"已旋转到 {self.rotation}°")
         self._refresh_preview()
 
@@ -1697,6 +1987,7 @@ class ImageEditorApp(tk.Tk):
         self._push_history()
         self.flip_h = not self.flip_h
         self.crop_box = None
+        self._update_document_geometry("flip_horizontal")
         self.status_var.set("已切换水平翻转")
         self._refresh_preview()
 
@@ -1706,6 +1997,7 @@ class ImageEditorApp(tk.Tk):
         self._push_history()
         self.flip_v = not self.flip_v
         self.crop_box = None
+        self._update_document_geometry("flip_vertical")
         self.status_var.set("已切换垂直翻转")
         self._refresh_preview()
 
@@ -1735,67 +2027,16 @@ class ImageEditorApp(tk.Tk):
     def _read_options(
         self, allow_without_image: bool = False, quiet: bool = False
     ) -> ExportOptions | None:
-        try:
-            width = int(self.width_var.get()) if self.width_var.get().strip() else None
-            height = int(self.height_var.get()) if self.height_var.get().strip() else None
-            max_side = int(self.max_side_var.get()) if self.max_side_var.get().strip() else None
-            target_size_kb = (
-                int(self.target_size_var.get()) if self.target_size_var.get().strip() else None
-            )
-        except ValueError:
-            if not quiet:
-                messagebox.showerror(APP_NAME, "宽度、高度、最长边和目标 KB 必须是数字。")
-            return None
-        if (width is not None and width <= 0) or (height is not None and height <= 0):
-            if not quiet:
-                messagebox.showerror(APP_NAME, "宽度和高度必须大于 0。")
-            return None
-        if max_side is not None and max_side <= 0:
-            if not quiet:
-                messagebox.showerror(APP_NAME, "最长边必须大于 0。")
-            return None
-        if max_side is not None and (width is not None or height is not None):
-            if not quiet:
-                messagebox.showerror(APP_NAME, "最长边会自动保持比例，不能和宽度或高度同时填写。")
-            return None
-        if target_size_kb is not None and target_size_kb <= 0:
-            if not quiet:
-                messagebox.showerror(APP_NAME, "目标 KB 必须大于 0。")
-            return None
-        output_format = self.format_var.get()
-        if target_size_kb is not None and output_format not in {"JPEG", "WEBP"}:
-            if not quiet:
-                messagebox.showerror(APP_NAME, "目标大小自动压缩仅适用于 JPEG 和 WEBP。")
-            return None
-        watermark_opacity = self.watermark_opacity_var.get()
-        watermark_size = self.watermark_size_var.get()
-        if not 0 <= watermark_opacity <= 100:
-            if not quiet:
-                messagebox.showerror(APP_NAME, "水印透明度必须在 0 到 100 之间。")
-            return None
-        if not 1 <= watermark_size <= 30:
-            if not quiet:
-                messagebox.showerror(APP_NAME, "水印字号必须在 1 到 30 之间。")
-            return None
-        if not allow_without_image and self.original is None:
-            if not quiet:
+        if self.document is None:
+            if not allow_without_image and not quiet:
                 messagebox.showinfo(APP_NAME, "请先打开一张图片。")
             return None
-        return ExportOptions(
-            output_format=output_format,
-            quality=self.quality_var.get(),
-            target_size_kb=target_size_kb,
-            max_width=max_side if max_side is not None else (width if height is None else None),
-            max_height=max_side if max_side is not None else (height if width is None else None),
-            exact_width=width if height is not None else None,
-            exact_height=height if width is not None else None,
-            crop_box=self.crop_box,
-            edit_state=self.edit_state(),
-            watermark_text=self.watermark_text_var.get().strip(),
-            watermark_position=self.watermark_position_var.get(),
-            watermark_opacity=watermark_opacity,
-            watermark_size_percent=watermark_size,
-        )
+        try:
+            return self.document.state.export_options()
+        except ValueError as error:
+            if not quiet:
+                messagebox.showerror(APP_NAME, str(error))
+            return None
 
     def _current_working_image(self) -> Image.Image | None:
         if self.original is None:
@@ -1850,6 +2091,35 @@ class ImageEditorApp(tk.Tk):
 
     def _watermark_changed(self) -> None:
         self.status_var.set("水印设置已更新")
+        self._save_config()
+        self._update_estimate()
+
+    def _apply_export_preset(self) -> None:
+        if self.document is None:
+            return
+        try:
+            state = apply_export_preset(
+                self.document.state,
+                self.export_preset_var.get(),
+                self.document.metadata.original_format,
+            )
+        except ValueError as error:
+            messagebox.showerror(APP_NAME, str(error))
+            return
+        self.document.set_state("export_preset", state)
+        self._apply_document_state(state)
+        self._save_config()
+        self._update_estimate()
+        self.status_var.set(f"已应用导出预设：{state.export_preset}")
+
+    def _custom_export_changed(self) -> None:
+        if not self._syncing_document and self.document is not None:
+            self.document.update_state("custom_export", export_preset="自定义")
+            self._syncing_document = True
+            try:
+                self.export_preset_var.set("自定义")
+            finally:
+                self._syncing_document = False
         self._save_config()
         self._update_estimate()
 
@@ -2022,6 +2292,8 @@ class ImageEditorApp(tk.Tk):
             )
         else:
             self.crop_box = self._resize_crop_box(self.crop_drag_start_box, self.crop_action, end)
+        if self.document is not None:
+            self.document.update_state("crop_drag", crop_box=self.crop_box)
         self._draw_crop()
         self._update_crop_label()
 
@@ -2031,6 +2303,8 @@ class ImageEditorApp(tk.Tk):
         left, top, right, bottom = self.crop_box
         if right - left < 4 or bottom - top < 4:
             self.crop_box = None
+            if self.document is not None:
+                self.document.update_state("crop_cancel", crop_box=None)
             self.crop_var.set("未设置裁剪")
         else:
             self._update_crop_label()

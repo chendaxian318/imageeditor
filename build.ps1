@@ -204,7 +204,8 @@ try {
         "image_editor.py", "image_ops.py", "installer.py",
         "light_image_editor", "scripts", "benchmarks",
         "test_architecture.py", "test_build_metadata.py", "test_identity_resources.py",
-        "test_image_ops.py", "test_installer.py", "test_viewer_services.py"
+        "test_image_ops.py", "test_installer.py", "test_v03_safety.py",
+        "test_viewer_services.py"
     )
 
     if (-not $SkipTests) {

@@ -1,6 +1,6 @@
 # Third-party licence inventory
 
-This document records the M0 dependency audit performed on **2026-08-03**.
+This document records the dependency audit updated on **2026-08-04**.
 It is an engineering compliance inventory, not legal advice and not a
 substitute for the authoritative licence text distributed by each component.
 
@@ -12,8 +12,8 @@ substitute for the authoritative licence text distributed by each component.
 - PyInstaller: 6.17.0
 - Source of version data: installed metadata in `.venv` plus `pip freeze --all`
 - Application artifacts checked: `release/LightImageEditor/ImageEditor.exe`,
-  `release/LightImageEditor-Portable-x64-0.2.0.exe` and
-  `release/LightImageEditor-Setup-x64-0.2.0.exe`
+  `release/LightImageEditor-Portable-x64-0.3.0.exe` and
+  `release/LightImageEditor-Setup-x64-0.3.0.exe`
 
 The virtual environment is not a release artifact. Paths below identify the
 authoritative files in the audited local installation so that the release
@@ -29,6 +29,7 @@ process can copy them into a distributable notice bundle.
 | PyInstaller | 6.17.0 | Build tool and embedded bootloader/runtime hooks | GPL-2.0-or-later WITH Bootloader-exception; runtime hooks Apache-2.0 | `.venv/Lib/site-packages/pyinstaller-6.17.0.dist-info/licenses/COPYING.txt` |
 | pyinstaller-hooks-contrib | 2026.6 | PyInstaller hook set | Standard hooks GPL-2.0-or-later; runtime hooks Apache-2.0 | `.venv/Lib/site-packages/pyinstaller_hooks_contrib-2026.6.dist-info/licenses/LICENSE` |
 | Inno Setup | 7.0.2 | Windows installer compiler | Free for non-commercial use; commercial use requires a licence | Verified compiler under `.tools/inno`; authoritative terms at `jrsoftware.org` |
+| Compact ICC Profiles | DisplayP3Compat-v4 | Display P3 automated test fixture | CC0-1.0 / public domain dedication | Embedded in `test_v03_safety.py`; source: `saucecontrol/Compact-ICC-Profiles` |
 
 The PyInstaller exception permits linking or embedding its compiled bootloader
 and related files into another program and distributing that combination

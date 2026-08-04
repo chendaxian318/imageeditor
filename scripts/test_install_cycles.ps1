@@ -10,7 +10,12 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 if (-not $Installer) {
-    $Installer = Join-Path $Root "release\LightImageEditor-Setup-x64-0.2.0.exe"
+    $Version = & (Join-Path $Root ".venv\Scripts\python.exe") `
+        -c "from light_image_editor.version import __version__; print(__version__)"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to read the product version."
+    }
+    $Installer = Join-Path $Root "release\LightImageEditor-Setup-x64-$Version.exe"
 }
 $Installer = [System.IO.Path]::GetFullPath($Installer)
 $rootPrefix = [System.IO.Path]::GetFullPath($Root).TrimEnd("\") + "\"

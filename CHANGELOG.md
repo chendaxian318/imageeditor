@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.0 — 2026-08-04
+
+### Fidelity and document model
+
+- Added a single `Document` model for edit state, crop/resize/export state, operation history, dirty tracking, source metadata and source identity.
+- Normalized all eight EXIF Orientation values on decode and removed Orientation on export to prevent repeated rotation.
+- Preserved ICC, EXIF, DPI and XMP where the target Pillow format supports them; added ICC-to-sRGB conversion for display previews without mutating source pixels or profiles.
+- Added byte-exact original-quality passthrough for unchanged same-format files, including animated APNG and WebP.
+- Removed implicit default resizing so an unchanged export is not needlessly resampled.
+
+### Safe editing and recovery
+
+- Added same-directory atomic replacement, explicit conflict policies and optional timestamp-preserving `.bak` backups before overwrite.
+- Added transparent-to-opaque and animated-to-single-frame confirmation gates.
+- Added GIF/APNG/WebP animation detection and visible frame-count labels.
+- Added transactional two-file autosave generations and startup recovery, including recovery after source deletion.
+- Added source fingerprints and live detection of external modification, rename and deletion; stale-source overwrite is blocked.
+- Added decode limits for decompression bombs, pixel/dimension limits, animation frame count, truncation and unsupported formats.
+- Added social-media, avatar, email, original-quality and custom export presets.
+- Added GIF to the Windows candidate default-app registrations.
+
+### Validation
+
+- 68 automated tests pass, including eight orientation golden cases, sRGB and Display P3 preview conversion, ICC/EXIF/DPI/XMP round trips, GIF/APNG/WebP animation guards, interrupted atomic writes, source conflicts, crash recovery and malformed input boundaries.
+- A real Tk UI smoke test passed asynchronous open, `Document` binding, dirty tracking and autosave.
+
 ## 0.2.0 — 2026-08-03
 
 ### Default viewer
