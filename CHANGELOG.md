@@ -8,7 +8,8 @@
 - Fixed empty-state batch startup, quick-export dirty-state loss, stale file actions after a failed load, and thumbnail synchronization after project/clipboard/session activation.
 - Prevented global paste/apply/compare shortcuts from stealing input in text fields.
 - Hardened corrupted settings, crash-record acknowledgement, temporary image lifetimes, preview callback shutdown and benchmark service cleanup.
-- Completed the v1.1.1 functional audit: Ruff, Mypy, 143 tests, performance smoke and quick soak all pass.
+- Refreshed the final SHA-256 manifest after release-gate generation so every generated release report is covered.
+- Completed the v1.1.1 functional audit: Ruff, Mypy, 144 tests, performance smoke and quick soak all pass.
 
 ## 1.1.0 — 2026-08-04
 

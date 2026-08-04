@@ -118,6 +118,38 @@ function Remove-GeneratedDirectory {
     }
 }
 
+function Write-ReleaseChecksums {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReleasePath,
+        [Parameter(Mandatory = $true)][string]$OutputPath
+    )
+
+    $releasePrefix = [System.IO.Path]::GetFullPath($ReleasePath).TrimEnd("\") + "\"
+    $resolvedOutput = [System.IO.Path]::GetFullPath($OutputPath)
+    $checksumLines = Get-ChildItem -LiteralPath $ReleasePath -File -Recurse |
+        Where-Object {
+            -not [System.IO.Path]::GetFullPath($_.FullName).Equals(
+                $resolvedOutput,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
+        } |
+        Sort-Object FullName |
+        ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $fullName = [System.IO.Path]::GetFullPath($_.FullName)
+            if (-not $fullName.StartsWith($releasePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Release file escaped the release directory: $fullName"
+            }
+            $relative = $fullName.Substring($releasePrefix.Length).Replace("\", "/")
+            "$hash  $relative"
+        }
+    [System.IO.File]::WriteAllLines(
+        $resolvedOutput,
+        $checksumLines,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
+
 function Get-InnoCompiler {
     $localInno = Join-Path $Root ".tools\inno"
     $candidates = @(
@@ -469,24 +501,9 @@ try {
         "--tests-executed", $(if ($SkipTests) { "false" } else { "true" })
     )
     $checksumPath = Join-Path $Release "SHA256SUMS.txt"
-    $releasePrefix = [System.IO.Path]::GetFullPath($Release).TrimEnd("\") + "\"
-    $checksumLines = Get-ChildItem -LiteralPath $Release -File -Recurse |
-        Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
-        Sort-Object FullName |
-        ForEach-Object {
-            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            $fullName = [System.IO.Path]::GetFullPath($_.FullName)
-            if (-not $fullName.StartsWith($releasePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-                throw "Release file escaped the release directory: $fullName"
-            }
-            $relative = $fullName.Substring($releasePrefix.Length).Replace("\", "/")
-            "$hash  $relative"
-        }
-    [System.IO.File]::WriteAllLines(
-        $checksumPath,
-        $checksumLines,
-        [System.Text.UTF8Encoding]::new($false)
-    )
+    # The gate verifier requires a checksum manifest to exist. Refresh it after the
+    # verifier as well so the generated gate result is covered by the final manifest.
+    Write-ReleaseChecksums -ReleasePath $Release -OutputPath $checksumPath
 
     $releaseGateArguments = @(
         "-m", "scripts.verify_production_release",
@@ -501,6 +518,7 @@ try {
     if ($ProductionCandidate) { $releaseGateArguments += "--candidate" }
     elseif (-not $Production) { $releaseGateArguments += "--allow-blocked" }
     Invoke-Checked $Python $releaseGateArguments
+    Write-ReleaseChecksums -ReleasePath $Release -OutputPath $checksumPath
 
     Write-Host "Build complete (version $version):"
     Write-Host "  $Release\LightImageEditor\ImageEditor.exe"

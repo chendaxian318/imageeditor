@@ -88,6 +88,19 @@ class ReleaseRecipeTests(unittest.TestCase):
         self.assertIn("InnoInstallerSha256", script)
         self.assertIn("innosetup-7.0.2-x64.exe", script)
 
+    def test_final_checksum_manifest_includes_release_gate_result(self) -> None:
+        script = Path("build.ps1").read_text(encoding="utf-8")
+        checksum_call = "Write-ReleaseChecksums -ReleasePath $Release -OutputPath $checksumPath"
+        gate_call = "Invoke-Checked $Python $releaseGateArguments"
+
+        first_checksum = script.find(checksum_call)
+        gate = script.find(gate_call)
+        final_checksum = script.rfind(checksum_call)
+
+        self.assertGreaterEqual(first_checksum, 0)
+        self.assertGreater(gate, first_checksum)
+        self.assertGreater(final_checksum, gate)
+
 
 if __name__ == "__main__":
     unittest.main()
