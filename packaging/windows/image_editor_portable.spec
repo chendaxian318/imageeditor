@@ -7,12 +7,13 @@ from pathlib import Path
 ROOT = Path(SPECPATH).resolve().parents[1]
 ICON = ROOT / "resources" / "icons" / "app.ico"
 VERSION_INFO = ROOT / "build" / "version" / "ImageEditor.version.txt"
+LOCALES = ROOT / "resources" / "locales"
 
 a = Analysis(
     [str(ROOT / "image_editor.py")],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[],
+    datas=[(str(LOCALES), "resources/locales")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

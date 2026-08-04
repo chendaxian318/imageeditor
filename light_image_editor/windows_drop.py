@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import queue
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,8 @@ class WindowsFileDrop:
         self.hwnd: int | None = None
         self._old_proc: int | None = None
         self._window_proc: Any = None
+        self._pending: queue.SimpleQueue[list[Path]] = queue.SimpleQueue()
+        self._poll_job: str | None = None
 
     def enable(self) -> bool:
         if os.name != "nt":
@@ -72,7 +75,10 @@ class WindowsFileDrop:
                     shell32.DragQueryFileW(drop_handle, index, buffer, length + 1)
                     paths.append(Path(buffer.value))
                 shell32.DragFinish(drop_handle)
-                self.widget.after(0, lambda: self.callback(paths))
+                # Calling Tk from this native WNDPROC can terminate CPython because
+                # Tk's main loop may have released the GIL.  Hand the paths to a
+                # normal Tk timer instead.
+                self._pending.put(paths)
                 return 0
             assert self._old_proc is not None
             return int(
@@ -96,11 +102,32 @@ class WindowsFileDrop:
             self._window_proc = None
             return False
         shell32.DragAcceptFiles(ctypes.c_void_p(self.hwnd), True)
+        self._schedule_poll()
         return True
+
+    def _schedule_poll(self) -> None:
+        if self.hwnd is not None and self._poll_job is None:
+            self._poll_job = self.widget.after(40, self._poll_pending)
+
+    def _poll_pending(self) -> None:
+        self._poll_job = None
+        while True:
+            try:
+                paths = self._pending.get_nowait()
+            except queue.Empty:
+                break
+            self.callback(paths)
+        self._schedule_poll()
 
     def disable(self) -> None:
         if os.name != "nt" or self.hwnd is None:
             return
+        if self._poll_job is not None:
+            try:
+                self.widget.after_cancel(self._poll_job)
+            except Exception:
+                pass
+            self._poll_job = None
         ctypes.windll.shell32.DragAcceptFiles(ctypes.c_void_p(self.hwnd), False)
         if self._old_proc is not None:
             is_64_bit = ctypes.sizeof(ctypes.c_void_p) == 8

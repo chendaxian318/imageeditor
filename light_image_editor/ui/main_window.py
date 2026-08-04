@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 import tkinter as tk
@@ -31,6 +32,7 @@ from image_ops import (
     save_image,
 )
 
+from ..accessibility import FocusNavigator, set_accessible_name
 from ..annotations import AnnotationObject, hit_radius_px, object_at, parse_crop_ratio
 from ..batch import (
     BatchManifest,
@@ -42,6 +44,7 @@ from ..batch import (
 )
 from ..commands import EditCommand
 from ..document import Document, DocumentState
+from ..dpi import DpiManager, dpi_scale, enable_process_dpi_awareness, monitor_work_area
 from ..files import (
     copy_file,
     copy_image_to_clipboard,
@@ -55,12 +58,14 @@ from ..files import (
     validate_filename_affix,
 )
 from ..formats import AnimationSequence, codec_capabilities, decode_animation, export_animation
+from ..i18n import SUPPORTED_LOCALES, Localizer
 from ..identity import PRODUCT_NAME_ZH
 from ..image_loader import ImageLoader, ImageLoadFailure
 from ..metadata import image_properties
 from ..navigation import NavigationSession
 from ..presets import EXPORT_PRESETS, apply_export_preset
 from ..preview import PreviewFrame, PreviewRenderer, color_manage_for_display
+from ..privacy import privacy_summary
 from ..projects import (
     ProjectError,
     ProjectSourceMissing,
@@ -77,6 +82,7 @@ from ..renderer import (
 )
 from ..session import SessionStore
 from ..settings import SettingsStore
+from ..theme import ThemeManager, resolve_theme
 from ..windows_drop import WindowsFileDrop
 from .curve_editor import CurveEditor
 
@@ -122,11 +128,19 @@ class ImageEditorApp(tk.Tk):
         preview_renderer: PreviewRenderer | None = None,
         session_store: SessionStore | None = None,
     ) -> None:
+        enable_process_dpi_awareness()
         super().__init__()
         self.settings_store = settings_store or SettingsStore()
-        self.image_loader = image_loader or ImageLoader()
+        initial_settings = self.settings_store.load()
+        self.image_loader = image_loader or ImageLoader(
+            max_workers=max(1, min(8, int(initial_settings.get("decode_workers", 2)))),
+            cache_size=max(1, min(20, int(initial_settings.get("preview_cache", 3)))),
+        )
         self.preview_renderer = preview_renderer or PreviewRenderer()
         self.session_store = session_store or SessionStore()
+        self.localizer = Localizer(str(initial_settings.get("locale", "zh-CN")))
+        self.theme_manager = ThemeManager(self)
+        self.dpi_manager = DpiManager(self)
         self.navigation = NavigationSession([])
         self.title(APP_NAME)
         self.geometry("1240x780")
@@ -209,6 +223,16 @@ class ImageEditorApp(tk.Tk):
         self.batch_conflict_var = tk.StringVar(value="unique")
         self.batch_strip_metadata_var = tk.BooleanVar(value=False)
         self.batch_preserve_animation_var = tk.BooleanVar(value=True)
+        self.locale_var = tk.StringVar(value=self.localizer.locale)
+        self.theme_mode_var = tk.StringVar(value="system")
+        self.decode_workers_var = tk.IntVar(value=2)
+        self.preview_cache_var = tk.IntVar(value=3)
+        self.onboarding_completed = False
+        self._theme_poll_job: str | None = None
+        self._startup_jobs: list[str] = []
+        self._last_theme_name = ""
+        self._last_failed_path: Path | None = None
+        self._onboarding_window: tk.Toplevel | None = None
 
         self.rotation = 0
         self.flip_h = False
@@ -278,21 +302,166 @@ class ImageEditorApp(tk.Tk):
 
         self._load_config()
         self._bind_document_variables()
-        if self._saved_geometry:
-            try:
-                self.geometry(self._saved_geometry)
-            except tk.TclError:
-                self.geometry("1240x780")
+        self.dpi_manager.refresh()
+        scale = dpi_scale(self.dpi_manager.current_dpi)
+        default_size = (round(1240 * scale), round(780 * scale))
+        self.geometry(self.dpi_manager.fit_saved_geometry(self._saved_geometry, default_size))
+        self._update_monitor_constraints()
         self._build_ui()
+        self._setup_experience()
         self._bind_shortcuts()
         self._drop_target = WindowsFileDrop(self, self.open_paths)
-        self.after(0, self._drop_target.enable)
+        self._startup_jobs.append(self.after(0, self._drop_target.enable))
         self.bind("<Configure>", self._on_configure)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._autosave_job = self.after(2000, self._autosave_session)
         self._source_monitor_job = self.after(2000, self._monitor_source_file)
-        self.after(250, self._offer_session_recovery)
-        self.after(650, self._offer_batch_recovery)
+        self._startup_jobs.append(self.after(250, self._offer_session_recovery))
+        self._startup_jobs.append(self.after(650, self._offer_batch_recovery))
+        self._startup_jobs.append(self.after(900, self._offer_onboarding))
+        self._theme_poll_job = self.after(2000, self._poll_system_theme)
+
+    def _setup_experience(self) -> None:
+        tokens = self.theme_manager.apply(self.theme_mode_var.get())
+        self._last_theme_name = tokens.name
+        for variable in (
+            self.status_var,
+            self.info_var,
+            self.crop_var,
+            self.size_var,
+            self.current_tool_label_var,
+            self.selected_annotation_var,
+        ):
+            self.localizer.register_variable(variable)
+        self.localizer.bind_mapped_windows(self)
+        self.localizer.set_locale(self.locale_var.get(), self)
+        self.title(self.localizer.translate_text(APP_NAME))
+        self._refresh_accessible_names()
+        toolbar_target = self.toolbar.winfo_children()[0]
+        edit_target = self.edit_toolbar.winfo_children()[0]
+        self.focus_navigator = FocusNavigator(
+            self,
+            (toolbar_target, edit_target, self.canvas, self.panel_canvas, self.status_label),
+        )
+        self._name_interactive_widgets(self)
+        self.bind_all("<Map>", self._on_accessible_widget_map, add="+")
+
+    def _refresh_accessible_names(self) -> None:
+        set_accessible_name(self.canvas, self.localizer.gettext("accessibility_canvas"))
+        set_accessible_name(self.toolbar, self.localizer.gettext("accessibility_toolbar"))
+        set_accessible_name(self.edit_toolbar, self.localizer.gettext("accessibility_edit_tools"))
+        set_accessible_name(self.panel_canvas, self.localizer.gettext("accessibility_panel"))
+        set_accessible_name(self.status_label, self.localizer.gettext("accessibility_status"))
+
+    def _on_accessible_widget_map(self, event: tk.Event) -> None:
+        try:
+            event.widget.after_idle(lambda: self._name_interactive_widgets(event.widget))
+        except tk.TclError:
+            pass
+
+    def _name_interactive_widgets(self, widget: tk.Misc) -> None:
+        try:
+            children = widget.winfo_children()
+        except tk.TclError:
+            return
+        for child in children:
+            try:
+                child_class = child.winfo_class()
+                if child_class in {
+                    "TButton",
+                    "TCheckbutton",
+                    "TRadiobutton",
+                    "TEntry",
+                    "TCombobox",
+                    "TSpinbox",
+                    "TScale",
+                    "Listbox",
+                    "Canvas",
+                }:
+                    name = str(getattr(child, "accessible_name", ""))
+                    if "text" in child.keys():
+                        name = str(child.cget("text")) or name
+                    if not name:
+                        name = child_class
+                    set_accessible_name(child, name)
+            except tk.TclError:
+                pass
+            self._name_interactive_widgets(child)
+
+    def _poll_system_theme(self) -> None:
+        self._theme_poll_job = None
+        if self.theme_mode_var.get() == "system":
+            resolved = resolve_theme("system")
+            if resolved.name != self._last_theme_name:
+                tokens = self.theme_manager.apply("system")
+                self._last_theme_name = tokens.name
+                self.localizer.apply_widget_tree(self)
+        self._theme_poll_job = self.after(2000, self._poll_system_theme)
+
+    def _fit_dialog(self, window: tk.Toplevel, width: int, height: int) -> None:
+        work = monitor_work_area(self)
+        scale = dpi_scale(self.dpi_manager.current_dpi)
+        requested_width = round(width * scale)
+        requested_height = round(height * scale)
+        bounded_width = min(requested_width, max(420, work.width - 32))
+        bounded_height = min(requested_height, max(320, work.height - 32))
+        x = work.left + max(16, (work.width - bounded_width) // 2)
+        y = work.top + max(16, (work.height - bounded_height) // 2)
+        window.geometry(f"{bounded_width}x{bounded_height}+{x}+{y}")
+        window.maxsize(work.width, work.height)
+
+    def _update_monitor_constraints(self) -> None:
+        work = monitor_work_area(self)
+        scale = dpi_scale(self.dpi_manager.current_dpi)
+        minimum_width = min(round(1040 * scale), max(320, work.width - 24))
+        minimum_height = min(round(680 * scale), max(240, work.height - 24))
+        self.minsize(minimum_width, minimum_height)
+
+    def _show_empty_state(self) -> None:
+        if self.original is not None or not hasattr(self, "canvas"):
+            return
+        width = max(500, self.canvas.winfo_width())
+        height = max(320, self.canvas.winfo_height())
+        tokens = self.theme_manager.tokens
+        self.canvas.delete("all")
+        self.canvas.create_text(
+            width // 2,
+            height // 2 - 34,
+            text=self.localizer.gettext("empty_title"),
+            fill=tokens.foreground,
+            font=("Microsoft YaHei UI", 18, "bold"),
+            tags=("empty",),
+        )
+        self.canvas.create_text(
+            width // 2,
+            height // 2 + 2,
+            text=self.localizer.gettext("empty_body"),
+            fill=tokens.muted,
+            font=("Microsoft YaHei UI", 10),
+            tags=("empty",),
+        )
+        button = self.canvas.create_text(
+            width // 2,
+            height // 2 + 52,
+            text=f"  {self.localizer.gettext('empty_open')}  ",
+            fill="#ffffff",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            tags=("empty_open",),
+        )
+        bounds = self.canvas.bbox(button)
+        if bounds:
+            rectangle = self.canvas.create_rectangle(
+                bounds[0] - 10,
+                bounds[1] - 7,
+                bounds[2] + 10,
+                bounds[3] + 7,
+                fill=tokens.accent,
+                outline=tokens.accent,
+                tags=("empty_open",),
+            )
+            self.canvas.tag_lower(rectangle, button)
+        self.canvas.tag_bind("empty_open", "<Button-1>", lambda _event: self.open_file())
+        self.canvas.tag_bind("empty_open", "<Return>", lambda _event: self.open_file())
 
     def _build_ui(self) -> None:
         style = ttk.Style(self)
@@ -458,6 +627,7 @@ class ImageEditorApp(tk.Tk):
         self.panel_shell.rowconfigure(0, weight=1)
         self.panel_shell.columnconfigure(0, weight=1)
         panel_canvas = tk.Canvas(self.panel_shell, width=340, highlightthickness=0)
+        self.panel_canvas = panel_canvas
         panel_canvas.grid(row=0, column=0, sticky="ns")
         panel_scroll = ttk.Scrollbar(
             self.panel_shell, orient="vertical", command=panel_canvas.yview
@@ -905,6 +1075,7 @@ class ImageEditorApp(tk.Tk):
         if not self.edit_panel_visible_var.get():
             self.edit_toolbar.grid_remove()
             self.panel_shell.grid_remove()
+        self.after_idle(self._show_empty_state)
 
     def _build_menu(self) -> None:
         self.menu_bar = tk.Menu(self)
@@ -947,7 +1118,7 @@ class ImageEditorApp(tk.Tk):
         file_menu.add_command(label="导出当前动画...", command=self.export_current_animation)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.close)
-        self.menu_bar.add_cascade(label="文件", menu=file_menu)
+        self.menu_bar.add_cascade(label="文件", menu=file_menu, underline=0)
 
         edit_menu = tk.Menu(self.menu_bar, tearoff=False)
         edit_menu.add_command(label="撤销", accelerator="Ctrl+Z", command=self.undo)
@@ -965,7 +1136,9 @@ class ImageEditorApp(tk.Tk):
         edit_menu.add_command(label="垂直翻转", command=self.flip_vertical)
         edit_menu.add_separator()
         edit_menu.add_command(label="收藏与快捷键…", command=self.configure_workflow)
-        self.menu_bar.add_cascade(label="编辑", menu=edit_menu)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="设置...", accelerator="Ctrl+,", command=self.open_settings)
+        self.menu_bar.add_cascade(label="编辑", menu=edit_menu, underline=0)
 
         view_menu = tk.Menu(self.menu_bar, tearoff=False)
         view_menu.add_command(
@@ -1002,19 +1175,22 @@ class ImageEditorApp(tk.Tk):
             label="开始/停止幻灯片", accelerator="F5", command=self.toggle_slideshow
         )
         view_menu.add_command(label="幻灯片设置...", command=self.configure_slideshow)
-        self.menu_bar.add_cascade(label="视图", menu=view_menu)
+        self.menu_bar.add_cascade(label="视图", menu=view_menu, underline=0)
 
         info_menu = tk.Menu(self.menu_bar, tearoff=False)
         info_menu.add_command(
             label="图片属性", accelerator="Alt+Enter", command=self.show_properties
         )
-        self.menu_bar.add_cascade(label="信息", menu=info_menu)
+        info_menu.add_command(label="快捷键帮助", accelerator="F1", command=self.show_shortcut_help)
+        info_menu.add_command(label="首次使用引导", command=self.show_onboarding)
+        self.menu_bar.add_cascade(label="信息", menu=info_menu, underline=0)
 
         self.config(menu=self.menu_bar)
         self._refresh_recent_menu()
         self._refresh_recent_directory_menu()
         self._refresh_recent_project_menu()
         self._refresh_recent_export_menu()
+        self.localizer.apply_menu(self.menu_bar)
 
     def _refresh_recent_menu(self) -> None:
         self.recent_menu.delete(0, "end")
@@ -1221,6 +1397,313 @@ class ImageEditorApp(tk.Tk):
         ttk.Button(buttons, text="保存", command=save_workflow).pack(side="right")
         ttk.Button(buttons, text="取消", command=window.destroy).pack(side="right", padx=(0, 8))
 
+    def open_settings(self) -> None:
+        window = tk.Toplevel(self)
+        window.title(self.localizer.gettext("settings_title"))
+        window.transient(self)
+        self._fit_dialog(window, 720, 560)
+        window.minsize(560, 420)
+
+        theme_labels = {
+            "system": self.localizer.gettext("theme_system"),
+            "light": self.localizer.gettext("theme_light"),
+            "dark": self.localizer.gettext("theme_dark"),
+        }
+        theme_by_label = {label: key for key, label in theme_labels.items()}
+        locale_labels = {
+            locale: str(self.localizer.catalogs[locale].get("display_name", locale))
+            for locale in SUPPORTED_LOCALES
+        }
+        locale_by_label = {label: key for key, label in locale_labels.items()}
+        selected_theme = tk.StringVar(value=theme_labels[self.theme_mode_var.get()])
+        selected_locale = tk.StringVar(value=locale_labels[self.locale_var.get()])
+        selected_workers = tk.IntVar(value=self.decode_workers_var.get())
+        selected_cache = tk.IntVar(value=self.preview_cache_var.get())
+
+        notebook = ttk.Notebook(window)
+        notebook.pack(fill="both", expand=True, padx=14, pady=(14, 8))
+
+        general = ttk.Frame(notebook, padding=18)
+        performance = ttk.Frame(notebook, padding=18)
+        saving = ttk.Frame(notebook, padding=18)
+        privacy = ttk.Frame(notebook, padding=18)
+        updates = ttk.Frame(notebook, padding=18)
+        associations = ttk.Frame(notebook, padding=18)
+        notebook.add(general, text=self.localizer.gettext("settings_general"))
+        notebook.add(performance, text=self.localizer.gettext("settings_performance"))
+        notebook.add(saving, text=self.localizer.gettext("settings_save"))
+        notebook.add(privacy, text=self.localizer.gettext("settings_privacy"))
+        notebook.add(updates, text=self.localizer.gettext("settings_updates"))
+        notebook.add(associations, text=self.localizer.gettext("settings_associations"))
+
+        general.columnconfigure(1, weight=1)
+        ttk.Label(general, text=self.localizer.gettext("theme")).grid(
+            row=0, column=0, sticky="w", padx=(0, 18), pady=8
+        )
+        theme_box = ttk.Combobox(
+            general,
+            state="readonly",
+            textvariable=selected_theme,
+            values=tuple(theme_labels.values()),
+        )
+        theme_box.grid(row=0, column=1, sticky="ew", pady=8)
+        ttk.Label(general, text=self.localizer.gettext("language")).grid(
+            row=1, column=0, sticky="w", padx=(0, 18), pady=8
+        )
+        language_box = ttk.Combobox(
+            general,
+            state="readonly",
+            textvariable=selected_locale,
+            values=tuple(locale_labels.values()),
+        )
+        language_box.grid(row=1, column=1, sticky="ew", pady=8)
+
+        performance.columnconfigure(1, weight=1)
+        ttk.Label(performance, text=self.localizer.gettext("decode_workers")).grid(
+            row=0, column=0, sticky="w", padx=(0, 18), pady=8
+        )
+        ttk.Spinbox(performance, from_=1, to=8, textvariable=selected_workers, width=10).grid(
+            row=0, column=1, sticky="w", pady=8
+        )
+        ttk.Label(performance, text=self.localizer.gettext("preview_cache")).grid(
+            row=1, column=0, sticky="w", padx=(0, 18), pady=8
+        )
+        ttk.Spinbox(performance, from_=1, to=20, textvariable=selected_cache, width=10).grid(
+            row=1, column=1, sticky="w", pady=8
+        )
+        ttk.Label(performance, text=self.localizer.gettext("batch_concurrency")).grid(
+            row=2, column=0, sticky="w", padx=(0, 18), pady=8
+        )
+        ttk.Spinbox(
+            performance, from_=1, to=8, textvariable=self.batch_concurrency_var, width=10
+        ).grid(row=2, column=1, sticky="w", pady=8)
+        ttk.Label(performance, text=self.localizer.gettext("batch_memory")).grid(
+            row=3, column=0, sticky="w", padx=(0, 18), pady=8
+        )
+        ttk.Spinbox(
+            performance,
+            from_=128,
+            to=8192,
+            increment=128,
+            textvariable=self.batch_memory_var,
+            width=10,
+        ).grid(row=3, column=1, sticky="w", pady=8)
+
+        ttk.Checkbutton(
+            saving,
+            text=self.localizer.gettext("preserve_metadata"),
+            variable=self.preserve_metadata_var,
+        ).pack(anchor="w", pady=8)
+        ttk.Checkbutton(
+            saving,
+            text=self.localizer.gettext("backup_overwrite"),
+            variable=self.backup_on_overwrite_var,
+        ).pack(anchor="w", pady=8)
+        ttk.Checkbutton(
+            saving,
+            text=self.localizer.gettext("reveal_after_save"),
+            variable=self.reveal_after_save_var,
+        ).pack(anchor="w", pady=8)
+
+        ttk.Label(
+            privacy,
+            text=privacy_summary(self.locale_var.get()),
+            wraplength=600,
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Label(
+            privacy,
+            text=self.localizer.gettext("offline_ready"),
+            style="Accent.TLabel",
+        ).pack(anchor="w", pady=(18, 0))
+        ttk.Label(
+            updates,
+            text=self.localizer.gettext("update_text"),
+            wraplength=600,
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Label(
+            associations,
+            text=self.localizer.gettext("association_text"),
+            wraplength=600,
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Button(
+            associations,
+            text=self.localizer.gettext("open_default_apps"),
+            command=self._open_default_apps_settings,
+        ).pack(anchor="w", pady=(18, 0))
+
+        def bounded_int(variable: tk.IntVar, fallback: int, low: int, high: int) -> int:
+            try:
+                value = variable.get()
+            except tk.TclError:
+                value = fallback
+            return max(low, min(high, value))
+
+        def apply_settings() -> None:
+            theme_mode = theme_by_label.get(selected_theme.get(), "system")
+            locale = locale_by_label.get(selected_locale.get(), "zh-CN")
+            self.theme_mode_var.set(theme_mode)
+            self.locale_var.set(locale)
+            self.decode_workers_var.set(
+                bounded_int(selected_workers, self.decode_workers_var.get(), 1, 8)
+            )
+            self.preview_cache_var.set(
+                bounded_int(selected_cache, self.preview_cache_var.get(), 1, 20)
+            )
+            self.localizer.set_locale(locale, self)
+            self.title(self.localizer.translate_text(APP_NAME))
+            tokens = self.theme_manager.apply(theme_mode)
+            self._last_theme_name = tokens.name
+            self._refresh_accessible_names()
+            if self.original is None:
+                self._show_empty_state()
+            self._save_config()
+            self.status_var.set(self.localizer.gettext("settings_saved"))
+            window.destroy()
+
+        buttons = ttk.Frame(window, padding=(14, 0, 14, 14))
+        buttons.pack(fill="x")
+        apply_button = ttk.Button(
+            buttons,
+            text=self.localizer.gettext("apply"),
+            command=apply_settings,
+            style="Accent.TButton",
+        )
+        apply_button.pack(side="right")
+        ttk.Button(
+            buttons,
+            text=self.localizer.gettext("close"),
+            command=window.destroy,
+        ).pack(side="right", padx=(0, 8))
+        window.bind("<Escape>", lambda _event: window.destroy())
+        window.bind("<Control-Return>", lambda _event: apply_settings())
+        self.theme_manager.apply(self.theme_mode_var.get())
+        self._name_interactive_widgets(window)
+        theme_box.focus_set()
+
+    def _open_default_apps_settings(self) -> None:
+        if os.name != "nt":
+            return
+        try:
+            startfile = getattr(os, "startfile")
+            startfile("ms-settings:defaultapps?registeredAppUser=LightImageEditor")
+        except OSError as error:
+            messagebox.showerror(APP_NAME, str(error), parent=self)
+
+    def show_shortcut_help(self) -> None:
+        window = tk.Toplevel(self)
+        window.title(self.localizer.gettext("help_title"))
+        window.transient(self)
+        self._fit_dialog(window, 660, 600)
+        body = ttk.Frame(window, padding=14)
+        body.pack(fill="both", expand=True)
+        tree = ttk.Treeview(body, columns=("action", "shortcut"), show="headings")
+        tree.heading("action", text=self.localizer.translate_text("操作"))
+        tree.heading("shortcut", text=self.localizer.translate_text("快捷键"))
+        tree.column("action", width=300, anchor="w")
+        tree.column("shortcut", width=220, anchor="w")
+        fixed_actions = (
+            ("设置", "Ctrl+,"),
+            ("快捷键帮助", "F1"),
+            ("切换焦点区域", "F6 / Shift+F6"),
+            ("上一张 / 下一张", "← / →"),
+            ("第一页 / 最后一页", "Home / End"),
+            ("全屏", "F11"),
+            ("幻灯片", "F5"),
+            ("图片属性", "Alt+Enter"),
+        )
+        seen: set[tuple[str, str]] = set()
+        for key, label, default in ACTION_CATALOG:
+            row = (
+                self.localizer.translate_text(label),
+                self.custom_shortcuts.get(key, default),
+            )
+            if row not in seen:
+                tree.insert("", "end", values=row)
+                seen.add(row)
+        for label, shortcut in fixed_actions:
+            row = (self.localizer.translate_text(label), shortcut)
+            if row not in seen:
+                tree.insert("", "end", values=row)
+        scroll = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        ttk.Button(
+            window,
+            text=self.localizer.gettext("close"),
+            command=window.destroy,
+        ).pack(anchor="e", padx=14, pady=(0, 14))
+        window.bind("<Escape>", lambda _event: window.destroy())
+        self.theme_manager.apply(self.theme_mode_var.get())
+        self._name_interactive_widgets(window)
+        tree.focus_set()
+
+    def _offer_onboarding(self) -> None:
+        if not self.onboarding_completed:
+            self.show_onboarding()
+
+    def show_onboarding(self) -> None:
+        if self._onboarding_window is not None:
+            try:
+                if self._onboarding_window.winfo_exists():
+                    self._onboarding_window.lift()
+                    self._onboarding_window.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        window = tk.Toplevel(self)
+        self._onboarding_window = window
+        window.title(self.localizer.gettext("onboarding_title"))
+        window.transient(self)
+        self._fit_dialog(window, 620, 500)
+        body = ttk.Frame(window, padding=24)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text=self.localizer.gettext("onboarding_title"),
+            font=("Microsoft YaHei UI", 18, "bold"),
+        ).pack(anchor="w", pady=(0, 10))
+        ttk.Label(
+            body,
+            text=self.localizer.gettext("onboarding_intro"),
+            wraplength=540,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 18))
+        for number, key in enumerate(
+            ("onboarding_open", "onboarding_view", "onboarding_edit", "onboarding_privacy"),
+            start=1,
+        ):
+            ttk.Label(
+                body,
+                text=f"{number}. {self.localizer.gettext(key)}",
+                wraplength=540,
+                justify="left",
+            ).pack(anchor="w", pady=7)
+
+        def finish() -> None:
+            self.onboarding_completed = True
+            self._save_config()
+            self._onboarding_window = None
+            window.destroy()
+            self.canvas.focus_set()
+
+        button = ttk.Button(
+            body,
+            text=self.localizer.gettext("onboarding_done"),
+            command=finish,
+            style="Accent.TButton",
+        )
+        button.pack(anchor="e", pady=(24, 0))
+        window.protocol("WM_DELETE_WINDOW", finish)
+        window.bind("<Escape>", lambda _event: finish())
+        window.bind("<Return>", lambda _event: finish())
+        self.theme_manager.apply(self.theme_mode_var.get())
+        self._name_interactive_widgets(window)
+        button.focus_set()
+
     def _workspace_setting_changed(self) -> None:
         self.restore_workspace = self.restore_workspace_var.get()
         self._save_config()
@@ -1240,12 +1723,12 @@ class ImageEditorApp(tk.Tk):
         self.bind("<Control-plus>", lambda _event: self.step_zoom(1))
         self.bind("<Control-equal>", lambda _event: self.step_zoom(1))
         self.bind("<Control-minus>", lambda _event: self.step_zoom(-1))
-        self.bind("<Left>", lambda _event: self.navigate_folder(-1))
-        self.bind("<Right>", lambda _event: self.navigate_folder(1))
-        self.bind("<Prior>", lambda _event: self.navigate_folder(-1))
-        self.bind("<Next>", lambda _event: self.navigate_folder(1))
-        self.bind("<Home>", lambda _event: self.navigate_folder_to("first"))
-        self.bind("<End>", lambda _event: self.navigate_folder_to("last"))
+        self.bind("<Left>", lambda event: self._navigation_key(event, -1))
+        self.bind("<Right>", lambda event: self._navigation_key(event, 1))
+        self.bind("<Prior>", lambda event: self._navigation_key(event, -1))
+        self.bind("<Next>", lambda event: self._navigation_key(event, 1))
+        self.bind("<Home>", lambda event: self._edge_navigation_key(event, "first"))
+        self.bind("<End>", lambda event: self._edge_navigation_key(event, "last"))
         self.bind("<Escape>", lambda _event: self._handle_escape())
         self.bind("<Return>", lambda _event: self.apply_current_tool())
         self.bind("<space>", lambda _event: self._set_compare(True))
@@ -1254,10 +1737,36 @@ class ImageEditorApp(tk.Tk):
         self.bind("<Control-F11>", lambda _event: self.toggle_immersive())
         self.bind("<F5>", lambda _event: self.toggle_slideshow())
         self.bind("<F2>", lambda _event: self.rename_current())
-        self.bind("<Delete>", lambda _event: self.delete_selected_or_file())
+        self.bind("<Delete>", self._delete_key)
         self.bind("<Control-Shift-E>", lambda _event: self.reveal_current())
         self.bind("<Alt-Return>", lambda _event: self.show_properties())
+        self.bind("<Control-comma>", lambda _event: self.open_settings())
+        self.bind("<F1>", lambda _event: self.show_shortcut_help())
+        self.bind("<F6>", lambda _event: self.focus_navigator.move())
+        self.bind("<Shift-F6>", lambda _event: self.focus_navigator.move(reverse=True))
         self._apply_custom_shortcuts()
+
+    def _text_input_has_focus(self) -> bool:
+        focused = self.focus_get()
+        return isinstance(focused, (tk.Entry, tk.Text, ttk.Entry, ttk.Combobox, ttk.Spinbox))
+
+    def _navigation_key(self, _event: tk.Event, direction: int) -> str | None:
+        if self._text_input_has_focus():
+            return None
+        self.navigate_folder(direction)
+        return "break"
+
+    def _edge_navigation_key(self, _event: tk.Event, edge: str) -> str | None:
+        if self._text_input_has_focus():
+            return None
+        self.navigate_folder_to(edge)
+        return "break"
+
+    def _delete_key(self, _event: tk.Event) -> str | None:
+        if self._text_input_has_focus():
+            return None
+        self.delete_selected_or_file()
+        return "break"
 
     def _bind_document_variables(self) -> None:
         text_fields = (
@@ -1760,6 +2269,18 @@ class ImageEditorApp(tk.Tk):
 
     def _load_config(self) -> None:
         data = self.settings_store.load()
+        locale = str(data.get("locale", "zh-CN"))
+        if locale not in SUPPORTED_LOCALES:
+            locale = "zh-CN"
+        self.locale_var.set(locale)
+        self.localizer.set_locale(locale)
+        theme_mode = str(data.get("theme_mode", "system"))
+        self.theme_mode_var.set(
+            theme_mode if theme_mode in {"system", "light", "dark"} else "system"
+        )
+        self.decode_workers_var.set(max(1, min(8, int(data.get("decode_workers", 2)))))
+        self.preview_cache_var.set(max(1, min(20, int(data.get("preview_cache", 3)))))
+        self.onboarding_completed = bool(data.get("onboarding_completed", False))
         self.format_var.set(data.get("format", "JPEG"))
         self.quality_var.set(int(data.get("quality", 85)))
         self.target_size_var.set(str(data.get("target_size_kb", "") or ""))
@@ -1822,6 +2343,11 @@ class ImageEditorApp(tk.Tk):
 
     def _save_config(self) -> None:
         data = {
+            "locale": self.locale_var.get(),
+            "theme_mode": self.theme_mode_var.get(),
+            "decode_workers": self.decode_workers_var.get(),
+            "preview_cache": self.preview_cache_var.get(),
+            "onboarding_completed": self.onboarding_completed,
             "format": self.format_var.get(),
             "quality": self.quality_var.get(),
             "target_size_kb": self.target_size_var.get().strip(),
@@ -1860,7 +2386,14 @@ class ImageEditorApp(tk.Tk):
     def _on_configure(self, _event: tk.Event) -> None:
         if not self._is_fullscreen and not self._is_immersive:
             self._saved_geometry = self.geometry()
-        self._schedule_preview()
+        dpi_changed = self.dpi_manager.refresh()
+        if dpi_changed:
+            self._update_monitor_constraints()
+            self.theme_manager.apply(self.theme_mode_var.get())
+        if self.original is None:
+            self.after_idle(self._show_empty_state)
+        else:
+            self._schedule_preview()
 
     def open_file(self) -> None:
         if not self._confirm_discard_changes():
@@ -2090,6 +2623,7 @@ class ImageEditorApp(tk.Tk):
             return
 
         self.document = Document.from_decoded(image, path, self._new_document_state(image))
+        self._last_failed_path = None
         self._last_source_status = "unchanged"
         self.original = self.document.image
         self.image_path = self.document.source_path
@@ -2108,16 +2642,60 @@ class ImageEditorApp(tk.Tk):
     ) -> None:
         key = str(failure.path).casefold()
         self._failed_navigation_paths.add(key)
+        self._last_failed_path = failure.path
         self.status_var.set(f"{failure.path.name}：{failure.user_message}")
         self.canvas.delete("all")
+        tokens = self.theme_manager.tokens
+        center_x = max(240, self.canvas.winfo_width() // 2)
+        center_y = max(150, self.canvas.winfo_height() // 2)
         self.canvas.create_text(
-            max(200, self.canvas.winfo_width() // 2),
-            max(120, self.canvas.winfo_height() // 2),
-            text=f"无法显示 {failure.path.name}\n{failure.user_message}\n可继续切换其他图片。",
-            fill="#f3f4f6",
+            center_x,
+            center_y - 44,
+            text=self.localizer.translate_text(
+                f"无法显示 {failure.path.name}\n{failure.user_message}\n可继续切换其他图片。"
+            ),
+            fill=tokens.foreground,
             justify="center",
             font=("Microsoft YaHei UI", 12),
         )
+        actions = (
+            (
+                self.localizer.gettext("error_retry"),
+                lambda: self._begin_image_load(failure.path, notify_error=True),
+            ),
+            (self.localizer.gettext("error_choose"), self.open_file),
+            (
+                self.localizer.gettext("error_reveal"),
+                lambda: self._open_folder(failure.path.parent),
+            ),
+        )
+        for index, (label, callback) in enumerate(actions):
+            x = center_x + (index - 1) * 150
+            text_item = self.canvas.create_text(
+                x,
+                center_y + 42,
+                text=f"  {label}  ",
+                fill="#ffffff",
+                font=("Microsoft YaHei UI", 10, "bold"),
+                tags=(f"load_action_{index}",),
+            )
+            bounds = self.canvas.bbox(text_item)
+            if bounds:
+                rectangle = self.canvas.create_rectangle(
+                    bounds[0] - 8,
+                    bounds[1] - 6,
+                    bounds[2] + 8,
+                    bounds[3] + 6,
+                    fill=tokens.accent,
+                    outline=tokens.accent,
+                    tags=(f"load_action_{index}",),
+                )
+                self.canvas.tag_lower(rectangle, text_item)
+            self.canvas.tag_bind(
+                f"load_action_{index}",
+                "<Button-1>",
+                lambda _event, action=callback: action(),
+            )
         if notify_error:
             messagebox.showwarning(APP_NAME, f"{failure.path.name}\n\n{failure.user_message}")
         if skip_direction and len(self._failed_navigation_paths) < len(self.navigation.files):
@@ -2407,7 +2985,9 @@ class ImageEditorApp(tk.Tk):
             self.reset_crop()
 
     def apply_current_tool(self) -> None:
-        if self.annotation_tool_var.get() == "crop":
+        if self.original is None:
+            self.open_file()
+        elif self.annotation_tool_var.get() == "crop":
             self.apply_crop()
         elif self.annotation_tool_var.get() == "perspective":
             self.apply_perspective()
@@ -3347,6 +3927,15 @@ class ImageEditorApp(tk.Tk):
         if self._source_monitor_job is not None:
             self.after_cancel(self._source_monitor_job)
             self._source_monitor_job = None
+        if self._theme_poll_job is not None:
+            self.after_cancel(self._theme_poll_job)
+            self._theme_poll_job = None
+        for job in self._startup_jobs:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._startup_jobs.clear()
         self._save_config()
         self._drop_target.disable()
         self.image_loader.shutdown()

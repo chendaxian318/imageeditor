@@ -3,6 +3,14 @@
 一个可安装在 Windows 上运行的桌面图片编辑器，支持：
 
 - 默认简洁查看模式，编辑工具栏和参数面板按需展开
+- 浅色、深色和跟随系统主题；颜色、间距、焦点样式由统一设计令牌管理
+- Windows Per-Monitor V2 DPI 感知，支持 100%、125%、150%、200% 缩放和多显示器工作区约束
+- 完整键盘工作流：F6/Shift+F6 切换主要区域，F1 查看快捷键，菜单和核心操作均可不使用鼠标完成
+- 画布、工具栏、参数面板和交互控件提供可访问名称、清晰焦点样式及键盘焦点顺序
+- 简体中文和 English 使用外置 JSON 资源，可在设置中即时切换，无需重新安装
+- 首次启动引导、可操作的空状态，以及加载失败后的重试、另选图片和文件夹定位
+- 分类设置页覆盖外观、语言、性能、缓存、保存、元数据、隐私、更新和文件关联
+- 离线状态下所有核心功能完整可用；程序不会在后台上传图片或自动发起网络请求
 - 单实例运行；连续打开图片时复用已有窗口并转发全部路径
 - 后台解码、相邻图片预取和后台预览缩放，损坏文件不会阻塞目录浏览
 - 全屏、沉浸式查看、幻灯片、播放间隔与循环设置
@@ -63,9 +71,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 构建完成后产物位于 `release`：
 
 - `LightImageEditor/`：供标准安装器使用的 `onedir` 应用目录
-- `LightImageEditor-Portable-x64-0.6.0.exe`：便携 `onefile` 版本
-- `LightImageEditor-Setup-x64-0.6.0.exe`：当前用户标准安装器，支持覆盖升级和“已安装的应用”卸载
-- `LICENSE`、`NOTICE.md`、`THIRD_PARTY_LICENSES.md`：随发布物和安装程序提供的权属及第三方许可说明
+- `LightImageEditor-Portable-x64-0.7.0.exe`：便携 `onefile` 版本
+- `LightImageEditor-Setup-x64-0.7.0.exe`：当前用户标准安装器，支持覆盖升级和“已安装的应用”卸载
+- `LICENSE`、`NOTICE.md`、`PRIVACY.md`、`THIRD_PARTY_LICENSES.md`：随发布物和安装程序提供的权属、隐私及第三方许可说明
 - `SHA256SUMS.txt`：本次构建产物的 SHA-256 校验值
 
 安装程序可在完成后直接打开 Windows“默认应用”设置。选择“轻量图片编辑器”，再为希望使用的图片格式确认默认关联即可。Windows 10/11 要求默认应用由用户在系统设置中确认，安装程序不会静默覆盖现有选择。覆盖升级或卸载时，安装器会通过本地 IPC 请求主程序保存或安全退出；用户取消时操作随之取消，不会强制终止进程。
@@ -101,6 +109,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_install_c
 - `light_image_editor/app.py`：应用创建和命令行入口
 - `light_image_editor/ui/`：Tkinter 界面
 - `light_image_editor/settings.py`：配置持久化
+- `light_image_editor/i18n.py`：外置语言资源加载和运行时界面切换
+- `light_image_editor/theme.py`：明暗主题、系统主题跟随和统一设计令牌
+- `light_image_editor/dpi.py`：Per-Monitor DPI 感知与多显示器窗口约束
+- `light_image_editor/accessibility.py`：可访问名称和主要焦点区域导航
+- `light_image_editor/privacy.py`：离线优先和禁止后台上传策略
 - `light_image_editor/files.py`：文件与 Windows Shell 服务
 - `light_image_editor/single_instance.py`：命名互斥量与本地 IPC
 - `light_image_editor/navigation.py`：多路径与目录浏览顺序

@@ -8,6 +8,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from .dpi import enable_process_dpi_awareness
 from .single_instance import (
     SingleInstanceController,
     activation_message,
@@ -75,6 +76,7 @@ def main(
     argv: Sequence[str] | None = None,
     controller_factory: Callable[[], SingleInstanceController] = SingleInstanceController,
 ) -> int:
+    enable_process_dpi_awareness()
     arguments = list(sys.argv[1:] if argv is None else argv)
     if "--request-exit-for-upgrade" in arguments:
         response = request_running_app_exit()

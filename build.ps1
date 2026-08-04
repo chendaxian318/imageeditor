@@ -17,7 +17,7 @@ $Icon = Join-Path $Root "resources\icons\app.ico"
 $AppSpec = Join-Path $Root "packaging\windows\image_editor.spec"
 $PortableSpec = Join-Path $Root "packaging\windows\image_editor_portable.spec"
 $InnoScript = Join-Path $Root "packaging\windows\LightImageEditor.iss"
-$LegalDocuments = @("LICENSE", "NOTICE.md", "THIRD_PARTY_LICENSES.md")
+$LegalDocuments = @("LICENSE", "NOTICE.md", "PRIVACY.md", "THIRD_PARTY_LICENSES.md")
 $InnoVersion = "7.0.2"
 $InnoInstallerUrl = "https://github.com/jrsoftware/issrc/releases/download/is-7_0_2/innosetup-7.0.2-x64.exe"
 $InnoInstallerSha256 = "5ad54ca3def786f8f4212552e54cc6d8d61329e2d24a1cfee0571d42c2684ff1"
@@ -205,7 +205,7 @@ try {
         "light_image_editor", "scripts", "benchmarks",
         "test_architecture.py", "test_build_metadata.py", "test_identity_resources.py",
         "test_image_ops.py", "test_installer.py", "test_v03_safety.py",
-        "test_viewer_services.py"
+        "test_viewer_services.py", "test_v07_experience.py"
     )
 
     if (-not $SkipTests) {

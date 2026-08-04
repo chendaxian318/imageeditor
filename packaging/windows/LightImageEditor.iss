@@ -64,6 +64,7 @@ Name: "contextmenu"; Description: "添加“用轻量图片编辑器查看”右
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourcePath}\..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\..\..\NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourcePath}\..\..\PRIVACY.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\..\..\THIRD_PARTY_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

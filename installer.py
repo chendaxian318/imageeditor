@@ -43,7 +43,7 @@ CAPABILITIES_KEY = rf"Software\{APP_REGISTRY_NAME}\Capabilities"
 REGISTERED_APPLICATIONS_KEY = r"Software\RegisteredApplications"
 PROG_ID_KEY = rf"Software\Classes\{PROG_ID}"
 APPLICATION_KEY = rf"Software\Classes\Applications\{EXE_NAME}"
-LEGAL_DOCUMENTS = ("LICENSE", "NOTICE.md", "THIRD_PARTY_LICENSES.md")
+LEGAL_DOCUMENTS = ("LICENSE", "NOTICE.md", "PRIVACY.md", "THIRD_PARTY_LICENSES.md")
 
 
 def resource_path(name: str) -> Path:

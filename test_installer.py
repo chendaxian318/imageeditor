@@ -16,7 +16,7 @@ class InstallerTests(unittest.TestCase):
     def test_installer_carries_required_legal_documents(self) -> None:
         self.assertEqual(
             LEGAL_DOCUMENTS,
-            ("LICENSE", "NOTICE.md", "THIRD_PARTY_LICENSES.md"),
+            ("LICENSE", "NOTICE.md", "PRIVACY.md", "THIRD_PARTY_LICENSES.md"),
         )
 
     def test_supported_extensions_cover_documented_image_formats(self) -> None:

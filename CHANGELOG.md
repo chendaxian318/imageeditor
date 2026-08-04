@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.0 — 2026-08-04
+
+### Experience and accessibility
+
+- Added light, dark and system-following themes backed by shared colour, spacing, focus and state tokens.
+- Enabled Windows Per-Monitor V2 DPI awareness, live Tk scaling refresh and monitor-work-area geometry clamping for 100%, 125%, 150% and 200% DPI configurations.
+- Added F6/Shift+F6 region navigation, visible focus styling, accessible names for the canvas/toolbars/options/status areas and keyboard-safe handling that no longer steals navigation keys from text inputs.
+- Added a searchable keyboard-reference window, first-use guide, keyboard-operable empty state and actionable retry/choose/reveal recovery for failed image loads.
+- Fixed a native `WM_DROPFILES` crash by queuing dropped paths in the Win32 callback and dispatching them later from the Tk event loop instead of calling Tk while its main loop has released the Python GIL.
+
+### Localisation and settings
+
+- Moved Simplified Chinese and English UI resources to external UTF-8 JSON catalogs and added live language switching without reinstalling or restarting.
+- Added an appearance/language, performance/cache, saving/metadata, privacy, update and file-association settings center.
+- Kept the entire core application offline-capable, prohibited background uploads and automatic network requests, and shipped a bilingual privacy statement.
+- Added both locale catalogs to the installed `onedir` and portable `onefile` PyInstaller recipes.
+
+### Validation
+
+- Added catalog parity and reversible-switch tests, four DPI-scale and negative-coordinate multi-monitor geometry tests, explicit offline-policy checks, packaged-resource checks and a real Tk settings/accessibility smoke test.
+- Added a real synthetic `WM_DROPFILES` regression test with a Unicode path; the process remains alive and the path reaches the Tk callback.
+- Verified the English main window, menus, status values and keyboard-help surface contain no remaining Chinese fragments after a live switch.
+
 ## 0.6.0 — 2026-08-04
 
 ### Formats and animation
