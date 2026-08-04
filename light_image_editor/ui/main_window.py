@@ -8,7 +8,7 @@ from concurrent.futures import Future
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageGrab, ImageTk
 
@@ -28,6 +28,7 @@ from image_ops import (
     save_image,
 )
 
+from ..annotations import AnnotationObject, hit_radius_px, object_at, parse_crop_ratio
 from ..commands import EditCommand
 from ..document import Document, DocumentState
 from ..files import (
@@ -55,7 +56,13 @@ from ..projects import (
     load_project,
     save_project,
 )
-from ..renderer import detect_straighten_angle, histogram, reduce_timeline, render_image
+from ..renderer import (
+    apply_command_to_plan,
+    detect_straighten_angle,
+    histogram,
+    reduce_timeline,
+    render_image,
+)
 from ..session import SessionStore
 from ..settings import SettingsStore
 from ..windows_drop import WindowsFileDrop
@@ -63,6 +70,36 @@ from .curve_editor import CurveEditor
 
 APP_NAME = PRODUCT_NAME_ZH
 ZOOM_LEVELS = ("适应", "50%", "100%", "150%", "200%")
+ANNOTATION_TOOL_LABELS = {
+    "select": "选择",
+    "crop": "裁剪",
+    "text": "文字",
+    "arrow": "箭头",
+    "line": "直线",
+    "rectangle": "矩形",
+    "ellipse": "椭圆",
+    "freehand": "画笔",
+    "mosaic": "马赛克",
+    "blur": "模糊",
+    "redact": "遮挡",
+    "number": "序号",
+    "perspective": "透视",
+}
+ACTION_CATALOG = (
+    ("open", "打开", "<Control-o>"),
+    ("save", "保存图片", "<Control-s>"),
+    ("save_project", "保存项目", "<Control-Shift-S>"),
+    ("undo", "撤销", "<Control-z>"),
+    ("redo", "重做", "<Control-y>"),
+    ("rotate_right", "右转", "<Control-r>"),
+    ("select", "选择标注", "<Key-v>"),
+    ("crop", "裁剪", "<Key-c>"),
+    ("text", "文字", "<Key-t>"),
+    ("arrow", "箭头", "<Key-a>"),
+    ("rectangle", "矩形", "<Key-r>"),
+    ("mosaic", "马赛克", "<Key-m>"),
+    ("blur", "模糊", "<Key-b>"),
+)
 
 
 class ImageEditorApp(tk.Tk):
@@ -169,8 +206,46 @@ class ImageEditorApp(tk.Tk):
         }
         self.grayscale_var = tk.BooleanVar(value=False)
         self.auto_contrast_var = tk.BooleanVar(value=False)
+        self.annotation_tool_var = tk.StringVar(value="crop")
+        self.current_tool_label_var = tk.StringVar(value="当前：裁剪")
+        self.annotation_color_var = tk.StringVar(value="#ff3b30")
+        self.annotation_fill_var = tk.StringVar(value="")
+        self.annotation_stroke_var = tk.IntVar(value=4)
+        self.annotation_opacity_var = tk.IntVar(value=100)
+        self.annotation_font_size_var = tk.IntVar(value=5)
+        self.annotation_text_var = tk.StringVar()
+        self.annotation_effect_size_var = tk.IntVar(value=12)
+        self.selected_annotation_var = tk.StringVar(value="未选择标注")
+        self.selected_annotation_id: str | None = None
+        self._annotation_start: tuple[float, float] | None = None
+        self._annotation_drag_object: AnnotationObject | None = None
+        self._annotation_original_object: AnnotationObject | None = None
+        self._annotation_drag_action = "new"
+        self._annotation_freehand_points: list[tuple[float, float]] = []
+        self.perspective_points: list[tuple[float, float]] = [
+            (0.05, 0.05),
+            (0.95, 0.05),
+            (0.95, 0.95),
+            (0.05, 0.95),
+        ]
+        self._perspective_active_index: int | None = None
+        self.canvas_left_var = tk.IntVar(value=0)
+        self.canvas_top_var = tk.IntVar(value=0)
+        self.canvas_right_var = tk.IntVar(value=0)
+        self.canvas_bottom_var = tk.IntVar(value=0)
+        self.canvas_background_var = tk.StringVar(value="#ffffff")
         self.recent_files: list[str] = []
         self.recent_directories: list[str] = []
+        self.recent_projects: list[str] = []
+        self.recent_export_directories: list[str] = []
+        self.favorite_actions: list[str] = ["open", "save", "undo", "redo", "crop"]
+        self.custom_shortcuts: dict[str, str] = {
+            key: shortcut for key, _label, shortcut in ACTION_CATALOG
+        }
+        self._custom_bound_sequences: set[str] = set()
+        self.restore_workspace = True
+        self.restore_workspace_var = tk.BooleanVar(value=True)
+        self.last_project = ""
         self.clean_signature: tuple[object, ...] | None = None
 
         self._load_config()
@@ -302,19 +377,40 @@ class ImageEditorApp(tk.Tk):
             length=90,
         ).grid(row=0, column=14, padx=(0, 6))
 
+        annotation_toolbar = ttk.Frame(self.edit_toolbar)
+        annotation_toolbar.grid(row=1, column=0, columnspan=15, sticky="ew", pady=(8, 0))
+        for column, tool in enumerate(ANNOTATION_TOOL_LABELS):
+            ttk.Button(
+                annotation_toolbar,
+                text=ANNOTATION_TOOL_LABELS[tool],
+                command=partial(self._set_annotation_tool, tool),
+            ).grid(row=0, column=column, padx=(0, 4))
+        ttk.Label(annotation_toolbar, textvariable=self.current_tool_label_var).grid(
+            row=0, column=len(ANNOTATION_TOOL_LABELS), padx=(8, 0)
+        )
+
+        self.favorite_toolbar = ttk.Frame(self.edit_toolbar)
+        self.favorite_toolbar.grid(row=2, column=0, columnspan=15, sticky="ew", pady=(6, 0))
+        self._refresh_favorite_toolbar()
+
         canvas_frame = ttk.Frame(self, padding=(12, 0, 8, 12))
         canvas_frame.grid(row=2, column=0, sticky="nsew")
         canvas_frame.rowconfigure(0, weight=1)
         canvas_frame.columnconfigure(0, weight=1)
 
         self.canvas = tk.Canvas(
-            canvas_frame, bg="#1f232b", highlightthickness=0, cursor="crosshair"
+            canvas_frame,
+            bg="#1f232b",
+            highlightthickness=1,
+            highlightcolor="#5eead4",
+            cursor="crosshair",
+            takefocus=True,
         )
         self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.canvas.bind("<ButtonPress-1>", self._start_crop)
-        self.canvas.bind("<B1-Motion>", self._drag_crop)
-        self.canvas.bind("<ButtonRelease-1>", self._finish_crop)
-        self.canvas.bind("<Motion>", self._update_crop_cursor)
+        self.canvas.bind("<ButtonPress-1>", self._canvas_press)
+        self.canvas.bind("<B1-Motion>", self._canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._canvas_release)
+        self.canvas.bind("<Motion>", self._canvas_motion)
         self.canvas.bind("<MouseWheel>", self._zoom_with_wheel)
         self.canvas.bind("<ButtonPress-2>", self._start_pan)
         self.canvas.bind("<B2-Motion>", self._drag_pan)
@@ -323,6 +419,10 @@ class ImageEditorApp(tk.Tk):
         self.canvas.bind("<B3-Motion>", self._drag_pan)
         self.canvas.bind("<ButtonRelease-3>", self._finish_pan)
         self.canvas.bind("<Double-Button-1>", lambda _event: self.reset_view())
+        self.canvas.bind("<Alt-Left>", lambda _event: self._nudge_selected(-1, 0))
+        self.canvas.bind("<Alt-Right>", lambda _event: self._nudge_selected(1, 0))
+        self.canvas.bind("<Alt-Up>", lambda _event: self._nudge_selected(0, -1))
+        self.canvas.bind("<Alt-Down>", lambda _event: self._nudge_selected(0, 1))
 
         self.panel_shell = ttk.Frame(self, padding=(0, 0, 8, 12), width=360)
         self.panel_shell.grid(row=2, column=1, sticky="ns")
@@ -443,12 +543,13 @@ class ImageEditorApp(tk.Tk):
         crop_ratio = ttk.Combobox(
             crop_ratio_row,
             textvariable=self.crop_ratio_var,
-            values=("自由", "1:1", "4:3", "3:4", "16:9", "9:16"),
-            state="readonly",
+            values=("自由", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"),
+            state="normal",
             width=8,
         )
         crop_ratio.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         crop_ratio.bind("<<ComboboxSelected>>", lambda _event: self.apply_crop_ratio_to_current())
+        crop_ratio.bind("<Return>", lambda _event: self.apply_crop_ratio_to_current())
         ttk.Button(crop_ratio_row, text="居中裁剪", command=self.center_crop).grid(row=0, column=1)
         ttk.Label(resize_box, textvariable=self.crop_var, wraplength=300).grid(
             row=6, column=0, columnspan=2, sticky="w", pady=(10, 0)
@@ -643,6 +744,131 @@ class ImageEditorApp(tk.Tk):
             justify="left",
         ).grid(row=0, column=0, sticky="w")
 
+        annotation_box = ttk.LabelFrame(panel, text="标注对象", style="Panel.TLabelframe")
+        annotation_box.grid(row=9, column=0, sticky="ew", pady=(10, 10))
+        annotation_box.columnconfigure(1, weight=1)
+        ttk.Label(annotation_box, textvariable=self.selected_annotation_var).grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 6)
+        )
+        ttk.Label(annotation_box, text="文字").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(annotation_box, textvariable=self.annotation_text_var).grid(
+            row=1, column=1, columnspan=2, sticky="ew", pady=4
+        )
+        ttk.Label(annotation_box, text="描边色").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(annotation_box, textvariable=self.annotation_color_var, width=10).grid(
+            row=2, column=1, sticky="ew", pady=4
+        )
+        ttk.Button(
+            annotation_box,
+            text="选择",
+            command=lambda: self._choose_annotation_color("stroke"),
+        ).grid(row=2, column=2, padx=(5, 0))
+        ttk.Label(annotation_box, text="填充色").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Entry(annotation_box, textvariable=self.annotation_fill_var, width=10).grid(
+            row=3, column=1, sticky="ew", pady=4
+        )
+        ttk.Button(
+            annotation_box,
+            text="选择",
+            command=lambda: self._choose_annotation_color("fill"),
+        ).grid(row=3, column=2, padx=(5, 0))
+        self._slider(
+            annotation_box,
+            "描边",
+            self.annotation_stroke_var,
+            1,
+            30,
+            4,
+            lambda: None,
+        )
+        self._slider(
+            annotation_box,
+            "透明度",
+            self.annotation_opacity_var,
+            1,
+            100,
+            5,
+            lambda: None,
+        )
+        self._slider(
+            annotation_box,
+            "字号",
+            self.annotation_font_size_var,
+            1,
+            20,
+            6,
+            lambda: None,
+        )
+        self._slider(
+            annotation_box,
+            "效果强度",
+            self.annotation_effect_size_var,
+            2,
+            60,
+            7,
+            lambda: None,
+        )
+        annotation_actions = ttk.Frame(annotation_box)
+        annotation_actions.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        ttk.Button(annotation_actions, text="应用样式", command=self.apply_annotation_style).grid(
+            row=0, column=0, padx=(0, 6)
+        )
+        ttk.Button(
+            annotation_actions, text="删除对象", command=self.delete_selected_annotation
+        ).grid(row=0, column=1)
+
+        geometry_workflow_box = ttk.LabelFrame(panel, text="透视与画布", style="Panel.TLabelframe")
+        geometry_workflow_box.grid(row=10, column=0, sticky="ew", pady=(0, 10))
+        geometry_workflow_box.columnconfigure(1, weight=1)
+        ttk.Button(
+            geometry_workflow_box,
+            text="编辑四角",
+            command=lambda: self._set_annotation_tool("perspective"),
+        ).grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Button(geometry_workflow_box, text="应用透视", command=self.apply_perspective).grid(
+            row=0, column=1, sticky="ew", pady=4
+        )
+        for row, (label, variable) in enumerate(
+            (
+                ("左边距", self.canvas_left_var),
+                ("上边距", self.canvas_top_var),
+                ("右边距", self.canvas_right_var),
+                ("下边距", self.canvas_bottom_var),
+            ),
+            start=1,
+        ):
+            ttk.Label(geometry_workflow_box, text=label).grid(row=row, column=0, sticky="w", pady=3)
+            ttk.Spinbox(
+                geometry_workflow_box, from_=0, to=10000, textvariable=variable, width=9
+            ).grid(row=row, column=1, sticky="ew", pady=3)
+        ttk.Label(geometry_workflow_box, text="背景色").grid(row=5, column=0, sticky="w", pady=3)
+        canvas_color_row = ttk.Frame(geometry_workflow_box)
+        canvas_color_row.grid(row=5, column=1, sticky="ew", pady=3)
+        canvas_color_row.columnconfigure(0, weight=1)
+        ttk.Entry(canvas_color_row, textvariable=self.canvas_background_var).grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Button(
+            canvas_color_row,
+            text="选择",
+            command=self._choose_canvas_background,
+        ).grid(row=0, column=1, padx=(5, 0))
+        ttk.Button(
+            geometry_workflow_box, text="应用画布扩展", command=self.apply_canvas_expansion
+        ).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+
+        workflow_box = ttk.LabelFrame(panel, text="高频工作流", style="Panel.TLabelframe")
+        workflow_box.grid(row=11, column=0, sticky="ew")
+        ttk.Button(workflow_box, text="配置收藏与快捷键…", command=self.configure_workflow).grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Checkbutton(
+            workflow_box,
+            text="启动时恢复最近编辑项目",
+            variable=self.restore_workspace_var,
+            command=self._workspace_setting_changed,
+        ).grid(row=1, column=0, sticky="w", pady=(7, 0))
+
         self.status_label = ttk.Label(
             self, textvariable=self.status_var, anchor="w", padding=(12, 6)
         )
@@ -663,6 +889,10 @@ class ImageEditorApp(tk.Tk):
         file_menu.add_cascade(label="最近打开", menu=self.recent_menu)
         self.recent_directory_menu = tk.Menu(file_menu, tearoff=False)
         file_menu.add_cascade(label="最近目录", menu=self.recent_directory_menu)
+        self.recent_project_menu = tk.Menu(file_menu, tearoff=False)
+        file_menu.add_cascade(label="最近编辑项目", menu=self.recent_project_menu)
+        self.recent_export_menu = tk.Menu(file_menu, tearoff=False)
+        file_menu.add_cascade(label="最近导出位置", menu=self.recent_export_menu)
         file_menu.add_separator()
         file_menu.add_command(label="重命名...", accelerator="F2", command=self.rename_current)
         file_menu.add_command(label="复制到...", command=self.copy_current)
@@ -703,6 +933,8 @@ class ImageEditorApp(tk.Tk):
         )
         edit_menu.add_command(label="水平翻转", command=self.flip_horizontal)
         edit_menu.add_command(label="垂直翻转", command=self.flip_vertical)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="收藏与快捷键…", command=self.configure_workflow)
         self.menu_bar.add_cascade(label="编辑", menu=edit_menu)
 
         view_menu = tk.Menu(self.menu_bar, tearoff=False)
@@ -751,6 +983,8 @@ class ImageEditorApp(tk.Tk):
         self.config(menu=self.menu_bar)
         self._refresh_recent_menu()
         self._refresh_recent_directory_menu()
+        self._refresh_recent_project_menu()
+        self._refresh_recent_export_menu()
 
     def _refresh_recent_menu(self) -> None:
         self.recent_menu.delete(0, "end")
@@ -774,6 +1008,31 @@ class ImageEditorApp(tk.Tk):
             self.recent_directory_menu.add_command(
                 label=path,
                 command=partial(self.open_paths, [path]),
+            )
+
+    def _refresh_recent_project_menu(self) -> None:
+        self.recent_project_menu.delete(0, "end")
+        self.recent_projects = [path for path in self.recent_projects if Path(path).exists()][:8]
+        if not self.recent_projects:
+            self.recent_project_menu.add_command(label="暂无", state="disabled")
+            return
+        for path in self.recent_projects:
+            self.recent_project_menu.add_command(
+                label=Path(path).name,
+                command=partial(self.open_project_path, path),
+            )
+
+    def _refresh_recent_export_menu(self) -> None:
+        self.recent_export_menu.delete(0, "end")
+        self.recent_export_directories = [
+            path for path in self.recent_export_directories if Path(path).is_dir()
+        ][:8]
+        if not self.recent_export_directories:
+            self.recent_export_menu.add_command(label="暂无", state="disabled")
+            return
+        for path in self.recent_export_directories:
+            self.recent_export_menu.add_command(
+                label=path, command=partial(open_folder, Path(path))
             )
 
     def _slider(
@@ -802,6 +1061,140 @@ class ImageEditorApp(tk.Tk):
     def _end_slider_command(self, _event: tk.Event) -> None:
         self._active_slider_merge_key = None
 
+    def _action_callback(self, action: str):
+        actions = {
+            "open": self.open_file,
+            "save": self.save_as,
+            "save_project": self.save_project_dialog,
+            "undo": self.undo,
+            "redo": self.redo,
+            "rotate_right": lambda: self.rotate(90),
+            "select": lambda: self._set_annotation_tool("select"),
+            "crop": lambda: self._set_annotation_tool("crop"),
+            "text": lambda: self._set_annotation_tool("text"),
+            "arrow": lambda: self._set_annotation_tool("arrow"),
+            "rectangle": lambda: self._set_annotation_tool("rectangle"),
+            "mosaic": lambda: self._set_annotation_tool("mosaic"),
+            "blur": lambda: self._set_annotation_tool("blur"),
+        }
+        return actions[action]
+
+    def _refresh_favorite_toolbar(self) -> None:
+        if not hasattr(self, "favorite_toolbar"):
+            return
+        for child in self.favorite_toolbar.winfo_children():
+            child.destroy()
+        ttk.Label(self.favorite_toolbar, text="收藏：").grid(row=0, column=0, padx=(0, 5))
+        labels = {key: label for key, label, _shortcut in ACTION_CATALOG}
+        for column, action in enumerate(self.favorite_actions, start=1):
+            if action not in labels:
+                continue
+            ttk.Button(
+                self.favorite_toolbar,
+                text=labels[action],
+                command=self._action_callback(action),
+            ).grid(row=0, column=column, padx=(0, 4))
+        ttk.Button(
+            self.favorite_toolbar,
+            text="配置…",
+            command=self.configure_workflow,
+        ).grid(row=0, column=len(self.favorite_actions) + 1, padx=(8, 0))
+
+    def _apply_custom_shortcuts(self) -> None:
+        for sequence in self._custom_bound_sequences:
+            self.unbind(sequence)
+        self._custom_bound_sequences.clear()
+        valid_actions = {key for key, _label, _shortcut in ACTION_CATALOG}
+        for action, sequence in self.custom_shortcuts.items():
+            if action not in valid_actions or not sequence:
+                continue
+            try:
+                self.bind(
+                    sequence,
+                    lambda event, current=action: self._invoke_custom_shortcut(current, event),
+                )
+            except tk.TclError:
+                continue
+            self._custom_bound_sequences.add(sequence)
+
+    def _invoke_custom_shortcut(self, action: str, event: tk.Event) -> str | None:
+        if action in {"select", "crop", "text", "arrow", "rectangle", "mosaic", "blur"}:
+            widget_class = event.widget.winfo_class() if event.widget is not None else ""
+            if widget_class in {"Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox"}:
+                return None
+        self._action_callback(action)()
+        return "break"
+
+    def configure_workflow(self) -> None:
+        window = tk.Toplevel(self)
+        window.title("收藏与快捷键")
+        window.geometry("560x560")
+        window.transient(self)
+        body = ttk.Frame(window, padding=14)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="选择收藏操作（可多选）").pack(anchor="w")
+        favorite_list = tk.Listbox(body, selectmode="multiple", exportselection=False, height=10)
+        favorite_list.pack(fill="x", pady=(5, 12))
+        labels: dict[str, str] = {}
+        for index, (key, label, _shortcut) in enumerate(ACTION_CATALOG):
+            labels[key] = label
+            favorite_list.insert("end", f"{label}  [{key}]")
+            if key in self.favorite_actions:
+                favorite_list.selection_set(index)
+
+        ttk.Label(body, text="快捷键（Tk 格式，例如 <Control-Alt-t>）").pack(anchor="w")
+        shortcut_canvas = tk.Canvas(body, height=250, highlightthickness=0)
+        shortcut_scroll = ttk.Scrollbar(body, orient="vertical", command=shortcut_canvas.yview)
+        shortcut_frame = ttk.Frame(shortcut_canvas)
+        shortcut_frame.bind(
+            "<Configure>",
+            lambda _event: shortcut_canvas.configure(scrollregion=shortcut_canvas.bbox("all")),
+        )
+        shortcut_canvas.create_window(0, 0, window=shortcut_frame, anchor="nw")
+        shortcut_canvas.configure(yscrollcommand=shortcut_scroll.set)
+        shortcut_canvas.pack(side="left", fill="both", expand=True, pady=(5, 10))
+        shortcut_scroll.pack(side="right", fill="y", pady=(5, 10))
+        shortcut_vars: dict[str, tk.StringVar] = {}
+        for row, (key, label, default) in enumerate(ACTION_CATALOG):
+            ttk.Label(shortcut_frame, text=label, width=16).grid(
+                row=row, column=0, sticky="w", pady=2
+            )
+            variable = tk.StringVar(value=self.custom_shortcuts.get(key, default))
+            shortcut_vars[key] = variable
+            ttk.Entry(shortcut_frame, textvariable=variable, width=28).grid(
+                row=row, column=1, sticky="ew", pady=2
+            )
+
+        def save_workflow() -> None:
+            selected = [ACTION_CATALOG[index][0] for index in favorite_list.curselection()]
+            shortcuts = {key: variable.get().strip() for key, variable in shortcut_vars.items()}
+            used = [sequence for sequence in shortcuts.values() if sequence]
+            if len(used) != len(set(used)):
+                messagebox.showerror(APP_NAME, "快捷键不能重复。", parent=window)
+                return
+            for sequence in used:
+                try:
+                    window.bind(sequence, lambda _event: None)
+                    window.unbind(sequence)
+                except tk.TclError:
+                    messagebox.showerror(APP_NAME, f"快捷键格式无效：{sequence}", parent=window)
+                    return
+            self.favorite_actions = selected
+            self.custom_shortcuts = shortcuts
+            self._refresh_favorite_toolbar()
+            self._apply_custom_shortcuts()
+            self._save_config()
+            window.destroy()
+
+        buttons = ttk.Frame(window, padding=(14, 0, 14, 14))
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="保存", command=save_workflow).pack(side="right")
+        ttk.Button(buttons, text="取消", command=window.destroy).pack(side="right", padx=(0, 8))
+
+    def _workspace_setting_changed(self) -> None:
+        self.restore_workspace = self.restore_workspace_var.get()
+        self._save_config()
+
     def _bind_shortcuts(self) -> None:
         self.bind("<Control-o>", lambda _event: self.open_file())
         self.bind("<Control-v>", lambda _event: self.paste_from_clipboard())
@@ -824,16 +1217,17 @@ class ImageEditorApp(tk.Tk):
         self.bind("<Home>", lambda _event: self.navigate_folder_to("first"))
         self.bind("<End>", lambda _event: self.navigate_folder_to("last"))
         self.bind("<Escape>", lambda _event: self._handle_escape())
-        self.bind("<Return>", lambda _event: self.apply_crop())
+        self.bind("<Return>", lambda _event: self.apply_current_tool())
         self.bind("<space>", lambda _event: self._set_compare(True))
         self.bind("<KeyRelease-space>", lambda _event: self._set_compare(False))
         self.bind("<F11>", lambda _event: self.toggle_fullscreen())
         self.bind("<Control-F11>", lambda _event: self.toggle_immersive())
         self.bind("<F5>", lambda _event: self.toggle_slideshow())
         self.bind("<F2>", lambda _event: self.rename_current())
-        self.bind("<Delete>", lambda _event: self.delete_current_to_recycle_bin())
+        self.bind("<Delete>", lambda _event: self.delete_selected_or_file())
         self.bind("<Control-Shift-E>", lambda _event: self.reveal_current())
         self.bind("<Alt-Return>", lambda _event: self.show_properties())
+        self._apply_custom_shortcuts()
 
     def _bind_document_variables(self) -> None:
         text_fields = (
@@ -998,20 +1392,22 @@ class ImageEditorApp(tk.Tk):
 
     def _commit_command(
         self, command: EditCommand, *, merge: bool = False, refresh: bool = True
-    ) -> None:
+    ) -> bool:
         if self._syncing_document or self.document is None:
-            return
+            return False
         if self.document.project_read_only:
             self.status_var.set("项目包含当前版本不支持的操作，已按只读方式打开")
-            return
+            return False
         try:
+            apply_command_to_plan(reduce_timeline(self.document.timeline), command)
             self.document.commit_command(command, merge=merge)
         except ValueError as error:
             messagebox.showerror(APP_NAME, str(error))
-            return
+            return False
         self._refresh_history_panel()
         if refresh:
             self._refresh_preview()
+        return True
 
     def _advanced_color_changed(self, name: str, value: int) -> None:
         if self._syncing_document or self.document is None:
@@ -1157,6 +1553,26 @@ class ImageEditorApp(tk.Tk):
             self.fine_rotation_var.set(plan.geometry.fine_angle)
             self.fine_rotation_auto_crop_var.set(plan.geometry.auto_crop)
             self.fine_rotation_background_var.set(plan.geometry.background)
+            if plan.geometry.perspective is not None:
+                self.perspective_points = [
+                    (
+                        plan.geometry.perspective[index],
+                        plan.geometry.perspective[index + 1],
+                    )
+                    for index in range(0, 8, 2)
+                ]
+            else:
+                self.perspective_points = [
+                    (0.05, 0.05),
+                    (0.95, 0.05),
+                    (0.95, 0.95),
+                    (0.05, 0.95),
+                ]
+            self.canvas_left_var.set(plan.geometry.canvas_margins[0])
+            self.canvas_top_var.set(plan.geometry.canvas_margins[1])
+            self.canvas_right_var.set(plan.geometry.canvas_margins[2])
+            self.canvas_bottom_var.set(plan.geometry.canvas_margins[3])
+            self.canvas_background_var.set(plan.geometry.canvas_background)
             self.brightness_var.set(plan.color.brightness)
             self.contrast_var.set(plan.color.contrast)
             self.saturation_var.set(plan.color.saturation)
@@ -1224,6 +1640,18 @@ class ImageEditorApp(tk.Tk):
             self._syncing_document = False
         self.document.set_state("sync_timeline", synchronized)
         self.crop_box = None
+        if self.selected_annotation_id and not any(
+            annotation.id == self.selected_annotation_id for annotation in plan.annotations
+        ):
+            self.selected_annotation_id = None
+            self.selected_annotation_var.set("未选择标注")
+        elif self.selected_annotation_id:
+            selected = next(
+                annotation
+                for annotation in plan.annotations
+                if annotation.id == self.selected_annotation_id
+            )
+            self._load_annotation_style(selected)
         if not was_dirty:
             self.document.mark_clean()
 
@@ -1318,6 +1746,32 @@ class ImageEditorApp(tk.Tk):
         self.recent_directories = [
             str(path) for path in data.get("recent_directories", []) if isinstance(path, str)
         ]
+        self.recent_projects = [
+            str(path) for path in data.get("recent_projects", []) if isinstance(path, str)
+        ]
+        self.recent_export_directories = [
+            str(path) for path in data.get("recent_export_directories", []) if isinstance(path, str)
+        ]
+        known_actions = {key for key, _label, _shortcut in ACTION_CATALOG}
+        favorites = data.get("favorite_actions", self.favorite_actions)
+        if isinstance(favorites, list):
+            self.favorite_actions = [str(action) for action in favorites if action in known_actions]
+        shortcuts = data.get("custom_shortcuts", {})
+        if isinstance(shortcuts, dict):
+            self.custom_shortcuts.update(
+                {
+                    str(action): str(sequence)
+                    for action, sequence in shortcuts.items()
+                    if action in known_actions and isinstance(sequence, str)
+                }
+            )
+        self.restore_workspace = bool(data.get("restore_workspace", True))
+        self.restore_workspace_var.set(self.restore_workspace)
+        self.last_project = str(data.get("last_project", "") or "")
+        saved_tool = str(data.get("annotation_tool", "crop"))
+        if saved_tool in ANNOTATION_TOOL_LABELS:
+            self.annotation_tool_var.set(saved_tool)
+            self.current_tool_label_var.set(f"当前：{ANNOTATION_TOOL_LABELS[saved_tool]}")
         self.edit_panel_visible_var.set(bool(data.get("edit_panel_visible", False)))
         self.slideshow_interval_var.set(float(data.get("slideshow_interval", 3.0)))
         self.slideshow_loop_var.set(bool(data.get("slideshow_loop", True)))
@@ -1342,6 +1796,13 @@ class ImageEditorApp(tk.Tk):
             "reveal_after_save": self.reveal_after_save_var.get(),
             "recent_files": self.recent_files[:8],
             "recent_directories": self.recent_directories[:8],
+            "recent_projects": self.recent_projects[:8],
+            "recent_export_directories": self.recent_export_directories[:8],
+            "favorite_actions": self.favorite_actions,
+            "custom_shortcuts": self.custom_shortcuts,
+            "restore_workspace": self.restore_workspace_var.get(),
+            "last_project": self.last_project,
+            "annotation_tool": self.annotation_tool_var.get(),
             "edit_panel_visible": self.edit_panel_visible_var.get(),
             "slideshow_interval": self.slideshow_interval_var.get(),
             "slideshow_loop": self.slideshow_loop_var.get(),
@@ -1425,12 +1886,13 @@ class ImageEditorApp(tk.Tk):
         self.image_path = loaded.document.source_path
         self.navigation = NavigationSession.from_activation([self.image_path])
         self._load_current_image(project_path.name, recovered=True)
+        self._remember_project(project_path)
         if loaded.unsupported_commands:
             self.status_var.set(
                 "项目含不支持的命令，已只读打开：" + ", ".join(loaded.unsupported_commands)
             )
         elif loaded.migrated_from:
-            self.status_var.set("旧项目已迁移到 v0.4 格式；保存时会写入新格式")
+            self.status_var.set("旧项目已迁移到当前格式；保存时会写入新格式")
         else:
             self.status_var.set(f"已打开编辑项目：{project_path.name}")
 
@@ -1482,6 +1944,7 @@ class ImageEditorApp(tk.Tk):
             messagebox.showerror(APP_NAME, str(error))
             return
         self.session_store.clear()
+        self._remember_project(saved)
         self.status_var.set(f"编辑项目已保存：{saved}")
 
     def open_path(self, path: str | Path, confirm: bool = True) -> None:
@@ -1713,6 +2176,25 @@ class ImageEditorApp(tk.Tk):
         self._refresh_recent_directory_menu()
         self._save_config()
 
+    def _remember_project(self, path: Path) -> None:
+        value = str(path.resolve())
+        self.recent_projects = [item for item in self.recent_projects if item != value]
+        self.recent_projects.insert(0, value)
+        self.recent_projects = self.recent_projects[:8]
+        self.last_project = value
+        self._refresh_recent_project_menu()
+        self._save_config()
+
+    def _remember_export_directory(self, path: Path) -> None:
+        value = str(path.resolve())
+        self.recent_export_directories = [
+            item for item in self.recent_export_directories if item != value
+        ]
+        self.recent_export_directories.insert(0, value)
+        self.recent_export_directories = self.recent_export_directories[:8]
+        self._refresh_recent_export_menu()
+        self._save_config()
+
     def toggle_edit_panel(self) -> None:
         if self.edit_panel_visible_var.get():
             self.edit_toolbar.grid()
@@ -1763,8 +2245,20 @@ class ImageEditorApp(tk.Tk):
             self.toggle_immersive()
         elif self._is_fullscreen:
             self.toggle_fullscreen()
+        elif self.annotation_tool_var.get() == "perspective":
+            self._set_annotation_tool("select")
+        elif self.selected_annotation_id is not None:
+            self.selected_annotation_id = None
+            self.selected_annotation_var.set("未选择标注")
+            self._draw_annotation_overlay()
         else:
             self.reset_crop()
+
+    def apply_current_tool(self) -> None:
+        if self.annotation_tool_var.get() == "crop":
+            self.apply_crop()
+        elif self.annotation_tool_var.get() == "perspective":
+            self.apply_perspective()
 
     def configure_slideshow(self) -> None:
         interval = simpledialog.askfloat(
@@ -1961,6 +2455,11 @@ class ImageEditorApp(tk.Tk):
             title="保存图片",
             defaultextension=extension_for_format(options.output_format),
             initialfile=default_name,
+            initialdir=(
+                self.recent_export_directories[0]
+                if self.recent_export_directories
+                else str(self.image_path.parent if self.image_path else Path.home() / "Pictures")
+            ),
             filetypes=[
                 (options.output_format, "*" + extension_for_format(options.output_format)),
                 ("所有文件", "*.*"),
@@ -1977,6 +2476,7 @@ class ImageEditorApp(tk.Tk):
             messagebox.showerror(APP_NAME, f"保存失败：{exc}")
             return
         self.status_var.set(f"已保存：{saved}")
+        self._remember_export_directory(saved.parent)
         self._mark_clean(saved)
         self.session_store.clear()
         if self.reveal_after_save_var.get():
@@ -1993,7 +2493,10 @@ class ImageEditorApp(tk.Tk):
         if affixes is None:
             return
         prefix, suffix = affixes
-        if self.image_path is not None:
+        if self.recent_export_directories:
+            folder = Path(self.recent_export_directories[0])
+            stem = self.image_path.stem if self.image_path is not None else "clipboard"
+        elif self.image_path is not None:
             folder = self.image_path.parent
             stem = self.image_path.stem
         else:
@@ -2013,6 +2516,7 @@ class ImageEditorApp(tk.Tk):
             messagebox.showerror(APP_NAME, f"快速导出失败：{exc}")
             return
         self.status_var.set(f"已快速导出：{saved}")
+        self._remember_export_directory(saved.parent)
         self._mark_clean()
         self.session_store.clear()
         if self.reveal_after_save_var.get():
@@ -2407,6 +2911,7 @@ class ImageEditorApp(tk.Tk):
     def _offer_session_recovery(self) -> None:
         recovery = self.session_store.load()
         if recovery is None:
+            self._restore_workspace()
             return
         message = "检测到上次异常退出时未完成的编辑。是否恢复？"
         if recovery.source_changed:
@@ -2425,6 +2930,13 @@ class ImageEditorApp(tk.Tk):
         display_name = self.image_path.name if self.image_path is not None else "恢复的剪贴板图片"
         self._load_current_image(display_name, recovered=True)
         self.status_var.set("已恢复上次未完成编辑；可继续编辑、另存或安全放弃")
+
+    def _restore_workspace(self) -> None:
+        if self.document is not None or not self.restore_workspace_var.get():
+            return
+        project = Path(self.last_project) if self.last_project else None
+        if project is not None and project.exists():
+            self.open_project_path(project, confirm=False)
 
     def _monitor_source_file(self) -> None:
         self._source_monitor_job = None
@@ -2885,6 +3397,7 @@ class ImageEditorApp(tk.Tk):
             )
         self._draw_checker_bounds(image.width, image.height)
         self._draw_crop()
+        self._draw_annotation_overlay()
         self._draw_histogram(frame.working)
         if self.edit_panel_visible_var.get():
             self.after_idle(self._update_estimate)
@@ -2907,6 +3420,536 @@ class ImageEditorApp(tk.Tk):
     def _image_to_canvas(self, x: int, y: int) -> tuple[int, int]:
         ox, oy = self.preview_offset
         return (round(x * self.preview_scale + ox), round(y * self.preview_scale + oy))
+
+    def _set_annotation_tool(self, tool: str) -> None:
+        if tool not in ANNOTATION_TOOL_LABELS:
+            return
+        self.annotation_tool_var.set(tool)
+        self.current_tool_label_var.set(f"当前：{ANNOTATION_TOOL_LABELS[tool]}")
+        if tool != "select":
+            self.selected_annotation_id = None
+            self.selected_annotation_var.set("未选择标注")
+        if tool == "perspective" and self.document is not None:
+            existing = reduce_timeline(self.document.timeline).geometry.perspective
+            if existing is not None:
+                self.perspective_points = [
+                    (existing[index], existing[index + 1]) for index in range(0, 8, 2)
+                ]
+        self.canvas.configure(cursor="arrow" if tool == "select" else "crosshair")
+        self.status_var.set(f"当前工具：{ANNOTATION_TOOL_LABELS[tool]}")
+        self._draw_annotation_overlay()
+        self._save_config()
+
+    def _canvas_press(self, event: tk.Event) -> None:
+        self.canvas.focus_set()
+        tool = self.annotation_tool_var.get()
+        if tool == "crop":
+            self._start_crop(event)
+        elif tool == "select":
+            self._start_annotation_selection(event)
+        elif tool == "perspective":
+            self._start_perspective(event)
+        else:
+            self._start_annotation(event, tool)
+
+    def _canvas_drag(self, event: tk.Event) -> None:
+        tool = self.annotation_tool_var.get()
+        if tool == "crop":
+            self._drag_crop(event)
+        elif tool == "select":
+            self._drag_annotation_selection(event)
+        elif tool == "perspective":
+            self._drag_perspective(event)
+        else:
+            self._drag_annotation(event, tool)
+
+    def _canvas_release(self, event: tk.Event) -> None:
+        tool = self.annotation_tool_var.get()
+        if tool == "crop":
+            self._finish_crop(event)
+        elif tool == "select":
+            self._finish_annotation_selection(event)
+        elif tool == "perspective":
+            self._perspective_active_index = None
+        else:
+            self._finish_annotation(event, tool)
+
+    def _canvas_motion(self, event: tk.Event) -> None:
+        tool = self.annotation_tool_var.get()
+        if tool == "crop":
+            self._update_crop_cursor(event)
+        elif tool == "select":
+            handle = self._annotation_handle_at(event.x, event.y)
+            if handle is not None:
+                self.canvas.configure(cursor="sizing")
+            elif self._annotation_at_canvas(event.x, event.y) is not None:
+                self.canvas.configure(cursor="fleur")
+            else:
+                self.canvas.configure(cursor="arrow")
+        else:
+            self.canvas.configure(cursor="crosshair")
+
+    def _canvas_to_normalized(self, x: int, y: int) -> tuple[float, float]:
+        image = self.base_preview_image
+        if image is None:
+            return (0.0, 0.0)
+        ix, iy = self._canvas_to_image(x, y)
+        return (ix / max(1, image.width), iy / max(1, image.height))
+
+    def _normalized_to_canvas(self, x: float, y: float) -> tuple[int, int]:
+        image = self.base_preview_image
+        if image is None:
+            return self.preview_offset
+        return self._image_to_canvas(round(x * image.width), round(y * image.height))
+
+    def _annotation_objects(self) -> tuple[AnnotationObject, ...]:
+        if self.document is None:
+            return ()
+        return reduce_timeline(self.document.timeline).annotations
+
+    def _selected_annotation(self) -> AnnotationObject | None:
+        return next(
+            (
+                annotation
+                for annotation in self._annotation_objects()
+                if annotation.id == self.selected_annotation_id
+            ),
+            None,
+        )
+
+    def _hit_radius(self) -> int:
+        try:
+            dpi = float(self.winfo_fpixels("1i"))
+        except tk.TclError:
+            dpi = 96.0
+        return hit_radius_px(dpi)
+
+    def _annotation_at_canvas(self, x: int, y: int) -> AnnotationObject | None:
+        image = self.base_preview_image
+        if image is None:
+            return None
+        tolerance = self._hit_radius() / max(1, min(image.size) * self.preview_scale)
+        return object_at(self._annotation_objects(), self._canvas_to_normalized(x, y), tolerance)
+
+    def _annotation_handle_at(self, x: int, y: int) -> str | None:
+        selected = self._selected_annotation()
+        if selected is None:
+            return None
+        left, top, right, bottom = selected.bounds
+        handles = {
+            "nw": self._normalized_to_canvas(left, top),
+            "ne": self._normalized_to_canvas(right, top),
+            "sw": self._normalized_to_canvas(left, bottom),
+            "se": self._normalized_to_canvas(right, bottom),
+        }
+        radius = self._hit_radius()
+        return next(
+            (
+                name
+                for name, (hx, hy) in handles.items()
+                if abs(hx - x) <= radius and abs(hy - y) <= radius
+            ),
+            None,
+        )
+
+    def _start_annotation_selection(self, event: tk.Event) -> None:
+        point = self._canvas_to_normalized(event.x, event.y)
+        handle = self._annotation_handle_at(event.x, event.y)
+        selected = self._selected_annotation()
+        if handle is not None and selected is not None:
+            self._annotation_drag_action = f"resize:{handle}"
+            target = selected
+        else:
+            target = self._annotation_at_canvas(event.x, event.y)
+            self._annotation_drag_action = "move"
+        self._annotation_start = point
+        self._annotation_original_object = target
+        self._annotation_drag_object = target
+        self.selected_annotation_id = target.id if target else None
+        if target is not None:
+            self._load_annotation_style(target)
+        else:
+            self.selected_annotation_var.set("未选择标注")
+        self._draw_annotation_overlay()
+
+    def _drag_annotation_selection(self, event: tk.Event) -> None:
+        original = self._annotation_original_object
+        start = self._annotation_start
+        if original is None or start is None:
+            return
+        current = self._canvas_to_normalized(event.x, event.y)
+        if self._annotation_drag_action == "move":
+            draft = original.translated(current[0] - start[0], current[1] - start[1])
+        else:
+            left, top, right, bottom = original.bounds
+            handle = self._annotation_drag_action.split(":", 1)[1]
+            if "n" in handle:
+                top = current[1]
+            if "s" in handle:
+                bottom = current[1]
+            if "w" in handle:
+                left = current[0]
+            if "e" in handle:
+                right = current[0]
+            if abs(right - left) < 0.002 or abs(bottom - top) < 0.002:
+                return
+            draft = original.resized((left, top, right, bottom))
+        self._annotation_drag_object = draft
+        self._draw_annotation_overlay()
+
+    def _finish_annotation_selection(self, _event: tk.Event) -> None:
+        original = self._annotation_original_object
+        draft = self._annotation_drag_object
+        if original is not None and draft is not None and draft != original:
+            patch = draft.to_json()
+            patch.pop("id", None)
+            patch.pop("kind", None)
+            self._commit_command(
+                EditCommand.create(
+                    "annotation_update",
+                    {"id": original.id, "patch": patch},
+                    f"调整{ANNOTATION_TOOL_LABELS[original.kind]}",
+                )
+            )
+        self._annotation_start = None
+        self._annotation_original_object = None
+        self._annotation_drag_object = None
+
+    def _start_annotation(self, event: tk.Event, tool: str) -> None:
+        if self.document is None:
+            return
+        point = self._canvas_to_normalized(event.x, event.y)
+        self._annotation_start = point
+        self._annotation_freehand_points = [point]
+        try:
+            self._annotation_drag_object = self._annotation_from_drag(tool, point, point)
+        except ValueError as error:
+            self._annotation_start = None
+            self.status_var.set(str(error))
+            return
+        self._draw_annotation_overlay()
+
+    def _drag_annotation(self, event: tk.Event, tool: str) -> None:
+        if self._annotation_start is None:
+            return
+        point = self._canvas_to_normalized(event.x, event.y)
+        if tool == "freehand":
+            previous = self._annotation_freehand_points[-1]
+            if abs(point[0] - previous[0]) + abs(point[1] - previous[1]) >= 0.001:
+                self._annotation_freehand_points.append(point)
+        try:
+            self._annotation_drag_object = self._annotation_from_drag(
+                tool, self._annotation_start, point
+            )
+        except ValueError as error:
+            self.status_var.set(str(error))
+            return
+        self._draw_annotation_overlay()
+
+    def _finish_annotation(self, event: tk.Event, tool: str) -> None:
+        if self.document is None or self._annotation_start is None:
+            return
+        point = self._canvas_to_normalized(event.x, event.y)
+        if abs(point[0] - self._annotation_start[0]) < 0.003:
+            point = (min(1.0, point[0] + 0.08), point[1])
+        if abs(point[1] - self._annotation_start[1]) < 0.003:
+            point = (point[0], min(1.0, point[1] + 0.08))
+        if tool == "freehand" and len(self._annotation_freehand_points) < 2:
+            self._annotation_freehand_points.append(point)
+        try:
+            annotation = self._annotation_from_drag(tool, self._annotation_start, point)
+        except ValueError as error:
+            messagebox.showerror(APP_NAME, str(error))
+            self._clear_annotation_drag()
+            return
+        if tool == "text":
+            text = simpledialog.askstring(
+                APP_NAME,
+                "输入标注文字：",
+                initialvalue=self.annotation_text_var.get(),
+                parent=self,
+            )
+            if not text:
+                self._clear_annotation_drag()
+                return
+            self.annotation_text_var.set(text)
+            annotation = annotation.with_patch({"text": text})
+        self._commit_command(
+            EditCommand.create(
+                "annotation_add",
+                {"object": annotation.to_json()},
+                f"添加{ANNOTATION_TOOL_LABELS[tool]}",
+            ),
+            refresh=False,
+        )
+        self.selected_annotation_id = annotation.id
+        self._set_annotation_tool("select")
+        self.selected_annotation_id = annotation.id
+        self._load_annotation_style(annotation)
+        self._clear_annotation_drag()
+        self._refresh_preview()
+
+    def _annotation_from_drag(
+        self,
+        tool: str,
+        start: tuple[float, float],
+        end: tuple[float, float],
+    ) -> AnnotationObject:
+        fill = self.annotation_fill_var.get().strip() or None
+        if tool == "redact" and fill is None:
+            fill = "#000000"
+        number = 1 + max(
+            (
+                annotation.number
+                for annotation in self._annotation_objects()
+                if annotation.kind == "number"
+            ),
+            default=0,
+        )
+        return AnnotationObject.create(
+            tool,
+            (*start, *end),
+            points=(
+                [[x, y] for x, y in self._annotation_freehand_points] if tool == "freehand" else []
+            ),
+            text=self.annotation_text_var.get(),
+            color=self.annotation_color_var.get(),
+            fill_color=fill,
+            stroke_width=self.annotation_stroke_var.get(),
+            opacity=self.annotation_opacity_var.get(),
+            font_size=self.annotation_font_size_var.get(),
+            number=number,
+            mosaic_size=self.annotation_effect_size_var.get(),
+            blur_radius=self.annotation_effect_size_var.get(),
+        )
+
+    def _clear_annotation_drag(self) -> None:
+        self._annotation_start = None
+        self._annotation_drag_object = None
+        self._annotation_freehand_points = []
+        self._draw_annotation_overlay()
+
+    def _load_annotation_style(self, annotation: AnnotationObject) -> None:
+        self.selected_annotation_var.set(
+            f"已选择：{ANNOTATION_TOOL_LABELS[annotation.kind]}  {annotation.id[:8]}"
+        )
+        self.annotation_text_var.set(annotation.text)
+        self.annotation_color_var.set(annotation.color)
+        self.annotation_fill_var.set(annotation.fill_color or "")
+        self.annotation_stroke_var.set(annotation.stroke_width)
+        self.annotation_opacity_var.set(annotation.opacity)
+        self.annotation_font_size_var.set(annotation.font_size)
+        self.annotation_effect_size_var.set(
+            annotation.mosaic_size if annotation.kind == "mosaic" else annotation.blur_radius
+        )
+
+    def apply_annotation_style(self) -> None:
+        annotation = self._selected_annotation()
+        if annotation is None:
+            self.status_var.set("请先使用“选择”工具选中标注对象")
+            return
+        patch = {
+            "text": self.annotation_text_var.get(),
+            "color": self.annotation_color_var.get(),
+            "fill_color": self.annotation_fill_var.get().strip() or None,
+            "stroke_width": self.annotation_stroke_var.get(),
+            "opacity": self.annotation_opacity_var.get(),
+            "font_size": self.annotation_font_size_var.get(),
+            "mosaic_size": self.annotation_effect_size_var.get(),
+            "blur_radius": self.annotation_effect_size_var.get(),
+        }
+        try:
+            updated = annotation.with_patch(patch)
+        except ValueError as error:
+            messagebox.showerror(APP_NAME, str(error))
+            return
+        self._commit_command(
+            EditCommand.create(
+                "annotation_update",
+                {"id": annotation.id, "patch": patch},
+                f"修改{ANNOTATION_TOOL_LABELS[annotation.kind]}样式",
+            )
+        )
+        self._load_annotation_style(updated)
+
+    def delete_selected_annotation(self) -> None:
+        annotation = self._selected_annotation()
+        if annotation is None:
+            return
+        self._commit_command(
+            EditCommand.create(
+                "annotation_delete",
+                {"id": annotation.id},
+                f"删除{ANNOTATION_TOOL_LABELS[annotation.kind]}",
+            )
+        )
+        self.selected_annotation_id = None
+        self.selected_annotation_var.set("未选择标注")
+
+    def delete_selected_or_file(self) -> None:
+        if self.selected_annotation_id is not None and self.annotation_tool_var.get() == "select":
+            self.delete_selected_annotation()
+        else:
+            self.delete_current_to_recycle_bin()
+
+    def _nudge_selected(self, dx_pixels: int, dy_pixels: int) -> str:
+        annotation = self._selected_annotation()
+        image = self.base_preview_image
+        if annotation is None or image is None:
+            return "break"
+        moved = annotation.translated(dx_pixels / image.width, dy_pixels / image.height)
+        patch = moved.to_json()
+        patch.pop("id", None)
+        patch.pop("kind", None)
+        self._commit_command(
+            EditCommand.create(
+                "annotation_update",
+                {"id": annotation.id, "patch": patch},
+                f"微调{ANNOTATION_TOOL_LABELS[annotation.kind]}位置",
+            )
+        )
+        return "break"
+
+    def _choose_annotation_color(self, target: str) -> None:
+        current = (
+            self.annotation_color_var.get()
+            if target == "stroke"
+            else (self.annotation_fill_var.get() or "#ffffff")
+        )
+        _rgb, color = colorchooser.askcolor(current, parent=self, title="选择标注颜色")
+        if color:
+            if target == "stroke":
+                self.annotation_color_var.set(color)
+            else:
+                self.annotation_fill_var.set(color)
+
+    def _start_perspective(self, event: tk.Event) -> None:
+        radius = self._hit_radius()
+        canvas_points = [self._normalized_to_canvas(x, y) for x, y in self.perspective_points]
+        self._perspective_active_index = min(
+            range(4),
+            key=lambda index: (
+                abs(canvas_points[index][0] - event.x) + abs(canvas_points[index][1] - event.y)
+            ),
+        )
+        px, py = canvas_points[self._perspective_active_index]
+        if abs(px - event.x) > radius * 2 or abs(py - event.y) > radius * 2:
+            self._perspective_active_index = None
+
+    def _drag_perspective(self, event: tk.Event) -> None:
+        if self._perspective_active_index is None:
+            return
+        self.perspective_points[self._perspective_active_index] = self._canvas_to_normalized(
+            event.x, event.y
+        )
+        self._draw_annotation_overlay()
+
+    def apply_perspective(self) -> None:
+        if self.document is None:
+            return
+        quad = [value for point in self.perspective_points for value in point]
+        if not self._commit_command(EditCommand.create("perspective", {"quad": quad}, "透视校正")):
+            return
+        self._set_annotation_tool("select")
+
+    def _choose_canvas_background(self) -> None:
+        _rgb, color = colorchooser.askcolor(
+            self.canvas_background_var.get(), parent=self, title="选择画布背景色"
+        )
+        if color:
+            self.canvas_background_var.set(color)
+
+    def apply_canvas_expansion(self) -> None:
+        if self.document is None:
+            return
+        try:
+            command = EditCommand.create(
+                "canvas_expand",
+                {
+                    "margins": [
+                        self.canvas_left_var.get(),
+                        self.canvas_top_var.get(),
+                        self.canvas_right_var.get(),
+                        self.canvas_bottom_var.get(),
+                    ],
+                    "background": self.canvas_background_var.get(),
+                },
+                "扩展画布",
+            )
+            self._commit_command(command)
+        except (tk.TclError, ValueError) as error:
+            messagebox.showerror(APP_NAME, str(error))
+
+    def _draw_annotation_overlay(self) -> None:
+        if not hasattr(self, "canvas"):
+            return
+        self.canvas.delete("annotation-ui")
+        if self.annotation_tool_var.get() == "perspective" and self.base_preview_image is not None:
+            points = [self._normalized_to_canvas(x, y) for x, y in self.perspective_points]
+            self.canvas.create_polygon(
+                *[coordinate for point in points for coordinate in point],
+                outline="#fbbf24",
+                fill="",
+                width=2,
+                tags="annotation-ui",
+            )
+            radius = self._hit_radius()
+            for index, (x, y) in enumerate(points, start=1):
+                self.canvas.create_oval(
+                    x - radius,
+                    y - radius,
+                    x + radius,
+                    y + radius,
+                    fill="#fbbf24",
+                    outline="#78350f",
+                    tags="annotation-ui",
+                )
+                self.canvas.create_text(x, y, text=str(index), fill="#111827", tags="annotation-ui")
+            return
+        annotation = self._annotation_drag_object or self._selected_annotation()
+        if annotation is None or self.base_preview_image is None:
+            return
+        left, top, right, bottom = annotation.bounds
+        x1, y1 = self._normalized_to_canvas(left, top)
+        x2, y2 = self._normalized_to_canvas(right, bottom)
+        color = annotation.color
+        if annotation.kind in {"line", "arrow"}:
+            start = self._normalized_to_canvas(annotation.x1, annotation.y1)
+            end = self._normalized_to_canvas(annotation.x2, annotation.y2)
+            self.canvas.create_line(*start, *end, fill=color, width=2, tags="annotation-ui")
+        elif annotation.kind == "ellipse":
+            self.canvas.create_oval(x1, y1, x2, y2, outline=color, width=2, tags="annotation-ui")
+        elif annotation.kind == "freehand" and annotation.points:
+            points = [self._normalized_to_canvas(x, y) for x, y in annotation.points]
+            self.canvas.create_line(
+                *[coordinate for point in points for coordinate in point],
+                fill=color,
+                width=2,
+                tags="annotation-ui",
+            )
+        else:
+            self.canvas.create_rectangle(
+                x1,
+                y1,
+                x2,
+                y2,
+                outline=color,
+                width=2,
+                dash=(4, 3),
+                tags="annotation-ui",
+            )
+        if self.selected_annotation_id == annotation.id:
+            radius = self._hit_radius()
+            for x, y in ((x1, y1), (x2, y1), (x1, y2), (x2, y2)):
+                self.canvas.create_rectangle(
+                    x - radius,
+                    y - radius,
+                    x + radius,
+                    y + radius,
+                    fill="#ccfbf1",
+                    outline="#0f766e",
+                    tags="annotation-ui",
+                )
 
     def _start_crop(self, event: tk.Event) -> None:
         if self.base_preview_image is None:
@@ -3069,11 +4112,11 @@ class ImageEditorApp(tk.Tk):
         )
 
     def _crop_ratio_value(self) -> float | None:
-        value = self.crop_ratio_var.get()
-        if value == "自由":
+        try:
+            return parse_crop_ratio(self.crop_ratio_var.get())
+        except ValueError as error:
+            self.status_var.set(str(error))
             return None
-        width, height = value.split(":")
-        return int(width) / int(height)
 
     def _constrain_box_to_ratio(
         self,

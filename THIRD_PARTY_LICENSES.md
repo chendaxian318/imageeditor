@@ -13,8 +13,8 @@ substitute for the authoritative licence text distributed by each component.
 - PyInstaller: 6.17.0
 - Source of version data: installed metadata in `.venv` plus `pip freeze --all`
 - Application artifacts checked: `release/LightImageEditor/ImageEditor.exe`,
-  `release/LightImageEditor-Portable-x64-0.4.0.exe` and
-  `release/LightImageEditor-Setup-x64-0.4.0.exe`
+  `release/LightImageEditor-Portable-x64-0.5.0.exe` and
+  `release/LightImageEditor-Setup-x64-0.5.0.exe`
 
 The virtual environment is not a release artifact. Paths below identify the
 authoritative files in the audited local installation so that the release

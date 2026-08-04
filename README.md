@@ -14,6 +14,10 @@
 - 可保存 `.lieproj` 编辑项目；项目使用版本化 JSON，原图保持外部引用并验证 SHA-256
 - 精细旋转、自动拉直、直方图、色阶、RGB 分通道曲线、色温、色调、阴影、高光和降噪
 - 历史面板可跳转到任意步骤，支持编辑前后分屏比较；预览、导出和复制结果共用同一渲染器
+- 可编辑标注对象：文字、箭头、直线、矩形、椭圆、自由画笔和自动序号
+- 隐私与局部效果：马赛克、模糊和纯色遮挡；对象可选择、移动、四角缩放并修改颜色、填充、描边和透明度
+- 自定义裁剪比例、四角透视校正、画布四边扩展和背景色
+- 常用操作收藏、自定义快捷键、最近编辑项目、最近导出位置及启动工作区恢复
 - 自动校正 8 种 EXIF Orientation，导出时移除方向标记以避免重复旋转
 - 按格式保留 ICC、EXIF、DPI 与 XMP，预览时将有效嵌入色彩配置转换到 sRGB 显示空间
 - 识别 GIF、APNG 和动画 WebP；未经明确确认不会把动画静默覆盖为单帧
@@ -57,8 +61,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 构建完成后产物位于 `release`：
 
 - `LightImageEditor/`：供标准安装器使用的 `onedir` 应用目录
-- `LightImageEditor-Portable-x64-0.4.0.exe`：便携 `onefile` 版本
-- `LightImageEditor-Setup-x64-0.4.0.exe`：当前用户标准安装器，支持覆盖升级和“已安装的应用”卸载
+- `LightImageEditor-Portable-x64-0.5.0.exe`：便携 `onefile` 版本
+- `LightImageEditor-Setup-x64-0.5.0.exe`：当前用户标准安装器，支持覆盖升级和“已安装的应用”卸载
 - `LICENSE`、`NOTICE.md`、`THIRD_PARTY_LICENSES.md`：随发布物和安装程序提供的权属及第三方许可说明
 - `SHA256SUMS.txt`：本次构建产物的 SHA-256 校验值
 

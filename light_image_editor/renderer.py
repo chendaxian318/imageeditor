@@ -7,10 +7,11 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
-from image_ops import apply_text_watermark
+from image_ops import apply_text_watermark, watermark_font
 
+from .annotations import AnnotationObject
 from .commands import EditCommand, EditTimeline
 
 CurvePoints = tuple[tuple[float, float], ...]
@@ -25,6 +26,9 @@ class GeometrySpec:
     fine_angle: float = 0.0
     auto_crop: bool = True
     background: str = "#ffffff"
+    perspective: tuple[float, float, float, float, float, float, float, float] | None = None
+    canvas_margins: tuple[int, int, int, int] = (0, 0, 0, 0)
+    canvas_background: str = "#ffffff"
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,7 @@ class RenderPlan:
     crop_box: tuple[float, float, float, float] | None = None
     color: ColorSpec = field(default_factory=ColorSpec)
     annotation: AnnotationSpec = AnnotationSpec()
+    annotations: tuple[AnnotationObject, ...] = ()
     size: SizeSpec = SizeSpec()
 
 
@@ -119,6 +124,32 @@ def apply_command_to_plan(plan: RenderPlan, command: EditCommand) -> RenderPlan:
                 fine_angle=angle,
                 auto_crop=bool(params.get("auto_crop", True)),
                 background=background,
+            ),
+        )
+    if command.kind == "perspective":
+        raw_quad = params.get("quad")
+        if raw_quad is None:
+            return replace(plan, geometry=replace(plan.geometry, perspective=None))
+        if not isinstance(raw_quad, list) or len(raw_quad) != 8:
+            raise ValueError("透视四边形必须包含八个归一化坐标。")
+        quad = tuple(float(value) for value in raw_quad)
+        if not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in quad):
+            raise ValueError("透视坐标必须位于 0 到 1。")
+        _validate_perspective_quad(quad)
+        return replace(plan, geometry=replace(plan.geometry, perspective=quad))  # type: ignore[arg-type]
+    if command.kind == "canvas_expand":
+        raw_margins = params.get("margins", [0, 0, 0, 0])
+        if not isinstance(raw_margins, list) or len(raw_margins) != 4:
+            raise ValueError("画布边距必须包含左、上、右、下四个值。")
+        margins = tuple(_bounded_int(value, 0, 10_000, "画布边距") for value in raw_margins)
+        background = str(params.get("background", "#ffffff"))
+        _parse_hex_color(background)
+        return replace(
+            plan,
+            geometry=replace(
+                plan.geometry,
+                canvas_margins=margins,  # type: ignore[arg-type]
+                canvas_background=background,
             ),
         )
     if command.kind == "crop":
@@ -181,6 +212,33 @@ def apply_command_to_plan(plan: RenderPlan, command: EditCommand) -> RenderPlan:
             watermark_size_percent=_bounded_int(params.get("size_percent", 5), 1, 30, "水印字号"),
         )
         return replace(plan, annotation=annotation)
+    if command.kind == "annotation_add":
+        annotation_object = AnnotationObject.from_json(dict(params.get("object", {})))
+        if any(item.id == annotation_object.id for item in plan.annotations):
+            raise ValueError("标注对象 ID 重复。")
+        return replace(plan, annotations=(*plan.annotations, annotation_object))
+    if command.kind == "annotation_update":
+        object_id = str(params.get("id", ""))
+        patch = params.get("patch", {})
+        if not isinstance(patch, dict):
+            raise ValueError("标注更新参数必须是对象。")
+        found = False
+        updated_objects: list[AnnotationObject] = []
+        for current_object in plan.annotations:
+            if current_object.id == object_id:
+                updated_objects.append(current_object.with_patch(patch))
+                found = True
+            else:
+                updated_objects.append(current_object)
+        if not found:
+            raise ValueError("找不到要更新的标注对象。")
+        return replace(plan, annotations=tuple(updated_objects))
+    if command.kind == "annotation_delete":
+        object_id = str(params.get("id", ""))
+        remaining_objects = tuple(item for item in plan.annotations if item.id != object_id)
+        if len(remaining_objects) == len(plan.annotations):
+            raise ValueError("找不到要删除的标注对象。")
+        return replace(plan, annotations=remaining_objects)
     if command.kind == "resize":
         size = SizeSpec(
             exact_width=_optional_positive_int(params.get("exact_width")),
@@ -210,6 +268,7 @@ def render_image(
     result = _apply_geometry(base_image, plan.geometry)
     result = _apply_crop(result, plan.crop_box)
     result = _apply_color(result, plan.color)
+    result = _apply_annotations(result, plan.annotations)
     if plan.annotation.watermark_text.strip():
         result = apply_text_watermark(
             result,
@@ -318,7 +377,210 @@ def _apply_geometry(image: Image.Image, spec: GeometrySpec) -> Image.Image:
             left = (result.width - crop_width) // 2
             top = (result.height - crop_height) // 2
             result = result.crop((left, top, left + crop_width, top + crop_height))
+    if spec.perspective is not None:
+        tlx, tly, trx, try_, brx, bry, blx, bly = spec.perspective
+        quad = (
+            tlx * result.width,
+            tly * result.height,
+            blx * result.width,
+            bly * result.height,
+            brx * result.width,
+            bry * result.height,
+            trx * result.width,
+            try_ * result.height,
+        )
+        result = result.transform(
+            result.size,
+            Image.Transform.QUAD,
+            quad,
+            resample=Image.Resampling.BICUBIC,
+        )
+    left, top, right, bottom = spec.canvas_margins
+    if any(spec.canvas_margins):
+        fill = _parse_hex_color(spec.canvas_background)
+        mode = "RGBA" if "A" in result.getbands() else "RGB"
+        background = (*fill, 255) if mode == "RGBA" else fill
+        expanded = Image.new(
+            mode, (result.width + left + right, result.height + top + bottom), background
+        )
+        expanded.paste(result, (left, top), result if "A" in result.getbands() else None)
+        result = expanded
     return result
+
+
+def _apply_annotations(
+    image: Image.Image, annotations: tuple[AnnotationObject, ...]
+) -> Image.Image:
+    if not annotations:
+        return image
+    original_mode = image.mode
+    result = image.convert("RGBA")
+    overlay = Image.new("RGBA", result.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    overlay_dirty = False
+    for annotation in annotations:
+        if annotation.kind in {"mosaic", "blur"}:
+            if overlay_dirty:
+                result = Image.alpha_composite(result, overlay)
+                overlay = Image.new("RGBA", result.size, (0, 0, 0, 0))
+                draw = ImageDraw.Draw(overlay)
+                overlay_dirty = False
+            result = _apply_region_effect(result, annotation)
+            continue
+        _draw_annotation(draw, result.size, annotation)
+        overlay_dirty = True
+    if overlay_dirty:
+        result = Image.alpha_composite(result, overlay)
+    if original_mode == "RGBA":
+        return result
+    if original_mode == "LA":
+        return result.convert("LA")
+    return result.convert(original_mode if original_mode != "P" else "RGB")
+
+
+def _apply_region_effect(image: Image.Image, annotation: AnnotationObject) -> Image.Image:
+    left, top, right, bottom = _pixel_box(annotation.bounds, image.size)
+    if right <= left or bottom <= top:
+        return image
+    patch = image.crop((left, top, right, bottom))
+    if annotation.kind == "mosaic":
+        block = max(2, annotation.mosaic_size)
+        tiny = patch.resize(
+            (max(1, patch.width // block), max(1, patch.height // block)),
+            Image.Resampling.BILINEAR,
+        )
+        affected = tiny.resize(patch.size, Image.Resampling.NEAREST)
+    else:
+        affected = patch.filter(ImageFilter.GaussianBlur(annotation.blur_radius))
+    if annotation.opacity < 100:
+        affected = Image.blend(patch, affected, annotation.opacity / 100.0)
+    output = image.copy()
+    output.paste(affected, (left, top))
+    return output
+
+
+def _draw_annotation(
+    draw: ImageDraw.ImageDraw,
+    image_size: tuple[int, int],
+    annotation: AnnotationObject,
+) -> None:
+    width, height = image_size
+    box = _pixel_box(annotation.bounds, image_size)
+    stroke = max(1, round(annotation.stroke_width * min(image_size) / 1000))
+    color = _rgba(annotation.color, annotation.opacity)
+    fill = _rgba(annotation.fill_color, annotation.opacity) if annotation.fill_color else None
+    if annotation.kind == "line":
+        draw.line(_pixel_line(annotation, image_size), fill=color, width=stroke)
+    elif annotation.kind == "arrow":
+        line = _pixel_line(annotation, image_size)
+        draw.line(line, fill=color, width=stroke)
+        _draw_arrow_head(draw, line, color, stroke)
+    elif annotation.kind == "rectangle":
+        draw.rectangle(box, outline=color, fill=fill, width=stroke)
+    elif annotation.kind == "ellipse":
+        draw.ellipse(box, outline=color, fill=fill, width=stroke)
+    elif annotation.kind == "freehand":
+        points = [(round(x * width), round(y * height)) for x, y in annotation.points]
+        if len(points) >= 2:
+            draw.line(points, fill=color, width=stroke, joint="curve")
+    elif annotation.kind == "redact":
+        draw.rectangle(box, fill=fill or color)
+    elif annotation.kind == "text":
+        font = watermark_font(image_size, annotation.font_size)
+        draw.text((box[0], box[1]), annotation.text, font=font, fill=color, stroke_width=0)
+    elif annotation.kind == "number":
+        font = watermark_font(image_size, annotation.font_size)
+        diameter = max(20, min(box[2] - box[0], box[3] - box[1]))
+        circle = (box[0], box[1], box[0] + diameter, box[1] + diameter)
+        draw.ellipse(circle, fill=fill or color, outline=color, width=stroke)
+        label = str(annotation.number)
+        text_box = draw.textbbox((0, 0), label, font=font)
+        text_width = text_box[2] - text_box[0]
+        text_height = text_box[3] - text_box[1]
+        draw.text(
+            (
+                circle[0] + (diameter - text_width) / 2,
+                circle[1] + (diameter - text_height) / 2 - text_box[1],
+            ),
+            label,
+            font=font,
+            fill=(255, 255, 255, color[3]),
+        )
+
+
+def _pixel_box(
+    box: tuple[float, float, float, float], image_size: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    left, top, right, bottom = box
+    width, height = image_size
+    return (
+        max(0, min(width, round(left * width))),
+        max(0, min(height, round(top * height))),
+        max(0, min(width, round(right * width))),
+        max(0, min(height, round(bottom * height))),
+    )
+
+
+def _pixel_line(
+    annotation: AnnotationObject, image_size: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    width, height = image_size
+    return (
+        round(annotation.x1 * width),
+        round(annotation.y1 * height),
+        round(annotation.x2 * width),
+        round(annotation.y2 * height),
+    )
+
+
+def _draw_arrow_head(
+    draw: ImageDraw.ImageDraw,
+    line: tuple[int, int, int, int],
+    color: tuple[int, int, int, int],
+    stroke: int,
+) -> None:
+    x1, y1, x2, y2 = line
+    angle = math.atan2(y2 - y1, x2 - x1)
+    length = max(10, stroke * 4)
+    spread = math.pi / 6
+    points = [
+        (x2, y2),
+        (x2 - length * math.cos(angle - spread), y2 - length * math.sin(angle - spread)),
+        (x2 - length * math.cos(angle + spread), y2 - length * math.sin(angle + spread)),
+    ]
+    draw.polygon(points, fill=color)
+
+
+def _rgba(color: str | None, opacity: int) -> tuple[int, int, int, int]:
+    red, green, blue = _parse_hex_color(color or "#000000")
+    return (red, green, blue, max(1, min(100, opacity)) * 255 // 100)
+
+
+def _validate_perspective_quad(quad: tuple[float, ...]) -> None:
+    points = [(quad[index], quad[index + 1]) for index in range(0, 8, 2)]
+    crosses: list[float] = []
+    for index in range(4):
+        first = points[index]
+        second = points[(index + 1) % 4]
+        third = points[(index + 2) % 4]
+        crosses.append(
+            (second[0] - first[0]) * (third[1] - second[1])
+            - (second[1] - first[1]) * (third[0] - second[0])
+        )
+    if min(abs(value) for value in crosses) < 1e-4 or not (
+        all(value > 0 for value in crosses) or all(value < 0 for value in crosses)
+    ):
+        raise ValueError("透视四角必须按左上、右上、右下、左下组成凸四边形。")
+    area = abs(
+        sum(
+            points[index][0] * points[(index + 1) % 4][1]
+            - points[(index + 1) % 4][0] * points[index][1]
+            for index in range(4)
+        )
+        / 2
+    )
+    if area < 0.005:
+        raise ValueError("透视区域过小。")
 
 
 def _apply_crop(
@@ -334,6 +596,8 @@ def _apply_crop(
 
 
 def _apply_color(image: Image.Image, spec: ColorSpec) -> Image.Image:
+    if spec == ColorSpec():
+        return image
     had_alpha = "A" in image.getbands()
     alpha = np.asarray(image.getchannel("A"), dtype=np.uint8).copy() if had_alpha else None
     rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0

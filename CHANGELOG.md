@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.0 — 2026-08-04
+
+### Editable annotations and privacy tools
+
+- Added non-destructive text, arrow, line, rectangle, ellipse, freehand and numbered-marker objects.
+- Added local mosaic, Gaussian blur and solid-redaction objects; effects remain bounded to their selected regions and undo restores the original pixels.
+- Added topmost object selection, move, four-corner resize, colour, fill, stroke, opacity, text, font-size and effect-strength controls.
+- Persisted every annotation object and update command in `.lieproj` projects and abnormal-exit sessions so objects remain editable across launches.
+
+### High-frequency workflows
+
+- Added free-form `width:height` crop ratios, interactive four-corner perspective correction and four-sided canvas expansion with a configurable background.
+- Added configurable favourite actions and keyboard shortcuts with duplicate and syntax validation.
+- Added recent project and export-location menus, remembered export destinations and optional startup restoration of the latest project workspace.
+- Added DPI-aware selection handles and hit regions; verified 16-pixel targets at 200% DPI.
+
+### Technical decision gate
+
+- Tkinter remains the UI framework through v1.0: 100 vector objects render at a 41.3 ms median and 10 local effects at a 118.3 ms median on the development machine, while 200% DPI create/move interactions pass.
+- A framework migration remains a separate future project if later accessibility or canvas-performance evidence fails the documented gates.
+
+### Validation
+
+- 90 automated tests pass, including project editability, local-effect boundaries, undo restoration, custom crop validation, 200% DPI hit sizing, perspective/canvas rendering and a 100-object performance gate.
+- Real Tk smoke tests pass object creation, selection, move, style update, undo/redo and 200% DPI canvas interaction.
+
 ## 0.4.0 — 2026-08-04
 
 ### Non-destructive editing core
