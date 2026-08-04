@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.6.0 — 2026-08-04
+
+### Formats and animation
+
+- Enabled AVIF open, convert and export through the AVIF codec already present in the locked Pillow 11.3.0 Windows wheel.
+- Added runtime discovery for the optional `pillow-heif` HEIF/HEIC decoder with a separate lock file; the base installer remains free of that dependency.
+- Added background multi-frame GIF/APNG/WebP playback and an explicit animated export workflow for GIF, APNG and WebP.
+- Registered AVIF, APNG and optional HEIF/HEIC extensions as Windows candidate default-app formats.
+
+### Persistent batch processing
+
+- Added a versioned batch manifest with pending, running, succeeded, failed and cancelled states; interrupted running tasks recover as pending.
+- Added configurable concurrency and a weighted memory budget, cancellation, failed-item retry, whole-job rerun and atomic progress checkpoints.
+- Added versioned import/export presets, rename templates with name/stem/extension/index/date variables, directory-tree preservation and explicit error/overwrite/unique conflict policies.
+- Added metadata cleaning, resize, watermark and format-conversion recipes, same-file overwrite protection, CSV/JSON error reports, completion notifications and output-folder actions.
+- Isolated read-only, damaged, oversized and same-name inputs so one task never blocks the remaining queue.
+
+### Validation
+
+- 98 automated tests pass, including real AVIF round trips, three animation formats, preset schema gates, cancellation/recovery/retry and a 1,003-file mixed-format stress test.
+- The stress test completed 1,001 valid inputs while isolating one damaged and one oversized input; active image reservations remained within a configured 32 MB budget.
+- A real Tk smoke test played a three-frame animation and completed six UI-launched AVIF batch tasks without cross-thread Tk calls.
+
 ## 0.5.0 — 2026-08-04
 
 ### Editable annotations and privacy tools

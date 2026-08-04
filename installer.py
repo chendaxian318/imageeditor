@@ -22,7 +22,20 @@ from light_image_editor.single_instance import request_running_app_exit
 APP_NAME = PRODUCT_NAME_ZH
 EXE_NAME = EXECUTABLE_NAME
 APP_REGISTRY_NAME = REGISTRY_NAME
-SUPPORTED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif")
+SUPPORTED_EXTENSIONS = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".apng",
+    ".webp",
+    ".avif",
+    ".heic",
+    ".heif",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".gif",
+)
 PROJECT_EXTENSION = ".lieproj"
 PROJECT_PROG_ID = "LightImageEditor.Project"
 CONTEXT_MENU_KEY = r"Software\Classes\SystemFileAssociations\image\shell\LightImageEditor"

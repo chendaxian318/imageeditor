@@ -26,9 +26,13 @@ SUPPORTED_INPUTS = {
     ".tif",
     ".tiff",
     ".gif",
+    ".apng",
+    ".avif",
+    ".heic",
+    ".heif",
 }
 
-SUPPORTED_FORMATS = ("JPEG", "PNG", "WEBP", "BMP", "TIFF")
+SUPPORTED_FORMATS = ("JPEG", "PNG", "WEBP", "AVIF", "BMP", "TIFF")
 _NATURAL_PARTS = re.compile(r"(\d+)")
 
 
@@ -333,7 +337,7 @@ def encode_to_target_size(
 
 def save_kwargs_for(output_format: str, quality: int) -> dict[str, object]:
     kwargs: dict[str, object] = {}
-    if output_format in {"JPEG", "WEBP"}:
+    if output_format in {"JPEG", "WEBP", "AVIF"}:
         kwargs["quality"] = max(1, min(100, int(quality)))
         kwargs["optimize"] = True
     if output_format == "PNG":
@@ -450,13 +454,13 @@ def metadata_save_kwargs(output_format: str, metadata: SourceMetadata | None) ->
     if metadata is None:
         return {}
     kwargs: dict[str, object] = {}
-    if output_format in {"JPEG", "PNG", "WEBP", "TIFF"} and metadata.icc_profile:
+    if output_format in {"JPEG", "PNG", "WEBP", "AVIF", "TIFF"} and metadata.icc_profile:
         kwargs["icc_profile"] = metadata.icc_profile
-    if output_format in {"JPEG", "PNG", "WEBP"} and metadata.exif:
+    if output_format in {"JPEG", "PNG", "WEBP", "AVIF"} and metadata.exif:
         kwargs["exif"] = metadata.exif
     if output_format in {"JPEG", "PNG", "TIFF"} and metadata.dpi:
         kwargs["dpi"] = metadata.dpi
-    if output_format in {"JPEG", "WEBP"} and metadata.xmp:
+    if output_format in {"JPEG", "WEBP", "AVIF"} and metadata.xmp:
         kwargs["xmp"] = metadata.xmp
     if output_format == "PNG" and metadata.xmp:
         png_info = PngImagePlugin.PngInfo()

@@ -18,11 +18,14 @@ from .document import (
     attach_source_metadata,
     replace_orientation_in_exif,
 )
+from .formats import HEIF_EXTENSIONS, AnimationSequence, decode_animation, register_optional_heif
 
 MAX_DECODE_PIXELS = 120_000_000
 MAX_IMAGE_DIMENSION = 100_000
 MAX_ANIMATION_FRAMES = 10_000
-SUPPORTED_DECODE_FORMATS = {"JPEG", "PNG", "WEBP", "BMP", "TIFF", "GIF"}
+SUPPORTED_DECODE_FORMATS = {"JPEG", "PNG", "WEBP", "BMP", "TIFF", "GIF", "AVIF", "HEIF"}
+
+HEIF_AVAILABLE, HEIF_DETAIL = register_optional_heif()
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,12 @@ class ImageLoadFailure(Exception):
 
 def friendly_load_failure(path: str | Path, error: BaseException) -> ImageLoadFailure:
     image_path = Path(path)
+    if image_path.suffix.casefold() in HEIF_EXTENSIONS and not HEIF_AVAILABLE:
+        return ImageLoadFailure(
+            image_path,
+            "optional_codec",
+            "该文件需要可选 HEIF/HEIC 解码插件。请安装 requirements-heif.lock 后重试。",
+        )
     if isinstance(error, FileNotFoundError):
         return ImageLoadFailure(image_path, "missing", "文件已被移动或删除。")
     if isinstance(error, PermissionError):
@@ -195,6 +204,11 @@ class ImageLoader:
     def prefetch(self, paths: Iterable[str | Path]) -> None:
         for path in paths:
             self.load(path)
+
+    def load_animation(self, path: str | Path) -> Future[AnimationSequence]:
+        """Decode an animation after its first frame without blocking Tk."""
+
+        return self._executor.submit(decode_animation, path)
 
     def invalidate(self, path: str | Path) -> None:
         key = self._key(path)

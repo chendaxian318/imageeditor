@@ -13,8 +13,8 @@ substitute for the authoritative licence text distributed by each component.
 - PyInstaller: 6.17.0
 - Source of version data: installed metadata in `.venv` plus `pip freeze --all`
 - Application artifacts checked: `release/LightImageEditor/ImageEditor.exe`,
-  `release/LightImageEditor-Portable-x64-0.5.0.exe` and
-  `release/LightImageEditor-Setup-x64-0.5.0.exe`
+  `release/LightImageEditor-Portable-x64-0.6.0.exe` and
+  `release/LightImageEditor-Setup-x64-0.6.0.exe`
 
 The virtual environment is not a release artifact. Paths below identify the
 authoritative files in the audited local installation so that the release
@@ -32,6 +32,14 @@ process can copy them into a distributable notice bundle.
 | pyinstaller-hooks-contrib | 2026.6 | PyInstaller hook set | Standard hooks GPL-2.0-or-later; runtime hooks Apache-2.0 | `.venv/Lib/site-packages/pyinstaller_hooks_contrib-2026.6.dist-info/licenses/LICENSE` |
 | Inno Setup | 7.0.2 | Windows installer compiler | Free for non-commercial use; commercial use requires a licence | Verified compiler under `.tools/inno`; authoritative terms at `jrsoftware.org` |
 | Compact ICC Profiles | DisplayP3Compat-v4 | Display P3 automated test fixture | CC0-1.0 / public domain dedication | Embedded in `test_v03_safety.py`; source: `saucecontrol/Compact-ICC-Profiles` |
+
+## Optional codec not included in the base installer
+
+`pillow-heif==1.5.0` is pinned separately in `requirements-heif.lock` for users who
+choose HEIF/HEIC support. It is not installed by `build.ps1`, is not part of the
+base dependency closure, and is not bundled in the standard v0.6.0 artifacts.
+Any future release that bundles it must add its licence and the complete native
+`libheif`/codec notice set to the distributed notice bundle.
 
 The PyInstaller exception permits linking or embedding its compiled bootloader
 and related files into another program and distributing that combination

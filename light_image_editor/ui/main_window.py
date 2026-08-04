@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import queue
 import threading
 import tkinter as tk
 import uuid
@@ -13,6 +15,7 @@ from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from PIL import Image, ImageGrab, ImageTk
 
 from image_ops import (
+    SUPPORTED_INPUTS,
     AnimationFlatteningRequired,
     ConflictPolicy,
     EditState,
@@ -29,6 +32,14 @@ from image_ops import (
 )
 
 from ..annotations import AnnotationObject, hit_radius_px, object_at, parse_crop_ratio
+from ..batch import (
+    BatchManifest,
+    BatchPreset,
+    BatchRecipe,
+    BatchRunner,
+    TaskStatus,
+    export_batch_log,
+)
 from ..commands import EditCommand
 from ..document import Document, DocumentState
 from ..files import (
@@ -43,6 +54,7 @@ from ..files import (
     unique_export_path,
     validate_filename_affix,
 )
+from ..formats import AnimationSequence, codec_capabilities, decode_animation, export_animation
 from ..identity import PRODUCT_NAME_ZH
 from ..image_loader import ImageLoader, ImageLoadFailure
 from ..metadata import image_properties
@@ -140,6 +152,16 @@ class ImageEditorApp(tk.Tk):
         self.crop_drag_start_box: tuple[int, int, int, int] | None = None
         self.crop_action = "new"
         self.batch_cancel_requested = False
+        self.batch_runner: BatchRunner | None = None
+        self.batch_manifest: BatchManifest | None = None
+        self._batch_ui_queue: queue.Queue[tuple[bool, BatchManifest]] = queue.Queue()
+        self.batch_manifest_path = self.settings_store.path.with_name(
+            ".light_image_editor_batch.json"
+        )
+        self._animation_sequence: AnimationSequence | None = None
+        self._animation_index = 0
+        self._animation_job: str | None = None
+        self._animation_generation = 0
         self._ratio_lock = False
         self._preview_job: str | None = None
         self._preview_generation = 0
@@ -181,6 +203,12 @@ class ImageEditorApp(tk.Tk):
         self.preserve_metadata_var = tk.BooleanVar(value=True)
         self.backup_on_overwrite_var = tk.BooleanVar(value=True)
         self.export_preset_var = tk.StringVar(value="自定义")
+        self.batch_concurrency_var = tk.IntVar(value=2)
+        self.batch_memory_var = tk.IntVar(value=512)
+        self.batch_rename_template_var = tk.StringVar(value="{stem}_{index:04d}")
+        self.batch_conflict_var = tk.StringVar(value="unique")
+        self.batch_strip_metadata_var = tk.BooleanVar(value=False)
+        self.batch_preserve_animation_var = tk.BooleanVar(value=True)
 
         self.rotation = 0
         self.flip_h = False
@@ -264,6 +292,7 @@ class ImageEditorApp(tk.Tk):
         self._autosave_job = self.after(2000, self._autosave_session)
         self._source_monitor_job = self.after(2000, self._monitor_source_file)
         self.after(250, self._offer_session_recovery)
+        self.after(650, self._offer_batch_recovery)
 
     def _build_ui(self) -> None:
         style = ttk.Style(self)
@@ -470,7 +499,7 @@ class ImageEditorApp(tk.Tk):
         fmt = ttk.Combobox(
             export_box,
             textvariable=self.format_var,
-            values=("JPEG", "PNG", "WEBP", "BMP", "TIFF"),
+            values=("JPEG", "PNG", "WEBP", "AVIF", "BMP", "TIFF"),
             state="readonly",
         )
         fmt.grid(row=1, column=1, sticky="ew", pady=5)
@@ -915,6 +944,7 @@ class ImageEditorApp(tk.Tk):
         )
         file_menu.add_command(label="批量处理文件...", command=self.batch_process)
         file_menu.add_command(label="批量处理文件夹...", command=self.batch_process_folder)
+        file_menu.add_command(label="导出当前动画...", command=self.export_current_animation)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.close)
         self.menu_bar.add_cascade(label="文件", menu=file_menu)
@@ -1777,6 +1807,14 @@ class ImageEditorApp(tk.Tk):
         self.slideshow_loop_var.set(bool(data.get("slideshow_loop", True)))
         self.preserve_metadata_var.set(bool(data.get("preserve_metadata", True)))
         self.backup_on_overwrite_var.set(bool(data.get("backup_on_overwrite", True)))
+        self.batch_concurrency_var.set(max(1, min(16, int(data.get("batch_concurrency", 2)))))
+        self.batch_memory_var.set(max(32, int(data.get("batch_memory_mb", 512))))
+        self.batch_rename_template_var.set(
+            str(data.get("batch_rename_template", "{stem}_{index:04d}"))
+        )
+        self.batch_conflict_var.set(str(data.get("batch_conflict_policy", "unique")))
+        self.batch_strip_metadata_var.set(bool(data.get("batch_strip_metadata", False)))
+        self.batch_preserve_animation_var.set(bool(data.get("batch_preserve_animation", True)))
         preset = str(data.get("export_preset", "自定义"))
         self.export_preset_var.set(preset if preset in EXPORT_PRESETS else "自定义")
         geometry = data.get("window_geometry", "")
@@ -1808,6 +1846,12 @@ class ImageEditorApp(tk.Tk):
             "slideshow_loop": self.slideshow_loop_var.get(),
             "preserve_metadata": self.preserve_metadata_var.get(),
             "backup_on_overwrite": self.backup_on_overwrite_var.get(),
+            "batch_concurrency": self.batch_concurrency_var.get(),
+            "batch_memory_mb": self.batch_memory_var.get(),
+            "batch_rename_template": self.batch_rename_template_var.get(),
+            "batch_conflict_policy": self.batch_conflict_var.get(),
+            "batch_strip_metadata": self.batch_strip_metadata_var.get(),
+            "batch_preserve_animation": self.batch_preserve_animation_var.get(),
             "export_preset": self.export_preset_var.get(),
             "window_geometry": self._saved_geometry or self.geometry(),
         }
@@ -1824,7 +1868,11 @@ class ImageEditorApp(tk.Tk):
         paths = filedialog.askopenfilenames(
             title="选择一张或多张图片",
             filetypes=[
-                ("图片文件", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.gif"),
+                (
+                    "图片文件",
+                    "*.jpg *.jpeg *.png *.apng *.webp *.avif *.heic *.heif "
+                    "*.bmp *.tif *.tiff *.gif",
+                ),
                 ("所有文件", "*.*"),
             ],
         )
@@ -1851,7 +1899,11 @@ class ImageEditorApp(tk.Tk):
                 title="重新定位项目引用的原图",
                 initialdir=str(project_path.parent),
                 filetypes=[
-                    ("图片文件", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.gif"),
+                    (
+                        "图片文件",
+                        "*.jpg *.jpeg *.png *.apng *.webp *.avif *.heic *.heif "
+                        "*.bmp *.tif *.tiff *.gif",
+                    ),
                     ("所有文件", "*.*"),
                 ],
             )
@@ -1988,6 +2040,7 @@ class ImageEditorApp(tk.Tk):
         notify_error: bool = False,
         skip_direction: int = 0,
     ) -> None:
+        self._stop_animation_playback()
         self._load_generation += 1
         generation = self._load_generation
         self.status_var.set(f"正在后台解码：{path.name}")
@@ -2044,6 +2097,8 @@ class ImageEditorApp(tk.Tk):
         self._remember_file(path)
         self.status_var.set(f"图片已载入 · {self.navigation.source_label or path.parent}")
         self.image_loader.prefetch(self.navigation.neighbors())
+        if self.document.metadata.is_animated:
+            self._begin_animation_playback(path)
 
     def _handle_load_failure(
         self,
@@ -2080,6 +2135,112 @@ class ImageEditorApp(tk.Tk):
         if self.document is not None and self.document.metadata.is_animated:
             animation = f"  动画图片 · {self.document.metadata.frame_count} 帧"
         return f"{name}{suffix}  {self.original.width} x {self.original.height}{animation}"
+
+    def _begin_animation_playback(self, path: Path) -> None:
+        self._animation_generation += 1
+        generation = self._animation_generation
+        future = self.image_loader.load_animation(path)
+        self.after(20, self._poll_animation_load, generation, future)
+
+    def _poll_animation_load(
+        self,
+        generation: int,
+        future: Future[AnimationSequence],
+    ) -> None:
+        if generation != self._animation_generation:
+            return
+        if not future.done():
+            self.after(20, self._poll_animation_load, generation, future)
+            return
+        try:
+            self._animation_sequence = future.result()
+        except Exception as error:
+            self.status_var.set(f"动画首帧可查看，但多帧播放不可用：{error}")
+            return
+        self._animation_index = 0
+        self._show_animation_frame()
+
+    def _show_animation_frame(self) -> None:
+        sequence = self._animation_sequence
+        if sequence is None or self.document is None or self.document.timeline.cursor:
+            return
+        frame = sequence.frames[self._animation_index]
+        canvas_w = max(100, self.canvas.winfo_width())
+        canvas_h = max(100, self.canvas.winfo_height())
+        zoom = self.zoom_mode.get()
+        scale = (
+            min(canvas_w / frame.width, canvas_h / frame.height, 1.0)
+            if zoom == "适应"
+            else int(zoom.replace("%", "")) / 100
+        )
+        size = (max(1, round(frame.width * scale)), max(1, round(frame.height * scale)))
+        display = (
+            frame.copy() if size == frame.size else frame.resize(size, Image.Resampling.BILINEAR)
+        )
+        display = color_manage_for_display(display, self.document.metadata.icc_profile)
+        self._display_preview(
+            PreviewFrame(working=frame, image=display, scale=display.width / frame.width),
+            canvas_w,
+            canvas_h,
+        )
+        duration = sequence.durations[self._animation_index]
+        self._animation_index = (self._animation_index + 1) % sequence.frame_count
+        self._animation_job = self.after(duration, self._show_animation_frame)
+
+    def _stop_animation_playback(self) -> None:
+        self._animation_generation += 1
+        if self._animation_job is not None:
+            try:
+                self.after_cancel(self._animation_job)
+            except tk.TclError:
+                pass
+            self._animation_job = None
+        if self._animation_sequence is not None:
+            for frame in self._animation_sequence.frames:
+                frame.close()
+        self._animation_sequence = None
+        self._animation_index = 0
+
+    def export_current_animation(self) -> None:
+        if (
+            self.image_path is None
+            or self.document is None
+            or not self.document.metadata.is_animated
+        ):
+            messagebox.showinfo(APP_NAME, "当前文件不是可导出的动画图片。")
+            return
+        target = filedialog.asksaveasfilename(
+            title="导出动画",
+            defaultextension=".webp",
+            initialfile=f"{self.image_path.stem}_animated.webp",
+            filetypes=[
+                ("动画 WebP", "*.webp"),
+                ("动画 GIF", "*.gif"),
+                ("APNG", "*.png *.apng"),
+            ],
+        )
+        if not target:
+            return
+        suffix = Path(target).suffix.casefold()
+        output_format = (
+            "GIF" if suffix == ".gif" else ("PNG" if suffix in {".png", ".apng"} else "WEBP")
+        )
+        try:
+            sequence = self._animation_sequence or decode_animation(self.image_path)
+            timeline = self.document.timeline
+            saved = export_animation(
+                sequence,
+                target,
+                output_format,
+                quality=self.quality_var.get(),
+                transform=lambda frame: render_image(frame, timeline),
+            )
+        except Exception as error:
+            messagebox.showerror(APP_NAME, f"动画导出失败：{error}")
+            return
+        self._remember_export_directory(saved.parent)
+        self.status_var.set(f"动画已导出：{saved}")
+        messagebox.showinfo(APP_NAME, f"动画导出完成：\n{saved}")
 
     def navigate_folder(self, direction: int, *, wrap: bool = True) -> bool:
         if len(self.navigation.files) <= 1:
@@ -2129,16 +2290,7 @@ class ImageEditorApp(tk.Tk):
         if isinstance(clipboard, list):
             for item in clipboard:
                 path = Path(item)
-                if path.exists() and path.suffix.lower() in {
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                    ".webp",
-                    ".bmp",
-                    ".tif",
-                    ".tiff",
-                    ".gif",
-                }:
+                if path.exists() and path.suffix.lower() in SUPPORTED_INPUTS:
                     self.open_paths([path], confirm=False)
                     return
 
@@ -2637,7 +2789,11 @@ class ImageEditorApp(tk.Tk):
         paths = filedialog.askopenfilenames(
             title="选择要批量处理的图片",
             filetypes=[
-                ("图片文件", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.gif"),
+                (
+                    "图片文件",
+                    "*.jpg *.jpeg *.png *.apng *.webp *.avif *.heic *.heif "
+                    "*.bmp *.tif *.tiff *.gif",
+                ),
                 ("所有文件", "*.*"),
             ],
         )
@@ -2663,21 +2819,318 @@ class ImageEditorApp(tk.Tk):
         options = self._read_options(allow_without_image=True)
         if options is None:
             return
-        affixes = self._read_filename_affixes()
-        if affixes is None:
-            return
         files = iter_image_files(paths)
         if not files:
             messagebox.showinfo(APP_NAME, "没有找到可处理的图片。")
             return
+        self._open_batch_setup(files, Path(output_dir), options, source_root)
+
+    def _open_batch_setup(
+        self,
+        files: list[Path],
+        output_dir: Path,
+        options: ExportOptions,
+        source_root: Path | None,
+    ) -> None:
+        window = tk.Toplevel(self)
+        window.title(f"批处理设置 · {len(files)} 个文件")
+        window.geometry("620x560")
+        window.transient(self)
+        window.grab_set()
+        body = ttk.Frame(window, padding=16)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        output_format = tk.StringVar(value=options.output_format)
+        quality = tk.IntVar(value=options.quality)
+        max_width = tk.StringVar(value=str(options.max_width or ""))
+        max_height = tk.StringVar(value=str(options.max_height or ""))
+        watermark = tk.StringVar(value=options.watermark_text)
+        fields = (
+            (
+                "输出格式",
+                ttk.Combobox(
+                    body,
+                    textvariable=output_format,
+                    values=("JPEG", "PNG", "WEBP", "AVIF", "BMP", "TIFF"),
+                    state="readonly",
+                ),
+            ),
+            ("质量", ttk.Spinbox(body, from_=1, to=100, textvariable=quality)),
+            ("最大宽度", ttk.Entry(body, textvariable=max_width)),
+            ("最大高度", ttk.Entry(body, textvariable=max_height)),
+            ("文字水印", ttk.Entry(body, textvariable=watermark)),
+            ("重命名模板", ttk.Entry(body, textvariable=self.batch_rename_template_var)),
+            (
+                "并发任务",
+                ttk.Spinbox(body, from_=1, to=16, textvariable=self.batch_concurrency_var),
+            ),
+            (
+                "内存上限 MB",
+                ttk.Spinbox(
+                    body, from_=32, to=8192, increment=32, textvariable=self.batch_memory_var
+                ),
+            ),
+            (
+                "同名策略",
+                ttk.Combobox(
+                    body,
+                    textvariable=self.batch_conflict_var,
+                    values=("unique", "error", "overwrite"),
+                    state="readonly",
+                ),
+            ),
+        )
+        for row, (label, control) in enumerate(fields):
+            ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", pady=5)
+            control.grid(row=row, column=1, sticky="ew", pady=5)
+        ttk.Checkbutton(
+            body,
+            text="清理 EXIF / ICC / DPI / XMP 元数据",
+            variable=self.batch_strip_metadata_var,
+        ).grid(row=9, column=1, sticky="w", pady=5)
+        ttk.Checkbutton(
+            body,
+            text="GIF / APNG / WebP 保持动画",
+            variable=self.batch_preserve_animation_var,
+        ).grid(row=10, column=1, sticky="w", pady=5)
+        capabilities = codec_capabilities()
+        codec_text = "AVIF 可用" if capabilities.avif else "AVIF 不可用"
+        codec_text += "；HEIF 插件可用" if capabilities.heif else "；HEIF 插件未安装（可选）"
+        ttk.Label(body, text=codec_text).grid(row=11, column=0, columnspan=2, sticky="w", pady=5)
+        ttk.Label(
+            body,
+            text="模板变量：{name} {stem} {ext} {index:04d} {date} {datetime}",
+        ).grid(row=12, column=0, columnspan=2, sticky="w", pady=5)
+
+        def build_recipe() -> BatchRecipe:
+            recipe = BatchRecipe(
+                output_format=output_format.get(),
+                quality=quality.get(),
+                max_width=int(max_width.get()) if max_width.get().strip() else None,
+                max_height=int(max_height.get()) if max_height.get().strip() else None,
+                watermark_text=watermark.get().strip(),
+                watermark_position=options.watermark_position,
+                watermark_opacity=options.watermark_opacity,
+                watermark_size_percent=options.watermark_size_percent,
+                strip_metadata=self.batch_strip_metadata_var.get(),
+                rename_template=self.batch_rename_template_var.get(),
+                conflict_policy=self.batch_conflict_var.get(),
+                preserve_animation=self.batch_preserve_animation_var.get(),
+            )
+            recipe.validate()
+            return recipe
+
+        def import_preset() -> None:
+            path = filedialog.askopenfilename(
+                parent=window,
+                title="导入批处理预设",
+                filetypes=[("批处理预设", "*.liebatchpreset"), ("JSON", "*.json")],
+            )
+            if not path:
+                return
+            try:
+                preset = BatchPreset.load(path)
+            except Exception as error:
+                messagebox.showerror(APP_NAME, f"预设导入失败：{error}", parent=window)
+                return
+            recipe = preset.recipe
+            output_format.set(recipe.output_format)
+            quality.set(recipe.quality)
+            max_width.set(str(recipe.max_width or ""))
+            max_height.set(str(recipe.max_height or ""))
+            watermark.set(recipe.watermark_text)
+            self.batch_rename_template_var.set(recipe.rename_template)
+            self.batch_conflict_var.set(recipe.conflict_policy)
+            self.batch_strip_metadata_var.set(recipe.strip_metadata)
+            self.batch_preserve_animation_var.set(recipe.preserve_animation)
+
+        def export_preset() -> None:
+            path = filedialog.asksaveasfilename(
+                parent=window,
+                title="导出批处理预设",
+                defaultextension=".liebatchpreset",
+                filetypes=[("批处理预设", "*.liebatchpreset")],
+            )
+            if not path:
+                return
+            try:
+                BatchPreset(Path(path).stem, build_recipe()).save(path)
+            except Exception as error:
+                messagebox.showerror(APP_NAME, f"预设导出失败：{error}", parent=window)
+
+        def start() -> None:
+            try:
+                recipe = build_recipe()
+            except (TypeError, ValueError, tk.TclError) as error:
+                messagebox.showerror(APP_NAME, f"批处理设置无效：{error}", parent=window)
+                return
+            window.destroy()
+            self._launch_batch(files, output_dir, recipe, source_root)
+
+        actions = ttk.Frame(body)
+        actions.grid(row=13, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        ttk.Button(actions, text="导入预设", command=import_preset).pack(side="left", padx=4)
+        ttk.Button(actions, text="导出预设", command=export_preset).pack(side="left", padx=4)
+        ttk.Button(actions, text="取消", command=window.destroy).pack(side="left", padx=4)
+        ttk.Button(actions, text="开始处理", style="Accent.TButton", command=start).pack(
+            side="left", padx=4
+        )
+
+    def _launch_batch(
+        self,
+        files: list[Path],
+        output_dir: Path,
+        recipe: BatchRecipe,
+        source_root: Path | None,
+    ) -> None:
+        manifest = BatchManifest.create(
+            files,
+            output_dir,
+            recipe,
+            concurrency=self.batch_concurrency_var.get(),
+            memory_limit_mb=self.batch_memory_var.get(),
+            source_root=source_root,
+        )
+        if manifest.same_directory_detected:
+            self.status_var.set("已检测到输入输出同目录；同路径覆盖会被安全阻止")
+        self.batch_manifest = manifest
         self._save_config()
-        self.status_var.set(f"正在批量处理 {len(files)} 张图片...")
-        self._open_batch_progress(len(files))
-        threading.Thread(
-            target=self._run_batch,
-            args=(files, Path(output_dir), options, source_root, affixes),
-            daemon=True,
-        ).start()
+        self._run_batch_manifest()
+
+    def _run_batch_manifest(self) -> None:
+        manifest = self.batch_manifest
+        if manifest is None:
+            return
+        self.batch_runner = BatchRunner(
+            manifest,
+            self.batch_manifest_path,
+            progress=lambda state: self._batch_ui_queue.put((False, state)),
+        )
+        self._open_batch_progress(len(manifest.tasks))
+        self.batch_window.geometry("720x210")
+        self.status_var.set(f"正在批量处理 {len(manifest.tasks)} 个文件...")
+        threading.Thread(target=self._execute_batch_manifest, daemon=True).start()
+        self.after(40, self._poll_batch_ui_queue)
+
+    def _execute_batch_manifest(self) -> None:
+        runner = self.batch_runner
+        if runner is None:
+            return
+        manifest = runner.run()
+        self._batch_ui_queue.put((True, manifest))
+
+    def _poll_batch_ui_queue(self) -> None:
+        completed = False
+        while True:
+            try:
+                is_complete, manifest = self._batch_ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            if is_complete:
+                self._finish_advanced_batch(manifest)
+                completed = True
+            else:
+                self._update_advanced_batch_progress(manifest)
+        if not completed and self.batch_runner is not None:
+            self.after(40, self._poll_batch_ui_queue)
+
+    def _update_advanced_batch_progress(self, manifest: BatchManifest) -> None:
+        counts = manifest.counts()
+        finished = (
+            counts[TaskStatus.SUCCEEDED.value]
+            + counts[TaskStatus.FAILED.value]
+            + counts[TaskStatus.CANCELLED.value]
+        )
+        self._update_batch_progress(
+            finished,
+            len(manifest.tasks),
+            f"成功 {counts[TaskStatus.SUCCEEDED.value]} · "
+            f"失败 {counts[TaskStatus.FAILED.value]} · "
+            f"取消 {counts[TaskStatus.CANCELLED.value]}",
+        )
+
+    def _finish_advanced_batch(self, manifest: BatchManifest) -> None:
+        self.batch_manifest = manifest
+        self.batch_runner = None
+        counts = manifest.counts()
+        ok = counts[TaskStatus.SUCCEEDED.value]
+        failed = counts[TaskStatus.FAILED.value]
+        cancelled = counts[TaskStatus.CANCELLED.value]
+        input_bytes = sum(task.input_bytes for task in manifest.tasks)
+        output_bytes = sum(task.output_bytes for task in manifest.tasks)
+        savings = self._batch_savings_text(input_bytes, output_bytes)
+        self._finish_batch_progress(
+            ok, failed + cancelled, len(manifest.tasks), Path(manifest.output_dir), savings
+        )
+        self.bell()
+        peak = manifest.peak_reserved_bytes / 1024 / 1024
+        self.status_var.set(
+            f"批处理完成：成功 {ok}，失败 {failed}，取消 {cancelled}，峰值预算 {peak:.1f} MB"
+        )
+        if hasattr(self, "batch_action_frame"):
+            for child in self.batch_action_frame.winfo_children():
+                child.destroy()
+            actions = (
+                ("重试失败项", self._retry_batch_failures),
+                ("再次运行", self._rerun_batch),
+                ("导出日志", self._export_batch_log_dialog),
+                ("打开输出", lambda: self._open_folder(Path(manifest.output_dir))),
+                ("关闭", self.batch_window.destroy),
+            )
+            for column, (label, command) in enumerate(actions):
+                ttk.Button(self.batch_action_frame, text=label, command=command).grid(
+                    row=0, column=column, padx=4
+                )
+        summary = f"成功 {ok} 个，失败 {failed} 个，取消 {cancelled} 个。"
+        if failed or cancelled:
+            messagebox.showwarning(APP_NAME, summary + "\n可在进度窗口重试或导出错误日志。")
+        else:
+            messagebox.showinfo(APP_NAME, summary)
+
+    def _retry_batch_failures(self) -> None:
+        if self.batch_manifest is None or not self.batch_manifest.retry_failed():
+            messagebox.showinfo(APP_NAME, "没有可重试的任务。")
+            return
+        self._run_batch_manifest()
+
+    def _rerun_batch(self) -> None:
+        if self.batch_manifest is None:
+            return
+        self.batch_manifest.restart_all()
+        self._run_batch_manifest()
+
+    def _export_batch_log_dialog(self) -> None:
+        if self.batch_manifest is None:
+            return
+        target = filedialog.asksaveasfilename(
+            title="导出批处理日志",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("JSON", "*.json")],
+        )
+        if not target:
+            return
+        try:
+            export_batch_log(self.batch_manifest, target)
+        except OSError as error:
+            messagebox.showerror(APP_NAME, f"日志导出失败：{error}")
+            return
+        self.status_var.set(f"批处理日志已导出：{target}")
+
+    def _offer_batch_recovery(self) -> None:
+        if not self.batch_manifest_path.exists() or self.batch_runner is not None:
+            return
+        try:
+            manifest = BatchManifest.load(self.batch_manifest_path)
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return
+        if manifest.complete:
+            return
+        if messagebox.askyesno(
+            APP_NAME,
+            "检测到上次未完成的批处理任务，是否从待处理项继续？",
+        ):
+            self.batch_manifest = manifest
+            self._run_batch_manifest()
 
     def _reveal_file(self, path: Path) -> None:
         reveal_file(path)
@@ -2748,6 +3201,8 @@ class ImageEditorApp(tk.Tk):
         self.after(0, finish)
 
     def _open_batch_progress(self, total: int) -> None:
+        if hasattr(self, "batch_window") and self.batch_window.winfo_exists():
+            self.batch_window.destroy()
         self.batch_cancel_requested = False
         self.batch_window = tk.Toplevel(self)
         self.batch_window.title("批量处理")
@@ -2805,6 +3260,8 @@ class ImageEditorApp(tk.Tk):
 
     def _cancel_batch(self) -> None:
         self.batch_cancel_requested = True
+        if self.batch_runner is not None:
+            self.batch_runner.cancel()
         if hasattr(self, "batch_progress_text"):
             self.batch_progress_text.set("正在取消剩余任务...")
 
@@ -2881,6 +3338,9 @@ class ImageEditorApp(tk.Tk):
 
     def _shutdown_services(self) -> None:
         self.stop_slideshow()
+        self._stop_animation_playback()
+        if self.batch_runner is not None:
+            self.batch_runner.cancel()
         if self._autosave_job is not None:
             self.after_cancel(self._autosave_job)
             self._autosave_job = None

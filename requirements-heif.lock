@@ -1,0 +1,2 @@
+# Optional HEIF/HEIC codec. This file is deliberately excluded from the base installer.
+pillow-heif==1.5.0
