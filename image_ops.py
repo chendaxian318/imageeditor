@@ -265,12 +265,17 @@ def estimate_save_size(
     if timeline is not None:
         from light_image_editor.renderer import render_image
 
-        result = render_image(image, timeline)
+        prepared = render_image(image, timeline)
     else:
-        result = prepare_image(image, options)
+        prepared = prepare_image(image, options)
     output_format = normalize_format(options.output_format)
-    result = convert_for_format(result, output_format)
-    return len(encode_image(result, output_format, options))
+    converted = convert_for_format(prepared, output_format)
+    try:
+        return len(encode_image(converted, output_format, options))
+    finally:
+        if converted is not prepared:
+            converted.close()
+        prepared.close()
 
 
 def encode_image(
@@ -431,16 +436,21 @@ def save_image(
     if timeline is not None:
         from light_image_editor.renderer import render_image
 
-        result = render_image(image, timeline)
+        prepared = render_image(image, timeline)
     else:
-        result = prepare_image(image, options)
-    result = convert_for_format(result, output_format)
+        prepared = prepare_image(image, options)
+    converted = convert_for_format(prepared, output_format)
     metadata_kwargs = (
         metadata_save_kwargs(output_format, metadata)
         if options.preserve_metadata and metadata is not None
         else {}
     )
-    encoded = encode_image(result, output_format, options, metadata_kwargs)
+    try:
+        encoded = encode_image(converted, output_format, options, metadata_kwargs)
+    finally:
+        if converted is not prepared:
+            converted.close()
+        prepared.close()
     _atomic_replace_bytes(
         target_path,
         encoded,

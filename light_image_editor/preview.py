@@ -18,6 +18,15 @@ _DISPLAY_PROFILE = ImageCms.createProfile("sRGB")
 
 
 @dataclass(frozen=True)
+class SplitPreviewLayout:
+    """Geometry of two complete before/after panels inside a preview bitmap."""
+
+    divider_x: int
+    before_panel: tuple[int, int, int, int]
+    after_panel: tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
 class PreviewFrame:
     """A UI-sized bitmap and the working image coordinates it represents."""
 
@@ -25,6 +34,7 @@ class PreviewFrame:
     image: Image.Image
     scale: float
     owns_working: bool = False
+    split_layout: SplitPreviewLayout | None = None
 
     def close(self) -> None:
         """Release worker-owned pixels when a stale preview is discarded."""
@@ -42,6 +52,7 @@ def render_preview(
     canvas_size: tuple[int, int],
     zoom_percent: int | None,
     timeline: EditTimeline | None = None,
+    split_compare: bool = False,
 ) -> PreviewFrame:
     """Apply edits and resize without touching Tk from the worker thread."""
 
@@ -60,6 +71,15 @@ def render_preview(
 
     canvas_w = max(100, canvas_size[0])
     canvas_h = max(100, canvas_size[1])
+    if split_compare and not compare_original:
+        return _render_split_preview(
+            original,
+            working,
+            owns_working=owns_working,
+            canvas_size=(canvas_w, canvas_h),
+            zoom_percent=zoom_percent,
+            icc_profile=metadata_from_image(original).icc_profile,
+        )
     if zoom_percent is None:
         scale = min(canvas_w / working.width, canvas_h / working.height, 1.0)
     else:
@@ -77,12 +97,107 @@ def render_preview(
             Image.Resampling.LANCZOS,
             reducing_gap=3.0 if scale < 1.0 else None,
         )
-    display = color_manage_for_display(display, metadata_from_image(original).icc_profile)
+    managed = color_manage_for_display(display, metadata_from_image(original).icc_profile)
+    if managed is not display:
+        display.close()
+    display = managed
     return PreviewFrame(
         working=working,
         image=display,
         scale=display.width / working.width,
         owns_working=owns_working,
+    )
+
+
+def _display_copy(
+    image: Image.Image,
+    size: tuple[int, int],
+    icc_profile: bytes | None,
+) -> Image.Image:
+    if size == image.size:
+        resized = image.copy()
+    else:
+        resized = image.resize(
+            size,
+            Image.Resampling.LANCZOS,
+            reducing_gap=3.0 if size[0] < image.width or size[1] < image.height else None,
+        )
+    managed = color_manage_for_display(resized, icc_profile)
+    if managed is not resized:
+        resized.close()
+    return managed
+
+
+def _paste_with_alpha(canvas: Image.Image, image: Image.Image, position: tuple[int, int]) -> None:
+    if "A" in image.getbands():
+        rgb = image.convert("RGB")
+        alpha = image.getchannel("A")
+        try:
+            canvas.paste(rgb, position, alpha)
+        finally:
+            rgb.close()
+            alpha.close()
+    else:
+        canvas.paste(image, position)
+
+
+def _render_split_preview(
+    original: Image.Image,
+    working: Image.Image,
+    *,
+    owns_working: bool,
+    canvas_size: tuple[int, int],
+    zoom_percent: int | None,
+    icc_profile: bytes | None,
+) -> PreviewFrame:
+    """Render two complete images at one common scale in equal-width panels."""
+
+    gap = 8
+    max_width = max(original.width, working.width)
+    max_height = max(original.height, working.height)
+    if zoom_percent is None:
+        available_panel_width = max(1, (canvas_size[0] - gap) // 2)
+        scale = min(available_panel_width / max_width, canvas_size[1] / max_height, 1.0)
+    else:
+        scale = zoom_percent / 100.0
+    panel_width = max(1, round(max_width * scale))
+    panel_height = max(1, round(max_height * scale))
+    before_size = (
+        max(1, round(original.width * scale)),
+        max(1, round(original.height * scale)),
+    )
+    after_size = (
+        max(1, round(working.width * scale)),
+        max(1, round(working.height * scale)),
+    )
+    before = _display_copy(original, before_size, icc_profile)
+    after = _display_copy(working, after_size, icc_profile)
+    combined = Image.new("RGB", (panel_width * 2 + gap, panel_height), "#1f232b")
+    before_position = (
+        (panel_width - before.width) // 2,
+        (panel_height - before.height) // 2,
+    )
+    after_position = (
+        panel_width + gap + (panel_width - after.width) // 2,
+        (panel_height - after.height) // 2,
+    )
+    try:
+        _paste_with_alpha(combined, before, before_position)
+        _paste_with_alpha(combined, after, after_position)
+    finally:
+        before.close()
+        after.close()
+    layout = SplitPreviewLayout(
+        divider_x=panel_width + gap // 2,
+        before_panel=(0, 0, panel_width, panel_height),
+        after_panel=(panel_width + gap, 0, panel_width * 2 + gap, panel_height),
+    )
+    return PreviewFrame(
+        working=working,
+        image=combined,
+        scale=scale,
+        owns_working=owns_working,
+        split_layout=layout,
     )
 
 
@@ -127,6 +242,7 @@ class PreviewRenderer:
         canvas_size: tuple[int, int],
         zoom_percent: int | None,
         timeline: EditTimeline | None = None,
+        split_compare: bool = False,
     ) -> Future[PreviewFrame]:
         with self._lock:
             if self._pending is not None and not self._pending.running():
@@ -139,6 +255,7 @@ class PreviewRenderer:
                 canvas_size=canvas_size,
                 zoom_percent=zoom_percent,
                 timeline=timeline,
+                split_compare=split_compare,
             )
             self._pending = future
             return future

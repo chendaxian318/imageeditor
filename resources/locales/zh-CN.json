@@ -57,7 +57,8 @@
     "accessibility_panel": "编辑参数面板",
     "accessibility_status": "状态栏",
     "accessibility_thumbnails": "当前目录图片缩略图列表",
-    "thumbnail_directory": "当前目录"
+    "thumbnail_directory": "当前目录",
+    "split_compare_hint": "左：编辑前  右：编辑后"
   },
   "replacements": {
     "app": "轻量图片编辑器",

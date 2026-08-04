@@ -57,7 +57,8 @@
     "accessibility_panel": "Editing options panel",
     "accessibility_status": "Status bar",
     "accessibility_thumbnails": "Image thumbnails in the current folder",
-    "thumbnail_directory": "Current folder"
+    "thumbnail_directory": "Current folder",
+    "split_compare_hint": "Left: Before  Right: After"
   },
   "replacements": {
     "app": "Light Image Editor",

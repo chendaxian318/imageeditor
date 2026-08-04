@@ -20,7 +20,10 @@ def migrate_settings(data: dict[str, Any]) -> dict[str, Any]:
     """Return a forward-compatible copy while preserving all legacy user data."""
 
     migrated = dict(data)
-    version = int(migrated.get("schema_version", 0))
+    try:
+        version = int(migrated.get("schema_version", 0))
+    except (TypeError, ValueError, OverflowError):
+        version = 0
     if version > SETTINGS_SCHEMA_VERSION:
         return migrated
     if version == 0:
@@ -44,6 +47,8 @@ class SettingsStore:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except Exception:
+            return {}
+        if not isinstance(data, dict):
             return {}
         return cast(dict[str, Any], data)
 

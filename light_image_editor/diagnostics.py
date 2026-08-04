@@ -125,6 +125,7 @@ class CrashStore:
             "traceback": redact_text(
                 "".join(traceback.format_exception(exception_type, exception, traceback_value))
             ),
+            "acknowledged": False,
             "uploaded": False,
         }
         target = self.root / f"{identifier}.json"
@@ -139,15 +140,28 @@ class CrashStore:
         pending: list[Path] = []
         for path in sorted(self.root.glob("*.json")):
             try:
-                if not json.loads(path.read_text(encoding="utf-8")).get("uploaded", False):
+                if not json.loads(path.read_text(encoding="utf-8")).get("acknowledged", False):
                     pending.append(path)
             except (OSError, ValueError, TypeError):
                 pending.append(path)
         return pending
 
+    def reports(self) -> list[Path]:
+        """Return all retained crash records, including acknowledged ones."""
+
+        if not self.root.exists():
+            return []
+        return sorted(self.root.glob("*.json"))
+
     def mark_uploaded(self, path: Path) -> None:
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["uploaded"] = True
+        payload["acknowledged"] = True
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def acknowledge(self, path: Path) -> None:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["acknowledged"] = True
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -201,7 +215,7 @@ class DiagnosticReporter:
                     archive.writestr(f"logs/{path.name}", redact_text(path.read_text("utf-8")))
                 except OSError:
                     continue
-            for path in self.crashes.pending():
+            for path in self.crashes.reports():
                 try:
                     archive.writestr(f"crashes/{path.name}", redact_text(path.read_text("utf-8")))
                 except OSError:

@@ -9,7 +9,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, cast
 
-from light_image_editor.diagnostics import DiagnosticReporter, upload_crash_report
+from light_image_editor.diagnostics import CrashStore, DiagnosticReporter, upload_crash_report
 from light_image_editor.settings import SettingsStore
 from light_image_editor.update_security import RsaPublicKey, sign_rs256
 from light_image_editor.updater import (
@@ -127,6 +127,21 @@ class UpdateSecurityTests(unittest.TestCase):
 
 
 class DiagnosticsAndMigrationTests(unittest.TestCase):
+    def test_acknowledged_crash_stops_prompting_but_remains_exportable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = CrashStore(root)
+            report = store.record(RuntimeError, RuntimeError("boom"), None)
+            self.assertEqual(store.pending(), [report])
+            store.acknowledge(report)
+            self.assertEqual(store.pending(), [])
+            self.assertEqual(store.reports(), [report])
+
+            target = root / "diagnostics.zip"
+            DiagnosticReporter(root).export(target, {})
+            with zipfile.ZipFile(target) as archive:
+                self.assertTrue(any(name.startswith("crashes/") for name in archive.namelist()))
+
     def test_report_redacts_private_values_and_excludes_recent_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

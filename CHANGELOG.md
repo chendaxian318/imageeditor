@@ -1,6 +1,16 @@
 # Changelog
 
-## 1.1.0 — in development
+## 1.1.1 — 2026-08-04
+
+- Reworked split comparison to show complete before/after images in equal panels without aspect-ratio distortion.
+- Made Original/50%/25% size presets idempotent and based on the rotated/cropped content before its resize stage.
+- Fixed crashes from a one-point freehand preview and from preview images bound to the wrong Tk interpreter.
+- Fixed empty-state batch startup, quick-export dirty-state loss, stale file actions after a failed load, and thumbnail synchronization after project/clipboard/session activation.
+- Prevented global paste/apply/compare shortcuts from stealing input in text fields.
+- Hardened corrupted settings, crash-record acknowledgement, temporary image lifetimes, preview callback shutdown and benchmark service cleanup.
+- Completed the v1.1.1 functional audit: Ruff, Mypy, 143 tests, performance smoke and quick soak all pass.
+
+## 1.1.0 — 2026-08-04
 
 - Added a left thumbnail sidebar for the current directory or explicit multi-file browsing sequence.
 - Kept thumbnail decoding off the Tk thread and virtualized the list so only visible rows plus a small buffer are rendered.

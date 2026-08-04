@@ -350,6 +350,11 @@ def _create_ui_application() -> Any:
     from light_image_editor.app import create_application
 
     app: Any = create_application([])
+    # Benchmarks must not be blocked by user-specific onboarding or historical
+    # crash-report prompts from the real profile on the host machine.
+    for job in app._startup_jobs:
+        app.after_cancel(job)
+    app._startup_jobs.clear()
     app.update_idletasks()
     return app
 
@@ -374,9 +379,7 @@ def _wait_for_preview(
 
 
 def _destroy_ui_application(app: Any) -> None:
-    app.image_loader.shutdown()
-    app.preview_renderer.shutdown()
-    app._drop_target.disable()
+    app._shutdown_services()
     app.destroy()
 
 
@@ -499,7 +502,7 @@ def _run_worker(arguments: list[str]) -> int:
         raise ValueError(f"unknown worker mode: {mode}")
     print(json.dumps(payload, ensure_ascii=False), flush=True)
     if cleanup_app is not None:
-        cleanup_app.destroy()
+        _destroy_ui_application(cleanup_app)
     return 0
 
 

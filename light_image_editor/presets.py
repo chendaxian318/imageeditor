@@ -9,6 +9,24 @@ from .document import DocumentState
 EXPORT_PRESETS = ("自定义", "社交媒体", "头像", "邮件", "原质量")
 
 
+def resolve_size_preset(
+    reference_size: tuple[int, int], preset: str
+) -> tuple[int | None, int | None, int | None]:
+    """Resolve a quick-size preset from content dimensions before resize."""
+
+    width, height = reference_size
+    if width <= 0 or height <= 0:
+        raise ValueError("原图尺寸无效")
+    if preset == "original":
+        return width, height, None
+    if preset == "1920":
+        return None, None, 1920
+    if preset not in {"50", "25"}:
+        raise ValueError(f"未知尺寸预设：{preset}")
+    scale = int(preset) / 100
+    return max(1, round(width * scale)), max(1, round(height * scale)), None
+
+
 def apply_export_preset(
     state: DocumentState, preset: str, source_format: str | None
 ) -> DocumentState:

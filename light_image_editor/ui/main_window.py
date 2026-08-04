@@ -6,7 +6,7 @@ import queue
 import threading
 import tkinter as tk
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import replace
 from functools import partial
@@ -64,7 +64,7 @@ from ..identity import PRODUCT_NAME_ZH
 from ..image_loader import ImageLoader, ImageLoadFailure
 from ..metadata import image_properties
 from ..navigation import NavigationSession
-from ..presets import EXPORT_PRESETS, apply_export_preset
+from ..presets import EXPORT_PRESETS, apply_export_preset, resolve_size_preset
 from ..preview import PreviewFrame, PreviewRenderer, color_manage_for_display
 from ..privacy import privacy_summary
 from ..projects import (
@@ -75,6 +75,7 @@ from ..projects import (
     save_project,
 )
 from ..renderer import (
+    SizeSpec,
     apply_command_to_plan,
     detect_straighten_angle,
     histogram,
@@ -132,6 +133,44 @@ ACTION_CATALOG = (
 )
 
 
+def _bounded_setting_int(
+    value: object,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    """Read a persisted integer without letting a damaged config abort startup."""
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _bounded_setting_float(
+    value: object,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    """Read a finite persisted float and clamp it to the supported range."""
+
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = default
+    if not minimum <= parsed <= maximum:
+        parsed = default
+    return parsed
+
+
+def _string_list_setting(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
 class ImageEditorApp(tk.Tk):
     def __init__(
         self,
@@ -145,8 +184,8 @@ class ImageEditorApp(tk.Tk):
         self.settings_store = settings_store or SettingsStore()
         initial_settings = self.settings_store.load_migrated()
         self.image_loader = image_loader or ImageLoader(
-            max_workers=max(1, min(8, int(initial_settings.get("decode_workers", 2)))),
-            cache_size=max(1, min(20, int(initial_settings.get("preview_cache", 3)))),
+            max_workers=_bounded_setting_int(initial_settings.get("decode_workers", 2), 2, 1, 8),
+            cache_size=_bounded_setting_int(initial_settings.get("preview_cache", 3), 3, 1, 20),
         )
         self.preview_renderer = preview_renderer or PreviewRenderer()
         self.session_store = session_store or SessionStore()
@@ -174,7 +213,6 @@ class ImageEditorApp(tk.Tk):
         self.zoom_mode = tk.StringVar(value="适应")
         self.compare_original = tk.BooleanVar(value=False)
         self.split_compare_var = tk.BooleanVar(value=False)
-        self.split_compare_percent_var = tk.IntVar(value=50)
         self.reveal_after_save_var = tk.BooleanVar(value=False)
         self.crop_box: tuple[int, int, int, int] | None = None
         self.drag_start: tuple[int, int] | None = None
@@ -193,6 +231,7 @@ class ImageEditorApp(tk.Tk):
         self._animation_generation = 0
         self._ratio_lock = False
         self._preview_job: str | None = None
+        self._preview_poll_jobs: set[str] = set()
         self._preview_generation = 0
         self.preview_ready_generation = 0
         self._load_generation = 0
@@ -251,6 +290,7 @@ class ImageEditorApp(tk.Tk):
         self._last_theme_name = ""
         self._last_failed_path: Path | None = None
         self._onboarding_window: tk.Toplevel | None = None
+        self._services_shutdown = False
 
         self.rotation = 0
         self.flip_h = False
@@ -625,22 +665,17 @@ class ImageEditorApp(tk.Tk):
             self.edit_toolbar,
             text="对比原图",
             variable=self.compare_original,
-            command=self._refresh_preview,
+            command=self._toggle_compare_original,
         ).grid(row=0, column=12, padx=(0, 12))
         ttk.Checkbutton(
             self.edit_toolbar,
             text="分屏对比",
             variable=self.split_compare_var,
-            command=self._refresh_preview,
+            command=self._toggle_split_compare,
         ).grid(row=0, column=13, padx=(0, 6))
-        ttk.Scale(
+        ttk.Label(
             self.edit_toolbar,
-            from_=10,
-            to=90,
-            orient="horizontal",
-            variable=self.split_compare_percent_var,
-            command=lambda _value: self._refresh_preview(),
-            length=90,
+            text=self.localizer.gettext("split_compare_hint"),
         ).grid(row=0, column=14, padx=(0, 6))
 
         annotation_toolbar = ttk.Frame(self.edit_toolbar)
@@ -1715,14 +1750,14 @@ class ImageEditorApp(tk.Tk):
         except OSError as error:
             messagebox.showerror(APP_NAME, str(error), parent=self)
 
-    def export_diagnostic_report(self) -> None:
+    def export_diagnostic_report(self) -> Path | None:
         notes = simpledialog.askstring(
             APP_NAME,
             "请简要描述问题和复现步骤（报告会自动脱敏）：",
             parent=self,
         )
         if notes is None:
-            return
+            return None
         target = filedialog.asksaveasfilename(
             title="导出脱敏问题报告",
             defaultextension=".zip",
@@ -1731,7 +1766,7 @@ class ImageEditorApp(tk.Tk):
             parent=self,
         )
         if not target:
-            return
+            return None
         try:
             saved = self.diagnostic_reporter.export(
                 target,
@@ -1740,20 +1775,27 @@ class ImageEditorApp(tk.Tk):
             )
         except OSError as error:
             messagebox.showerror(APP_NAME, f"问题报告导出失败：{error}", parent=self)
-            return
+            return None
         self.status_var.set(f"脱敏问题报告已导出：{saved}")
         messagebox.showinfo(APP_NAME, f"问题报告已保存：\n{saved}", parent=self)
+        return saved
 
     def _offer_crash_report(self) -> None:
         pending = self.crash_store.pending()
         if not pending:
             return
-        if messagebox.askyesno(
+        should_export = messagebox.askyesno(
             APP_NAME,
             f"检测到 {len(pending)} 份尚未处理的崩溃记录。是否现在导出脱敏问题报告？",
             parent=self,
-        ):
-            self.export_diagnostic_report()
+        )
+        if should_export and self.export_diagnostic_report() is None:
+            return
+        for path in pending:
+            try:
+                self.crash_store.acknowledge(path)
+            except (OSError, ValueError, TypeError):
+                continue
 
     def _update_service(self) -> UpdateService:
         keys = load_trusted_keys(trusted_keys_path())
@@ -1958,7 +2000,10 @@ class ImageEditorApp(tk.Tk):
 
     def _bind_shortcuts(self) -> None:
         self.bind("<Control-o>", lambda _event: self.open_file())
-        self.bind("<Control-v>", lambda _event: self.paste_from_clipboard())
+        self.bind(
+            "<Control-v>",
+            lambda _event: self._guarded_text_key_action(self.paste_from_clipboard),
+        )
         self.bind("<Control-s>", lambda _event: self.save_as())
         self.bind("<Control-Shift-S>", lambda _event: self.save_project_dialog())
         self.bind("<Control-e>", lambda _event: self.quick_export())
@@ -1979,9 +2024,12 @@ class ImageEditorApp(tk.Tk):
         self.bind("<Home>", lambda event: self._edge_navigation_key(event, "first"))
         self.bind("<End>", lambda event: self._edge_navigation_key(event, "last"))
         self.bind("<Escape>", lambda _event: self._handle_escape())
-        self.bind("<Return>", lambda _event: self.apply_current_tool())
-        self.bind("<space>", lambda _event: self._set_compare(True))
-        self.bind("<KeyRelease-space>", lambda _event: self._set_compare(False))
+        self.bind(
+            "<Return>",
+            lambda _event: self._guarded_text_key_action(self.apply_current_tool),
+        )
+        self.bind("<space>", lambda _event: self._guarded_compare_key(True))
+        self.bind("<KeyRelease-space>", lambda _event: self._guarded_compare_key(False))
         self.bind("<F11>", lambda _event: self.toggle_fullscreen())
         self.bind("<Control-F11>", lambda _event: self.toggle_immersive())
         self.bind("<F5>", lambda _event: self.toggle_slideshow())
@@ -1998,6 +2046,18 @@ class ImageEditorApp(tk.Tk):
     def _text_input_has_focus(self) -> bool:
         focused = self.focus_get()
         return isinstance(focused, (tk.Entry, tk.Text, ttk.Entry, ttk.Combobox, ttk.Spinbox))
+
+    def _guarded_text_key_action(self, action: Callable[[], object]) -> str | None:
+        if self._text_input_has_focus():
+            return None
+        action()
+        return "break"
+
+    def _guarded_compare_key(self, enabled: bool) -> str | None:
+        if self._text_input_has_focus():
+            return None
+        self._set_compare(enabled)
+        return "break"
 
     def _navigation_key(self, _event: tk.Event, direction: int) -> str | None:
         if self._text_input_has_focus():
@@ -2261,7 +2321,10 @@ class ImageEditorApp(tk.Tk):
         self.status_var.set("正在分析画面中的水平线和垂直线…")
         self.update_idletasks()
         source = render_image(self.document.image, self.document.timeline)
-        result = detect_straighten_angle(source)
+        try:
+            result = detect_straighten_angle(source)
+        finally:
+            source.close()
         if not result.reliable:
             self.status_var.set("没有检测到可信的拉直角度")
             return
@@ -2527,34 +2590,32 @@ class ImageEditorApp(tk.Tk):
         self.theme_mode_var.set(
             theme_mode if theme_mode in {"system", "light", "dark"} else "system"
         )
-        self.decode_workers_var.set(max(1, min(8, int(data.get("decode_workers", 2)))))
-        self.preview_cache_var.set(max(1, min(20, int(data.get("preview_cache", 3)))))
+        self.decode_workers_var.set(_bounded_setting_int(data.get("decode_workers", 2), 2, 1, 8))
+        self.preview_cache_var.set(_bounded_setting_int(data.get("preview_cache", 3), 3, 1, 20))
         self.onboarding_completed = bool(data.get("onboarding_completed", False))
         channel = str(data.get("update_channel", "stable"))
         self.update_channel_var.set(channel if channel in {"stable", "beta"} else "stable")
         self.crash_reporting_consent_var.set(bool(data.get("crash_reporting_consent", False)))
         self.format_var.set(data.get("format", "JPEG"))
-        self.quality_var.set(int(data.get("quality", 85)))
+        self.quality_var.set(_bounded_setting_int(data.get("quality", 85), 85, 1, 100))
         self.target_size_var.set(str(data.get("target_size_kb", "") or ""))
         self.filename_prefix_var.set(str(data.get("filename_prefix", "") or ""))
         self.filename_suffix_var.set(str(data.get("filename_suffix", "") or ""))
         self.watermark_text_var.set(str(data.get("watermark_text", "") or ""))
         self.watermark_position_var.set(str(data.get("watermark_position", "右下") or "右下"))
-        self.watermark_opacity_var.set(int(data.get("watermark_opacity", 35)))
-        self.watermark_size_var.set(int(data.get("watermark_size_percent", 5)))
+        self.watermark_opacity_var.set(
+            _bounded_setting_int(data.get("watermark_opacity", 35), 35, 0, 100)
+        )
+        self.watermark_size_var.set(
+            _bounded_setting_int(data.get("watermark_size_percent", 5), 5, 1, 30)
+        )
         self.reveal_after_save_var.set(bool(data.get("reveal_after_save", False)))
-        self.recent_files = [
-            str(path) for path in data.get("recent_files", []) if isinstance(path, str)
-        ]
-        self.recent_directories = [
-            str(path) for path in data.get("recent_directories", []) if isinstance(path, str)
-        ]
-        self.recent_projects = [
-            str(path) for path in data.get("recent_projects", []) if isinstance(path, str)
-        ]
-        self.recent_export_directories = [
-            str(path) for path in data.get("recent_export_directories", []) if isinstance(path, str)
-        ]
+        self.recent_files = _string_list_setting(data.get("recent_files", []))
+        self.recent_directories = _string_list_setting(data.get("recent_directories", []))
+        self.recent_projects = _string_list_setting(data.get("recent_projects", []))
+        self.recent_export_directories = _string_list_setting(
+            data.get("recent_export_directories", [])
+        )
         known_actions = {key for key, _label, _shortcut in ACTION_CATALOG}
         favorites = data.get("favorite_actions", self.favorite_actions)
         if isinstance(favorites, list):
@@ -2577,12 +2638,18 @@ class ImageEditorApp(tk.Tk):
             self.current_tool_label_var.set(f"当前：{ANNOTATION_TOOL_LABELS[saved_tool]}")
         self.edit_panel_visible_var.set(bool(data.get("edit_panel_visible", False)))
         self.thumbnail_sidebar_visible_var.set(bool(data.get("thumbnail_sidebar_visible", True)))
-        self.slideshow_interval_var.set(float(data.get("slideshow_interval", 3.0)))
+        self.slideshow_interval_var.set(
+            _bounded_setting_float(data.get("slideshow_interval", 3.0), 3.0, 0.5, 3600.0)
+        )
         self.slideshow_loop_var.set(bool(data.get("slideshow_loop", True)))
         self.preserve_metadata_var.set(bool(data.get("preserve_metadata", True)))
         self.backup_on_overwrite_var.set(bool(data.get("backup_on_overwrite", True)))
-        self.batch_concurrency_var.set(max(1, min(16, int(data.get("batch_concurrency", 2)))))
-        self.batch_memory_var.set(max(32, int(data.get("batch_memory_mb", 512))))
+        self.batch_concurrency_var.set(
+            _bounded_setting_int(data.get("batch_concurrency", 2), 2, 1, 16)
+        )
+        self.batch_memory_var.set(
+            _bounded_setting_int(data.get("batch_memory_mb", 512), 512, 32, 262_144)
+        )
         self.batch_rename_template_var.set(
             str(data.get("batch_rename_template", "{stem}_{index:04d}"))
         )
@@ -2730,6 +2797,7 @@ class ImageEditorApp(tk.Tk):
         self.original = loaded.document.image
         self.image_path = loaded.document.source_path
         self.navigation = NavigationSession.from_activation([self.image_path])
+        self.thumbnail_sidebar.set_paths(self.navigation.files, self.navigation.current)
         self._load_current_image(project_path.name, recovered=True)
         self._remember_project(project_path)
         if loaded.unsupported_commands:
@@ -2835,6 +2903,7 @@ class ImageEditorApp(tk.Tk):
         skip_direction: int = 0,
     ) -> None:
         self._stop_animation_playback()
+        self._cancel_pending_preview_updates()
         self.thumbnail_sidebar.select(path)
         self._load_generation += 1
         generation = self._load_generation
@@ -2905,6 +2974,7 @@ class ImageEditorApp(tk.Tk):
         key = str(failure.path).casefold()
         self._failed_navigation_paths.add(key)
         self._last_failed_path = failure.path
+        self._clear_document_after_load_failure(failure.path)
         self.status_var.set(f"{failure.path.name}：{failure.user_message}")
         self.canvas.delete("all")
         tokens = self.theme_manager.tokens
@@ -2965,6 +3035,20 @@ class ImageEditorApp(tk.Tk):
             if target is not None:
                 self._begin_image_load(target, skip_direction=skip_direction)
 
+    def _clear_document_after_load_failure(self, failed_path: Path) -> None:
+        """Prevent file actions from targeting the previously displayed document."""
+
+        self._release_base_preview()
+        self.document = None
+        self.original = None
+        self.image_path = None
+        self.preview = None
+        self.crop_box = None
+        self.selected_annotation_id = None
+        self.clean_signature = None
+        self.info_var.set(f"未载入 · {failed_path.name}")
+        self.title(f"{failed_path.name} — {APP_NAME}")
+
     def _image_info_text(self) -> str:
         if self.original is None:
             return "未载入图片"
@@ -3017,7 +3101,10 @@ class ImageEditorApp(tk.Tk):
         display = (
             frame.copy() if size == frame.size else frame.resize(size, Image.Resampling.BILINEAR)
         )
-        display = color_manage_for_display(display, self.document.metadata.icc_profile)
+        managed = color_manage_for_display(display, self.document.metadata.icc_profile)
+        if managed is not display:
+            display.close()
+        display = managed
         self._display_preview(
             PreviewFrame(working=frame, image=display, scale=display.width / frame.width),
             canvas_w,
@@ -3141,6 +3228,7 @@ class ImageEditorApp(tk.Tk):
             self.original = self.document.image
             self.image_path = None
             self.navigation = NavigationSession([])
+            self.thumbnail_sidebar.set_paths([], None)
             self._load_current_image("剪贴板图片", recovered=True)
             self.status_var.set("已从剪贴板粘贴图片")
             return
@@ -3237,17 +3325,21 @@ class ImageEditorApp(tk.Tk):
         if self._is_immersive:
             self.toggle_immersive()
             return
-        self._is_fullscreen = not self._is_fullscreen
-        self.attributes("-fullscreen", self._is_fullscreen)
+        target = not self._is_fullscreen
+        if not self._set_fullscreen_state(target):
+            return
+        self._is_fullscreen = target
         self.status_var.set(
             "已进入全屏，按 F11 或 Esc 退出" if self._is_fullscreen else "已退出全屏"
         )
 
     def toggle_immersive(self) -> None:
-        self._is_immersive = not self._is_immersive
-        if self._is_immersive:
+        target = not self._is_immersive
+        if not self._set_fullscreen_state(target):
+            return
+        self._is_immersive = target
+        if target:
             self._is_fullscreen = True
-            self.attributes("-fullscreen", True)
             self.config(menu="")
             self.toolbar.grid_remove()
             self.edit_toolbar.grid_remove()
@@ -3256,7 +3348,6 @@ class ImageEditorApp(tk.Tk):
             self.status_label.grid_remove()
         else:
             self._is_fullscreen = False
-            self.attributes("-fullscreen", False)
             self.config(menu=self.menu_bar)
             self.toolbar.grid()
             self.status_label.grid()
@@ -3266,6 +3357,27 @@ class ImageEditorApp(tk.Tk):
                 self.edit_toolbar.grid()
                 self.panel_shell.grid()
         self._schedule_preview()
+
+    def _set_fullscreen_state(self, enabled: bool) -> bool:
+        """Enter fullscreen without letting work-area min/max constraints block Tk."""
+
+        if enabled:
+            self.minsize(1, 1)
+            self.maxsize(
+                max(16_384, self.winfo_screenwidth() * 4),
+                max(16_384, self.winfo_screenheight() * 4),
+            )
+        try:
+            self.attributes("-fullscreen", enabled)
+        except tk.TclError as error:
+            self.dpi_manager.refresh()
+            self._update_monitor_constraints()
+            self.status_var.set(f"无法切换全屏：{error}")
+            return False
+        if not enabled:
+            self.dpi_manager.refresh()
+            self._update_monitor_constraints()
+        return True
 
     def _handle_escape(self) -> None:
         if self._slideshow_job is not None:
@@ -3553,8 +3665,6 @@ class ImageEditorApp(tk.Tk):
             return
         self.status_var.set(f"已快速导出：{saved}")
         self._remember_export_directory(saved.parent)
-        self._mark_clean()
-        self.session_store.clear()
         if self.reveal_after_save_var.get():
             self._reveal_file(saved)
 
@@ -3621,6 +3731,7 @@ class ImageEditorApp(tk.Tk):
         options = self._read_options()
         if options is None:
             return
+        result: Image.Image | None = None
         try:
             result = (
                 render_image(self.original, self.document.timeline)
@@ -3628,10 +3739,14 @@ class ImageEditorApp(tk.Tk):
                 else prepare_image(self.original, options)
             )
             copy_image_to_clipboard(result)
+            result_size = result.size
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"复制失败：{exc}")
             return
-        self.status_var.set(f"已复制编辑结果：{result.width} x {result.height}")
+        finally:
+            if result is not None:
+                result.close()
+        self.status_var.set(f"已复制编辑结果：{result_size[0]} x {result_size[1]}")
 
     @staticmethod
     def _unique_export_path(folder: Path, stem: str, extension: str) -> Path:
@@ -4220,9 +4335,28 @@ class ImageEditorApp(tk.Tk):
         self._shutdown_services()
         self.destroy()
 
+    def _cancel_pending_preview_updates(self) -> None:
+        if self._preview_job is not None:
+            try:
+                self.after_cancel(self._preview_job)
+            except tk.TclError:
+                pass
+            self._preview_job = None
+        for job in tuple(self._preview_poll_jobs):
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._preview_poll_jobs.clear()
+        self._preview_generation += 1
+
     def _shutdown_services(self) -> None:
+        if self._services_shutdown:
+            return
+        self._services_shutdown = True
         self.stop_slideshow()
         self._stop_animation_playback()
+        self._cancel_pending_preview_updates()
         if self.batch_runner is not None:
             self.batch_runner.cancel()
         if self._autosave_job is not None:
@@ -4246,6 +4380,23 @@ class ImageEditorApp(tk.Tk):
         self.image_loader.shutdown()
         self.preview_renderer.shutdown()
         self._release_base_preview()
+        self._cancel_all_tk_jobs()
+
+    def _cancel_all_tk_jobs(self) -> None:
+        """Cancel widget-owned idle jobs before the Tcl interpreter is destroyed."""
+
+        try:
+            jobs = self.tk.splitlist(self.tk.call("after", "info"))
+        except tk.TclError:
+            return
+        for job in jobs:
+            try:
+                # Use Tcl directly: callbacks may belong to child widgets.  Calling
+                # root.after_cancel() would delete the command from the wrong
+                # widget bookkeeping list and make widget destruction fail.
+                self.tk.call("after", "cancel", job)
+            except tk.TclError:
+                pass
 
     def _autosave_session(self) -> None:
         self._autosave_job = None
@@ -4282,6 +4433,7 @@ class ImageEditorApp(tk.Tk):
             if self.image_path is not None
             else NavigationSession([])
         )
+        self.thumbnail_sidebar.set_paths(self.navigation.files, self.navigation.current)
         display_name = self.image_path.name if self.image_path is not None else "恢复的剪贴板图片"
         self._load_current_image(display_name, recovered=True)
         self.status_var.set("已恢复上次未完成编辑；可继续编辑、另存或安全放弃")
@@ -4474,36 +4626,71 @@ class ImageEditorApp(tk.Tk):
         self._refresh_preview()
 
     def apply_size_preset(self, value: str) -> None:
-        source = self._current_working_image()
-        if source is None:
+        if self.original is None:
+            return
+        try:
+            reference_size = self._resize_reference_size()
+            width, height, max_side = resolve_size_preset(reference_size, value)
+        except ValueError as error:
+            messagebox.showerror(APP_NAME, str(error))
             return
         self._ratio_lock = True
-        if value == "original":
-            self.width_var.set(str(source.width))
-            self.height_var.set(str(source.height))
-            self.max_side_var.set("")
-        elif value == "1920":
-            self.width_var.set("")
-            self.height_var.set("")
-            self.max_side_var.set("1920")
-        else:
-            scale = int(value) / 100
-            self.width_var.set(str(max(1, round(source.width * scale))))
-            self.height_var.set(str(max(1, round(source.height * scale))))
-            self.max_side_var.set("")
-        self._ratio_lock = False
-        self.status_var.set("已应用常用尺寸")
+        try:
+            self.width_var.set("" if width is None else str(width))
+            self.height_var.set("" if height is None else str(height))
+            self.max_side_var.set("" if max_side is None else str(max_side))
+        finally:
+            self._ratio_lock = False
+        self.status_var.set("已按当前内容的缩放前尺寸应用常用比例")
         self._update_estimate()
+
+    def _resize_reference_size(self) -> tuple[int, int]:
+        """Return the edited content size with only the resize stage disabled."""
+
+        if self.original is None:
+            raise ValueError("请先打开一张图片。")
+        if self.document is None:
+            return self.original.size
+        plan = replace(reduce_timeline(self.document.timeline), size=SizeSpec())
+        reference = render_image(self.original, plan)
+        try:
+            return reference.size
+        finally:
+            reference.close()
 
     def _read_options(
         self, allow_without_image: bool = False, quiet: bool = False
     ) -> ExportOptions | None:
-        if self.document is None:
-            if not allow_without_image and not quiet:
+        if self.document is None and not allow_without_image:
+            if not quiet:
                 messagebox.showinfo(APP_NAME, "请先打开一张图片。")
             return None
+        state = (
+            self.document.state
+            if self.document is not None
+            else DocumentState(
+                edit_state=self.edit_state(),
+                crop_box=self.crop_box,
+                crop_ratio=self.crop_ratio_var.get(),
+                width_text=self.width_var.get(),
+                height_text=self.height_var.get(),
+                max_side_text=self.max_side_var.get(),
+                output_format=self.format_var.get(),
+                quality=self.quality_var.get(),
+                target_size_text=self.target_size_var.get(),
+                filename_prefix=self.filename_prefix_var.get(),
+                filename_suffix=self.filename_suffix_var.get(),
+                watermark_text=self.watermark_text_var.get(),
+                watermark_position=self.watermark_position_var.get(),
+                watermark_opacity=self.watermark_opacity_var.get(),
+                watermark_size_percent=self.watermark_size_var.get(),
+                preserve_metadata=self.preserve_metadata_var.get(),
+                backup_on_overwrite=self.backup_on_overwrite_var.get(),
+                export_preset=self.export_preset_var.get(),
+            )
+        )
         try:
-            return self.document.state.export_options()
+            return state.export_options()
         except ValueError as error:
             if not quiet:
                 messagebox.showerror(APP_NAME, str(error))
@@ -4525,10 +4712,12 @@ class ImageEditorApp(tk.Tk):
         try:
             width = int(self.width_var.get())
             if width > 0:
-                source = self._current_working_image() or self.original
+                source_width, source_height = self._resize_reference_size()
                 self._ratio_lock = True
-                self.height_var.set(str(round(width * source.height / source.width)))
-                self._ratio_lock = False
+                try:
+                    self.height_var.set(str(round(width * source_height / source_width)))
+                finally:
+                    self._ratio_lock = False
         except ValueError:
             pass
         self._update_estimate()
@@ -4542,10 +4731,12 @@ class ImageEditorApp(tk.Tk):
         try:
             height = int(self.height_var.get())
             if height > 0:
-                source = self._current_working_image() or self.original
+                source_width, source_height = self._resize_reference_size()
                 self._ratio_lock = True
-                self.width_var.set(str(round(height * source.width / source.height)))
-                self._ratio_lock = False
+                try:
+                    self.width_var.set(str(round(height * source_width / source_height)))
+                finally:
+                    self._ratio_lock = False
         except ValueError:
             pass
         self._update_estimate()
@@ -4600,6 +4791,17 @@ class ImageEditorApp(tk.Tk):
         if self.original is None:
             return
         self.compare_original.set(enabled)
+        self._refresh_preview()
+
+    def _toggle_compare_original(self) -> None:
+        if self.compare_original.get():
+            self.split_compare_var.set(False)
+        self._refresh_preview()
+
+    def _toggle_split_compare(self) -> None:
+        if self.split_compare_var.get():
+            self.compare_original.set(False)
+            self.status_var.set("分屏对比：左侧编辑前，右侧编辑后")
         self._refresh_preview()
 
     def _zoom_with_wheel(self, event: tk.Event) -> None:
@@ -4669,8 +4871,27 @@ class ImageEditorApp(tk.Tk):
             canvas_size=(canvas_w, canvas_h),
             zoom_percent=zoom_percent,
             timeline=self.document.timeline if self.document is not None else None,
+            split_compare=self.split_compare_var.get(),
         )
-        self.after(10, self._poll_preview, generation, future, canvas_w, canvas_h)
+        self._schedule_preview_poll(generation, future, canvas_w, canvas_h)
+
+    def _schedule_preview_poll(
+        self,
+        generation: int,
+        future: Future[PreviewFrame],
+        canvas_w: int,
+        canvas_h: int,
+    ) -> None:
+        holder: list[str] = []
+
+        def poll() -> None:
+            if holder:
+                self._preview_poll_jobs.discard(holder[0])
+            self._poll_preview(generation, future, canvas_w, canvas_h)
+
+        job = self.after(10, poll)
+        holder.append(job)
+        self._preview_poll_jobs.add(job)
 
     def _poll_preview(
         self,
@@ -4683,7 +4904,7 @@ class ImageEditorApp(tk.Tk):
             self._discard_preview_when_ready(future)
             return
         if not future.done():
-            self.after(10, self._poll_preview, generation, future, canvas_w, canvas_h)
+            self._schedule_preview_poll(generation, future, canvas_w, canvas_h)
             return
         try:
             frame = future.result()
@@ -4719,19 +4940,7 @@ class ImageEditorApp(tk.Tk):
         self.base_preview_image = frame.working
         self._base_preview_owned = frame.owns_working
         image = frame.image
-        split_x: int | None = None
-        if self.split_compare_var.get() and not self.compare_original.get() and self.original:
-            before = self.original.resize(image.size, Image.Resampling.LANCZOS)
-            before = color_manage_for_display(
-                before,
-                self.document.metadata.icc_profile if self.document else None,
-            )
-            composite = image.copy()
-            split_x = round(image.width * self.split_compare_percent_var.get() / 100)
-            composite.paste(before.crop((0, 0, split_x, image.height)), (0, 0))
-            before.close()
-            image = composite
-        self.preview = ImageTk.PhotoImage(image)
+        self.preview = ImageTk.PhotoImage(image, master=self.canvas)
         self.preview_scale = frame.scale
         centered_x = (canvas_w - image.width) // 2
         centered_y = (canvas_h - image.height) // 2
@@ -4749,8 +4958,9 @@ class ImageEditorApp(tk.Tk):
         self.canvas.create_image(
             self.preview_offset[0], self.preview_offset[1], image=self.preview, anchor="nw"
         )
-        if split_x is not None:
-            divider_x = self.preview_offset[0] + split_x
+        if frame.split_layout is not None:
+            layout = frame.split_layout
+            divider_x = self.preview_offset[0] + layout.divider_x
             self.canvas.create_line(
                 divider_x,
                 self.preview_offset[1],
@@ -4760,27 +4970,26 @@ class ImageEditorApp(tk.Tk):
                 width=2,
             )
             self.canvas.create_text(
-                self.preview_offset[0] + 8,
+                self.preview_offset[0] + layout.before_panel[0] + 8,
                 self.preview_offset[1] + 8,
                 text="编辑前",
                 fill="#fbbf24",
                 anchor="nw",
             )
             self.canvas.create_text(
-                self.preview_offset[0] + image.width - 8,
+                self.preview_offset[0] + layout.after_panel[2] - 8,
                 self.preview_offset[1] + 8,
                 text="编辑后",
                 fill="#5eead4",
                 anchor="ne",
             )
         self._draw_checker_bounds(image.width, image.height)
-        self._draw_crop()
-        self._draw_annotation_overlay()
+        if frame.split_layout is None:
+            self._draw_crop()
+            self._draw_annotation_overlay()
         self._draw_histogram(frame.working)
         if self.edit_panel_visible_var.get():
             self.after_idle(self._update_estimate)
-        if image is not frame.image:
-            image.close()
         frame.image.close()
 
     def _draw_checker_bounds(self, width: int, height: int) -> None:
@@ -4823,6 +5032,9 @@ class ImageEditorApp(tk.Tk):
 
     def _canvas_press(self, event: tk.Event) -> None:
         self.canvas.focus_set()
+        if self.split_compare_var.get():
+            self.status_var.set("请先退出分屏对比，再进行裁剪或标注")
+            return
         tool = self.annotation_tool_var.get()
         if tool == "crop":
             self._start_crop(event)
@@ -4834,6 +5046,8 @@ class ImageEditorApp(tk.Tk):
             self._start_annotation(event, tool)
 
     def _canvas_drag(self, event: tk.Event) -> None:
+        if self.split_compare_var.get():
+            return
         tool = self.annotation_tool_var.get()
         if tool == "crop":
             self._drag_crop(event)
@@ -4845,6 +5059,8 @@ class ImageEditorApp(tk.Tk):
             self._drag_annotation(event, tool)
 
     def _canvas_release(self, event: tk.Event) -> None:
+        if self.split_compare_var.get():
+            return
         tool = self.annotation_tool_var.get()
         if tool == "crop":
             self._finish_crop(event)
@@ -5302,12 +5518,24 @@ class ImageEditorApp(tk.Tk):
             self.canvas.create_oval(x1, y1, x2, y2, outline=color, width=2, tags="annotation-ui")
         elif annotation.kind == "freehand" and annotation.points:
             points = [self._normalized_to_canvas(x, y) for x, y in annotation.points]
-            self.canvas.create_line(
-                *[coordinate for point in points for coordinate in point],
-                fill=color,
-                width=2,
-                tags="annotation-ui",
-            )
+            if len(points) >= 2:
+                self.canvas.create_line(
+                    *[coordinate for point in points for coordinate in point],
+                    fill=color,
+                    width=2,
+                    tags="annotation-ui",
+                )
+            else:
+                x, y = points[0]
+                self.canvas.create_oval(
+                    x - 1,
+                    y - 1,
+                    x + 1,
+                    y + 1,
+                    fill=color,
+                    outline=color,
+                    tags="annotation-ui",
+                )
         else:
             self.canvas.create_rectangle(
                 x1,
@@ -5574,6 +5802,7 @@ class ImageEditorApp(tk.Tk):
         if options is None:
             self.size_var.set("预计输出大小：等待有效尺寸")
             return
+        prepared: Image.Image | None = None
         try:
             if self.document is not None:
                 prepared = render_image(self.original, self.document.timeline)
@@ -5581,9 +5810,13 @@ class ImageEditorApp(tk.Tk):
             else:
                 prepared = prepare_image(self.original, options)
                 size = estimate_save_size(self.original, options)
+            prepared_size = prepared.size
         except Exception:
             self.size_var.set("预计输出大小：无法计算")
             return
+        finally:
+            if prepared is not None:
+                prepared.close()
         savings = ""
         if self.image_path is not None:
             try:
@@ -5591,7 +5824,8 @@ class ImageEditorApp(tk.Tk):
             except OSError:
                 savings = ""
         self.size_var.set(
-            f"预计输出：{prepared.width} x {prepared.height}，{self._format_bytes(size)}{savings}"
+            f"预计输出：{prepared_size[0]} x {prepared_size[1]}，"
+            f"{self._format_bytes(size)}{savings}"
         )
 
     @staticmethod
