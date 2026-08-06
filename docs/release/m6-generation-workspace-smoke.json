@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "captured_at_local": "2026-08-05",
+  "application_version": "1.1.3",
+  "profile": "m6-generation-workspace-smoke",
+  "environment": {
+    "platform": "Windows x64",
+    "python": "3.12.10"
+  },
+  "automated_tests": {
+    "full_unittest": {
+      "tests_run": 459,
+      "elapsed_seconds": 151.278,
+      "failures": 0,
+      "errors": 0,
+      "passed": true
+    },
+    "multi_reference_targeted": {
+      "tests_run": 3,
+      "elapsed_seconds": 2.839,
+      "failures": 0,
+      "errors": 0,
+      "passed": true
+    },
+    "generation_quality_gate_tests": {
+      "tests_run": 6,
+      "elapsed_seconds": 0.301,
+      "failures": 0,
+      "errors": 0,
+      "passed": true
+    },
+    "candidate_management_targeted": {
+      "tests_run": 5,
+      "elapsed_seconds": 7.183,
+      "failures": 0,
+      "errors": 0,
+      "passed": true
+    }
+  },
+  "static_checks": {
+    "ruff": "passed",
+    "production_mypy_files": 106,
+    "production_mypy": "passed",
+    "git_diff_check": "passed"
+  },
+  "acceptance": {
+    "candidate_grid_renders_real_managed_png_thumbnails": true,
+    "candidate_selection_updates_generate_handoff": true,
+    "prompt_history_persists_locally": true,
+    "candidate_revision_history_persists_locally": true,
+    "candidate_favorites_persist_independently_from_recent_history": true,
+    "favorite_filter_shows_only_favorites": true,
+    "favorite_visual_marker_is_visible": true,
+    "malformed_or_missing_favorite_records_fail_closed": true,
+    "candidate_remove_clears_workspace_history_selection_and_handoff": true,
+    "candidate_remove_preserves_managed_revision_and_job_provenance": true,
+    "missing_history_entries_fail_closed": true,
+    "restart_restores_exact_asset_and_revision_identity": true,
+    "selected_candidate_routes_to_viewer": true,
+    "selected_candidate_routes_to_edit": true,
+    "selected_candidate_routes_to_convert": true,
+    "conversion_queue_keeps_generated_identity": true,
+    "opening_managed_candidate_does_not_duplicate_identity": true,
+    "negative_prompt_is_validated_and_recorded": true,
+    "reference_image_import_is_asynchronous": true,
+    "reference_list_supports_up_to_four_images": true,
+    "reference_list_disables_add_at_capacity": true,
+    "reference_list_supports_selected_remove_and_clear": true,
+    "each_reference_has_independent_role_and_strength": true,
+    "duplicate_reference_revisions_are_rejected": true,
+    "reference_revision_identity_and_hash_are_fingerprinted": true,
+    "reference_role_and_strength_are_fingerprinted": true,
+    "all_reference_revisions_roles_and_strengths_are_fingerprinted": true,
+    "offline_reference_generation_uses_real_pixels": true,
+    "offline_multi_reference_generation_blends_real_pixels": true,
+    "multi_reference_provenance_records_all_sources": true,
+    "reference_identity_and_parameters_restore_after_restart": true,
+    "multi_reference_order_and_parameters_restore_after_restart": true,
+    "legacy_single_reference_settings_remain_compatible": true,
+    "provider_capabilities_are_checked_before_submission": true,
+    "fixed_seed_reproduces_pixels_across_distinct_jobs": true,
+    "fixed_seed_preserves_distinct_asset_revision_identity": true,
+    "style_presets_are_capability_checked_and_recorded": true,
+    "seed_and_style_restore_after_restart": true,
+    "provider_catalog_rejects_ambiguous_profiles": true,
+    "provider_status_and_cost_metadata_are_visible": true,
+    "remote_reference_upload_requires_separate_confirmation": true,
+    "remote_upload_confirmation_displays_reference_count": true,
+    "paid_execution_requires_separate_confirmation": true,
+    "declined_upload_submits_nothing": true,
+    "failed_or_unknown_jobs_never_retry_automatically": true,
+    "explicit_retry_uses_a_new_request_identity": true,
+    "rate_limit_and_policy_rejection_semantics_are_preserved": true,
+    "generation_workspace_uses_visible_parameter_and_candidate_columns": true,
+    "candidate_variation_requires_declared_provider_capability": true,
+    "candidate_variation_binds_source_revision_and_hash": true,
+    "candidate_variation_inherits_prompt_negative_prompt_and_style": true,
+    "candidate_variation_derives_fixed_seed": true,
+    "candidate_variation_creates_distinct_asset_revision_identity": true,
+    "source_candidate_remains_in_history_after_variation": true,
+    "offline_cancel_and_failure_do_not_block_base_modes": true,
+    "generation_quality_gate_accepts_explicit_provider_and_model": true,
+    "generation_quality_gate_validates_png_size_hash_and_byte_count": true,
+    "generation_quality_gate_validates_seed_reproduction_and_candidate_diversity": true,
+    "generation_quality_gate_validates_four_reference_weights_and_fingerprints": true,
+    "generation_quality_gate_validates_variation_lineage_and_pixel_change": true,
+    "generation_quality_gate_records_p95_without_persisting_temporary_paths": true,
+    "generation_quality_standard_profile_passed": true
+  },
+  "scope_limit": {
+    "provider": "deterministic offline contract provider",
+    "not_yet_claimed": [
+      "production text-to-image quality",
+      "production provider adapter and credential setup",
+      "production privacy and cost acceptance"
+    ]
+  },
+  "passed": true
+}

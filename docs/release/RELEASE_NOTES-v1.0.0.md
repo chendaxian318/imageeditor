@@ -13,7 +13,7 @@ content; public publication is prohibited until `V1_RELEASE_GATES.json` and the 
   preservation, atomic saves and explicit animated-image safeguards.
 - Editable annotations, privacy tools, AVIF and animated-image support, optional HEIF/HEIC,
   cancellable batch queues and importable presets.
-- Chinese and English interfaces, system/light/dark themes, high-DPI support, keyboard
+- Simplified Chinese interface, system/light/dark themes, high-DPI support, keyboard
   navigation, offline-first operation and user-initiated diagnostics.
 - Per-user Windows installer, portable build, registered default-app capabilities, stable and
   Beta update channels, signed manifests and a verified previous-version rollback package.

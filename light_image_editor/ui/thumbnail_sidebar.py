@@ -8,11 +8,13 @@ from concurrent.futures import Future
 from pathlib import Path
 from tkinter import ttk
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from ..thumbnails import ThumbnailLoader
+from .antialias import render_photo
+from .material import MaterialButton, MaterialSearchField
 
-ROW_HEIGHT = 94
+ROW_HEIGHT = 68
 BUFFER_ROWS = 4
 
 
@@ -26,19 +28,25 @@ class ThumbnailSidebar(ttk.Frame):
         *,
         loader: ThumbnailLoader | None = None,
         title: str = "当前目录",
+        style: str = "TFrame",
     ) -> None:
-        super().__init__(master, padding=(8, 0, 0, 12), width=220)
+        super().__init__(master, style=style, padding=(12, 12, 5, 8), width=220)
+        self.grid_propagate(False)
         self.on_activate = on_activate
         self.loader = loader or ThumbnailLoader()
         self._base_title = title
+        self._all_paths: list[Path] = []
         self.paths: list[Path] = []
+        self._path_indices: dict[str, int] = {}
         self.selected_index: int | None = None
         self._generation = 0
         self._pending: dict[int, tuple[int, Path, Future[Image.Image]]] = {}
         self._photos: dict[int, ImageTk.PhotoImage] = {}
         self._image_items: dict[int, int] = {}
         self._row_items: dict[int, int] = {}
+        self._row_backgrounds: dict[int, ImageTk.PhotoImage] = {}
         self._text_items: dict[int, int] = {}
+        self._meta_items: dict[int, int] = {}
         self._poll_job: str | None = None
         self._schedule_job: str | None = None
         self._surface = "#ffffff"
@@ -49,27 +57,55 @@ class ThumbnailSidebar(ttk.Frame):
         self._border = "#cbd5e1"
 
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
         self.title_var = tk.StringVar(value=title)
-        ttk.Label(self, textvariable=self.title_var, padding=(5, 8), anchor="w").grid(
-            row=0, column=0, columnspan=2, sticky="ew"
+        self.context_var = tk.StringVar(value="当前文件夹 · 0 张")
+        header = ttk.Frame(self, style="Surface.TFrame")
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, textvariable=self.title_var, style="LibraryTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
         )
+        ttk.Label(header, textvariable=self.context_var, style="LibraryMeta.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(2, 0)
+        )
+        MaterialButton(
+            header,
+            text="+",
+            width=30,
+            height=30,
+            command=self._focus_search,
+        ).grid(row=0, column=1, rowspan=2, padx=(8, 2))
+
+        search_shell = ttk.Frame(self, style="Surface.TFrame")
+        search_shell.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        search_shell.columnconfigure(0, weight=1)
+        self.search_var = tk.StringVar()
+        self.search_field = MaterialSearchField(search_shell, textvariable=self.search_var)
+        self.search_field.grid(row=0, column=0, sticky="ew")
+        self.search_entry = self.search_field.entry
+        self.search_entry.bind("<KeyRelease>", lambda _event: self._apply_search())
         self.canvas = tk.Canvas(
             self,
-            width=204,
+            width=198,
             highlightthickness=1,
             takefocus=True,
             bg=self._surface,
         )
-        self.canvas.grid(row=1, column=0, sticky="nsew")
+        self.canvas.material_role = "library"
+        self.canvas.grid(row=2, column=0, sticky="nsew")
         self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._yview)
-        self.scrollbar.grid(row=1, column=1, sticky="ns")
+        self.scrollbar.grid(row=2, column=1, sticky="ns")
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
         self.canvas.bind("<Configure>", lambda _event: self._schedule_visible())
         self.canvas.bind("<MouseWheel>", self._mousewheel)
         self.canvas.bind("<Button-1>", self._clicked)
         self.canvas.bind("<Return>", self._activate_selected)
         self.canvas.bind("<space>", self._activate_selected)
+        self.footer_var = tk.StringVar(value="0 张图片")
+        ttk.Label(self, textvariable=self.footer_var, style="LibraryMeta.TLabel").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(9, 0)
+        )
 
     def apply_palette(
         self,
@@ -91,18 +127,46 @@ class ThumbnailSidebar(ttk.Frame):
         self._redraw_colors()
 
     def set_paths(self, paths: Sequence[str | Path], selected: str | Path | None = None) -> None:
+        self._all_paths = [Path(path) for path in paths]
+        self._apply_search(selected)
+
+    def _focus_search(self) -> None:
+        self.search_entry.focus_set()
+
+    def _apply_search(self, selected: str | Path | None = None) -> None:
+        if (
+            selected is None
+            and self.selected_index is not None
+            and self.selected_index < len(self.paths)
+        ):
+            selected = self.paths[self.selected_index]
+        query = self.search_var.get().strip().casefold()
+        visible = (
+            self._all_paths
+            if not query
+            else [path for path in self._all_paths if query in path.name.casefold()]
+        )
         self._generation += 1
-        self.paths = [Path(path) for path in paths]
+        self.paths = list(visible)
+        self._path_indices = {self._path_key(path): index for index, path in enumerate(self.paths)}
         self._pending.clear()
         self._photos.clear()
         self._image_items.clear()
         self._row_items.clear()
+        self._row_backgrounds.clear()
         self._text_items.clear()
+        self._meta_items.clear()
         self.canvas.delete("all")
-        width = max(190, self.canvas.winfo_width())
+        width = max(176, self.canvas.winfo_width())
         total_height = max(1, len(self.paths) * ROW_HEIGHT)
         self.canvas.configure(scrollregion=(0, 0, width, total_height))
-        self.title_var.set(f"{self._base_title} · {len(self.paths)}")
+        folder_name = self._all_paths[0].parent.name if self._all_paths else "当前文件夹"
+        self.context_var.set(f"{folder_name or '当前文件夹'} · {len(self._all_paths)} 张")
+        self.footer_var.set(
+            f"显示 {len(self.paths)} / {len(self._all_paths)} 张"
+            if query
+            else f"{len(self.paths)} 张图片"
+        )
         self.selected_index = None
         if selected is not None:
             self.select(selected, reveal=False)
@@ -111,7 +175,7 @@ class ThumbnailSidebar(ttk.Frame):
 
     def set_title(self, title: str) -> None:
         self._base_title = title
-        self.title_var.set(f"{title} · {len(self.paths)}")
+        self.title_var.set(title)
 
     @staticmethod
     def _short_name(name: str, limit: int = 22) -> str:
@@ -123,16 +187,17 @@ class ThumbnailSidebar(ttk.Frame):
         return f"{stem[:keep]}…{suffix}"
 
     def select(self, path: str | Path | None, *, reveal: bool = True) -> bool:
+        previous_index = self.selected_index
         if path is None:
             self.selected_index = None
-            self._redraw_colors()
+            self._redraw_selection(previous_index)
             return False
         key = self._path_key(path)
-        index = next((i for i, item in enumerate(self.paths) if self._path_key(item) == key), None)
+        index = self._path_indices.get(key)
         if index is None:
             return False
         self.selected_index = index
-        self._redraw_colors()
+        self._redraw_selection(previous_index, index)
         if reveal:
             self._reveal(index)
         return True
@@ -146,36 +211,82 @@ class ThumbnailSidebar(ttk.Frame):
 
     def _redraw_colors(self) -> None:
         for index, row in self._row_items.items():
-            selected = index == self.selected_index
-            self.canvas.itemconfigure(
-                row,
-                fill=self._surface_alt if selected else self._surface,
-                outline=self._accent if selected else self._border,
-                width=2 if selected else 1,
+            self._render_row_background(index, row)
+            self.canvas.itemconfigure(self._text_items[index], fill=self._foreground)
+            self.canvas.itemconfigure(self._meta_items[index], fill=self._muted)
+
+    def _redraw_selection(self, *indices: int | None) -> None:
+        """Repaint only rows whose selected state may have changed."""
+
+        for index in {value for value in indices if value is not None}:
+            row = self._row_items.get(index)
+            if row is not None:
+                self._render_row_background(index, row)
+
+    def _render_row_background(self, index: int, item: int) -> None:
+        width = max(176, self.canvas.winfo_width())
+        selected = index == self.selected_index
+        fill = self._surface_alt if selected else self._surface
+        outline = self._accent if selected else self._border
+        line_width = 2 if selected else 1
+
+        def paint(draw: ImageDraw.ImageDraw, scale: int) -> None:
+            draw.rounded_rectangle(
+                (
+                    3 * scale,
+                    4 * scale,
+                    (width - 4) * scale,
+                    (ROW_HEIGHT - 4) * scale,
+                ),
+                radius=12 * scale,
+                fill=fill,
+                outline=outline,
+                width=max(1, line_width * scale),
             )
-            self.canvas.itemconfigure(
-                self._text_items[index], fill=self._foreground if selected else self._muted
-            )
+
+        photo = render_photo(width, ROW_HEIGHT, paint, master=self.canvas)
+        self._row_backgrounds[index] = photo
+        self.canvas.itemconfigure(item, image=photo)
 
     def _ensure_row(self, index: int) -> None:
         if index in self._row_items:
             return
         path = self.paths[index]
-        width = max(190, self.canvas.winfo_width())
+        width = max(176, self.canvas.winfo_width())
         top = index * ROW_HEIGHT
-        self._row_items[index] = self.canvas.create_rectangle(
-            3, top + 3, width - 4, top + ROW_HEIGHT - 3, width=1
+        self._row_items[index] = self.canvas.create_image(
+            0,
+            top,
+            anchor="nw",
         )
-        self._image_items[index] = self.canvas.create_image(51, top + ROW_HEIGHT / 2)
+        self._image_items[index] = self.canvas.create_image(37, top + ROW_HEIGHT / 2)
         self._text_items[index] = self.canvas.create_text(
-            101,
-            top + ROW_HEIGHT / 2,
+            77,
+            top + ROW_HEIGHT / 2 - 8,
             text=self._short_name(path.name),
             anchor="w",
-            width=max(70, width - 108),
+            width=max(70, width - 84),
+            justify="left",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self._meta_items[index] = self.canvas.create_text(
+            77,
+            top + ROW_HEIGHT / 2 + 10,
+            text=self._file_meta(path),
+            anchor="w",
+            width=max(70, width - 84),
             justify="left",
             font=("Microsoft YaHei UI", 9),
         )
+
+    @staticmethod
+    def _file_meta(path: Path) -> str:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        label = f"{size / 1024:.0f} KB" if size < 1024 * 1024 else f"{size / (1024 * 1024):.1f} MB"
+        return f"{path.suffix.removeprefix('.').upper() or '图片'} · {label}"
 
     def _reveal(self, index: int) -> None:
         height = max(1, self.canvas.winfo_height())
@@ -232,7 +343,9 @@ class ThumbnailSidebar(ttk.Frame):
                 self.canvas.delete(self._row_items.pop(index))
                 self.canvas.delete(self._image_items.pop(index))
                 self.canvas.delete(self._text_items.pop(index))
+                self.canvas.delete(self._meta_items.pop(index))
                 self._photos.pop(index, None)
+                self._row_backgrounds.pop(index, None)
         for index in visible:
             self._ensure_row(index)
             if index in self._photos or index in self._pending:

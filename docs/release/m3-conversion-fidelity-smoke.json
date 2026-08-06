@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-08-05T07:26:40.291564+00:00",
+  "profile": "smoke",
+  "environment": {
+    "os": "Windows-10-10.0.19045-SP0",
+    "machine": "AMD64",
+    "python": "3.12.10",
+    "pillow": "11.3.0"
+  },
+  "fixtures": {
+    "large_sizes": [
+      [
+        2400,
+        1600
+      ],
+      [
+        3200,
+        2000
+      ]
+    ],
+    "queue_rows": 100,
+    "dpi_percentages": [
+      100,
+      200
+    ]
+  },
+  "large_images": {
+    "source_sizes": [
+      [
+        2400,
+        1600
+      ],
+      [
+        3200,
+        2000
+      ]
+    ],
+    "source_pixels": [
+      3840000,
+      6400000
+    ],
+    "counts": {
+      "pending": 0,
+      "running": 0,
+      "succeeded": 2,
+      "failed": 0,
+      "cancelled": 0
+    },
+    "elapsed_seconds": 0.652,
+    "outputs": [
+      {
+        "name": "large-1-validated.png",
+        "format": "PNG",
+        "mode": "RGB",
+        "size": [
+          2048,
+          1365
+        ],
+        "frame_count": 1
+      },
+      {
+        "name": "large-2-validated.png",
+        "format": "PNG",
+        "mode": "RGB",
+        "size": [
+          2048,
+          1280
+        ],
+        "frame_count": 1
+      }
+    ]
+  },
+  "mixed_formats": {
+    "input_suffixes": [
+      ".jpg",
+      ".png",
+      ".webp",
+      ".bmp",
+      ".tiff",
+      ".gif"
+    ],
+    "counts": {
+      "pending": 0,
+      "running": 0,
+      "succeeded": 6,
+      "failed": 0,
+      "cancelled": 0
+    },
+    "elapsed_seconds": 0.059,
+    "outputs": [
+      {
+        "name": "mixed-0-png.png",
+        "format": "PNG",
+        "mode": "RGB",
+        "size": [
+          224,
+          320
+        ],
+        "frame_count": 1
+      },
+      {
+        "name": "mixed-1-png.png",
+        "format": "PNG",
+        "mode": "RGBA",
+        "size": [
+          224,
+          320
+        ],
+        "frame_count": 1
+      },
+      {
+        "name": "mixed-2-png.png",
+        "format": "PNG",
+        "mode": "RGB",
+        "size": [
+          224,
+          320
+        ],
+        "frame_count": 1
+      },
+      {
+        "name": "mixed-3-png.png",
+        "format": "PNG",
+        "mode": "RGB",
+        "size": [
+          224,
+          320
+        ],
+        "frame_count": 1
+      },
+      {
+        "name": "mixed-4-png.png",
+        "format": "PNG",
+        "mode": "RGB",
+        "size": [
+          224,
+          320
+        ],
+        "frame_count": 1
+      },
+      {
+        "name": "mixed-5-png.png",
+        "format": "PNG",
+        "mode": "P",
+        "size": [
+          224,
+          320
+        ],
+        "frame_count": 1
+      }
+    ]
+  },
+  "transparency": {
+    "counts": {
+      "pending": 0,
+      "running": 0,
+      "succeeded": 1,
+      "failed": 0,
+      "cancelled": 0
+    },
+    "elapsed_seconds": 0.007,
+    "mode": "RGB",
+    "center_pixel": [
+      136,
+      16,
+      25
+    ],
+    "expected_pixel": [
+      136,
+      16,
+      24
+    ]
+  },
+  "animation": {
+    "counts": {
+      "pending": 0,
+      "running": 0,
+      "succeeded": 1,
+      "failed": 0,
+      "cancelled": 0
+    },
+    "elapsed_seconds": 0.013,
+    "frame_count": 3,
+    "durations_ms": [
+      80,
+      120,
+      160
+    ],
+    "expected_durations_ms": [
+      80,
+      120,
+      160
+    ],
+    "loop": 2,
+    "expected_loop": 2
+  },
+  "dpi_queue": [
+    {
+      "dpi_percent": 100,
+      "queue_rows": 100,
+      "selected_last": true,
+      "toggled_last": true,
+      "interaction_ms": 114.128,
+      "requested_width": 286,
+      "requested_height": 1
+    },
+    {
+      "dpi_percent": 200,
+      "queue_rows": 100,
+      "selected_last": true,
+      "toggled_last": true,
+      "interaction_ms": 110.989,
+      "requested_width": 286,
+      "requested_height": 1
+    }
+  ],
+  "memory": {
+    "baseline_rss_mib": 32.188,
+    "final_rss_mib": 65.574,
+    "final_growth_mib": 33.387
+  },
+  "thresholds": {
+    "minimum_large_pixels": 6400000,
+    "minimum_queue_rows": 100,
+    "maximum_dpi_percent": 200,
+    "max_interaction_ms": 1000.0,
+    "max_final_rss_growth_mib": 384.0
+  },
+  "violations": [],
+  "passed": true
+}

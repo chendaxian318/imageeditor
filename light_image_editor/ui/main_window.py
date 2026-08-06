@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
+import tempfile
 import threading
+import time
 import tkinter as tk
 import uuid
 from collections.abc import Callable, Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
+from urllib.parse import unquote, urlparse
 
-from PIL import Image, ImageGrab, ImageTk
+from PIL import Image, ImageColor, ImageGrab, ImageTk
 
 from image_ops import (
     SUPPORTED_INPUTS,
@@ -45,6 +49,42 @@ from ..batch import (
 from ..commands import EditCommand, EditTimeline
 from ..diagnostics import CrashStore, DiagnosticReporter
 from ..document import Document, DocumentState
+from ..domain import (
+    AlphaBrushStroke,
+    AssetRevision,
+    ContentEditRequest,
+    ConversionControlState,
+    ConversionDraft,
+    ConversionDraftHistory,
+    ConversionQueue,
+    ConversionRunner,
+    ConversionRunResult,
+    ConversionSession,
+    ConversionSessionCheckpointWriter,
+    ConversionSessionError,
+    ConversionSessionStore,
+    ConversionTaskRecord,
+    ConversionTaskStatus,
+    ExportProfile,
+    GenerationReference,
+    GenerationRequest,
+    JobRequestKind,
+    JobStatus,
+    ManagedJobSnapshot,
+    NormalizedQuad,
+    Provenance,
+    RecipeFileError,
+    RecipeStore,
+    Scalar,
+    SelectionMaskStroke,
+    TextReplacementDraft,
+    TextReplacementHistory,
+    TransformRecipe,
+    execute_transform_recipe,
+    quad_bounds,
+    serialize_alpha_strokes,
+    validate_normalized_quad,
+)
 from ..dpi import DpiManager, dpi_scale, enable_process_dpi_awareness, monitor_work_area
 from ..files import (
     copy_file,
@@ -59,7 +99,7 @@ from ..files import (
     validate_filename_affix,
 )
 from ..formats import AnimationSequence, codec_capabilities, decode_animation, export_animation
-from ..i18n import SUPPORTED_LOCALES, Localizer
+from ..i18n import Localizer
 from ..identity import PRODUCT_NAME_ZH
 from ..image_loader import ImageLoader, ImageLoadFailure
 from ..metadata import image_properties
@@ -74,6 +114,7 @@ from ..projects import (
     load_project,
     save_project,
 )
+from ..providers import MOCK_MODEL_ID, MockProvider, ProviderCapability
 from ..renderer import (
     SizeSpec,
     apply_command_to_plan,
@@ -82,8 +123,50 @@ from ..renderer import (
     reduce_timeline,
     render_image,
 )
+from ..services.ai_authorization import AIAuthorizationGate, AIExecutionRequirements
+from ..services.asset_repository import AssetRepository
+from ..services.background_compositor import (
+    BackgroundCompositionResult,
+    BackgroundKind,
+    BackgroundSpec,
+    compose_background,
+)
+from ..services.font_matcher import (
+    FONT_FILES,
+    FontMatchError,
+    FontMatchSuggestion,
+    match_fonts,
+)
+from ..services.job_manager import JobManager, JobManagerPersistenceError
+from ..services.provider_catalog import (
+    GenerationProviderCatalog,
+    GenerationProviderProfile,
+)
+from ..services.smart_selection import (
+    SmartSelectionError,
+    SmartSelectionSuggestion,
+    decode_selection_mask,
+    detect_smart_selection,
+    refine_selection_mask,
+)
+from ..services.sqlite_asset_repository import SQLiteAssetRepository
+from ..services.text_ocr import (
+    TextOcrBackend,
+    TextOcrResult,
+    TextOcrUnavailableError,
+    create_default_text_ocr_backend,
+)
+from ..services.text_region_detector import TextRegionSuggestion, detect_text_regions
 from ..session import SessionStore
 from ..settings import SETTINGS_SCHEMA_VERSION, SettingsStore
+from ..shell import (
+    AssetHandoff,
+    ModeId,
+    ModeRouter,
+    ModeTransition,
+    RevisionHandoff,
+    create_default_feature_registry,
+)
 from ..theme import ThemeManager, ThemeTokens, resolve_theme
 from ..thumbnails import ThumbnailLoader
 from ..update_security import load_trusted_keys, trusted_keys_path
@@ -96,11 +179,112 @@ from ..updater import (
 )
 from ..version import __version__
 from ..windows_drop import WindowsFileDrop
+from ..windows_effects import (
+    BorderlessWindowController,
+    RoundedWindowEffect,
+    should_use_borderless_chrome,
+)
+from .conversion_workspace import ConversionWorkspace
 from .curve_editor import CurveEditor
+from .feature_palette import FeatureCommandPalette
+from .generation_workspace import GenerationCandidateGrid, GenerationCandidateItem
+from .material import (
+    MaterialButton,
+    MaterialCommandDock,
+    MaterialFloatingBar,
+    MaterialLookStrip,
+    MaterialSlider,
+    MaterialTabStrip,
+)
+from .task_tray import (
+    TaskTray,
+    UnifiedTaskItem,
+    UnifiedTaskKind,
+    UnifiedTaskStatus,
+)
 from .thumbnail_sidebar import ThumbnailSidebar
+from .window_chrome import MaterialTitleBar
 
 APP_NAME = PRODUCT_NAME_ZH
 ZOOM_LEVELS = ("适应", "50%", "100%", "150%", "200%")
+MIN_ZOOM_PERCENT = 10
+MAX_ZOOM_PERCENT = 800
+ZOOM_STEP_FACTOR = 1.1
+ANIMATION_SPEED_FACTORS = {
+    "0.5×": 0.5,
+    "1×": 1.0,
+    "1.5×": 1.5,
+    "2×": 2.0,
+}
+TRANSPARENCY_BACKGROUND_LABELS: dict[str, str | None] = {
+    "不自动处理": None,
+    "白色背景": "#ffffff",
+    "黑色背景": "#000000",
+}
+SMART_TEXT_FONTS = tuple(FONT_FILES)
+SMART_TEXT_ALIGNMENTS = {
+    "左对齐": "left",
+    "居中": "center",
+    "右对齐": "right",
+}
+SMART_TEXT_EFFECTS = {
+    "普通": "plain",
+    "描边": "outline",
+    "投影": "shadow",
+    "线性渐变": "gradient",
+    "发光": "glow",
+}
+SMART_TEXT_EFFECT_LABELS = {value: label for label, value in SMART_TEXT_EFFECTS.items()}
+SMART_TEXT_EFFECT_DEFAULT_COLORS = {
+    "plain": "#ffffff",
+    "outline": "#ffffff",
+    "shadow": "#303030",
+    "gradient": "#4285f4",
+    "glow": "#80d8ff",
+}
+GENERATION_REFERENCE_ROLES = {
+    "内容": "content",
+    "风格": "style",
+    "构图": "composition",
+}
+GENERATION_REFERENCE_ROLE_LABELS = {
+    value: label for label, value in GENERATION_REFERENCE_ROLES.items()
+}
+GENERATION_STYLE_PRESETS = {
+    "无": "",
+    "摄影质感": "photography",
+    "插画": "illustration",
+    "水彩": "watercolor",
+    "水墨": "ink",
+    "像素艺术": "pixel_art",
+}
+
+
+def _local_file_uri_path(uri: str) -> Path:
+    parsed = urlparse(uri)
+    if parsed.scheme.casefold() != "file" or parsed.netloc not in {"", "localhost"}:
+        raise ValueError("图像服务结果不是受支持的本地文件 URI")
+    value = unquote(parsed.path)
+    if os.name == "nt" and len(value) >= 3 and value[0] == "/" and value[2] == ":":
+        value = value[1:]
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError("图像服务结果必须使用绝对本地路径")
+    return path.resolve(strict=False)
+
+
+MODE_LABELS = {
+    ModeId.VIEWER: "看图",
+    ModeId.CONVERT: "转图",
+    ModeId.EDIT: "改图",
+    ModeId.GENERATE: "生图",
+}
+MODE_HINTS = {
+    ModeId.VIEWER: "浏览与预览 · 本地",
+    ModeId.CONVERT: "裁切、尺寸与格式 · 本地",
+    ModeId.EDIT: "调色、标注与智能改图",
+    ModeId.GENERATE: "智能生成 · 按需启用",
+}
 ANNOTATION_TOOL_LABELS = {
     "select": "选择",
     "crop": "裁剪",
@@ -206,6 +390,8 @@ class ImageEditorApp(tk.Tk):
         image_loader: ImageLoader | None = None,
         preview_renderer: PreviewRenderer | None = None,
         session_store: SessionStore | None = None,
+        asset_repository: AssetRepository | None = None,
+        text_ocr_backend: TextOcrBackend | None = None,
     ) -> None:
         enable_process_dpi_awareness()
         super().__init__()
@@ -217,13 +403,127 @@ class ImageEditorApp(tk.Tk):
         )
         self.preview_renderer = preview_renderer or PreviewRenderer()
         self.session_store = session_store or SessionStore()
+        self.asset_repository = asset_repository or SQLiteAssetRepository(
+            self.settings_store.path.with_name(".light_image_editor_assets.sqlite3"),
+            self.settings_store.path.with_name(".light_image_editor_assets"),
+        )
+        self.text_ocr_backend = text_ocr_backend or create_default_text_ocr_backend()
+        self._asset_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="asset-register",
+        )
+        self._analysis_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="image-analysis",
+        )
+        self._asset_registration_generation = 0
+        self._asset_registration_future: Future[AssetRevision] | None = None
+        self._asset_registration_path: Path | None = None
+        self._current_asset_revision: AssetRevision | None = None
+        self._asset_relocation_hint: tuple[Path, AssetRevision] | None = None
+        self._asset_identity_open_hint: tuple[Path, AssetRevision] | None = None
+        self._last_asset_registration_error: Exception | None = None
         self.diagnostic_reporter = DiagnosticReporter()
         self.crash_store = CrashStore()
-        self.localizer = Localizer(str(initial_settings.get("locale", "zh-CN")))
+        self.localizer = Localizer()
         self.theme_manager = ThemeManager(self)
         self.dpi_manager = DpiManager(self)
         self.navigation = NavigationSession([])
-        self.title(APP_NAME)
+        self.mode_router = ModeRouter()
+        self.feature_registry = create_default_feature_registry()
+        mock_output_directory = self.settings_store.path.with_name(
+            ".light_image_editor_mock_outputs"
+        )
+        self.mock_provider = MockProvider(
+            auto_complete=False,
+            auto_run_after_seconds=0.35,
+            output_directory=mock_output_directory,
+        )
+        self.generation_provider_catalog = GenerationProviderCatalog(
+            (
+                GenerationProviderProfile(
+                    manifest=self.mock_provider.manifest,
+                    model_id=MOCK_MODEL_ID,
+                    display_name="离线测试服务",
+                    status_detail="已就绪 · 完全本地 · 0 元",
+                ),
+            )
+        )
+        self.ai_authorization_gate = AIAuthorizationGate()
+        ai_job_store = self.settings_store.path.with_name(".light_image_editor_ai_jobs.json")
+        self._ai_job_recovery_error: Exception | None = None
+        try:
+            self.ai_job_manager = JobManager(self.mock_provider, ai_job_store)
+        except JobManagerPersistenceError as error:
+            self._ai_job_recovery_error = error
+            quarantine = ai_job_store.with_name(
+                f"{ai_job_store.name}.corrupt-{uuid.uuid4().hex[:8]}.bak"
+            )
+            try:
+                ai_job_store.replace(quarantine)
+            except OSError:
+                ai_job_store = ai_job_store.with_name(
+                    f".light_image_editor_ai_jobs-{uuid.uuid4().hex[:8]}.json"
+                )
+            self.ai_job_manager = JobManager(self.mock_provider, ai_job_store)
+        self._mode_unsubscribe: Callable[[], None] | None = None
+        self._mock_generation_job_id: str | None = None
+        self._mock_generation_after: str | None = None
+        self._mock_generation_import_future: Future[tuple[AssetRevision, ...]] | None = None
+        self._mock_generation_presented_job_id: str | None = None
+        self._generated_candidates_by_revision: dict[str, GenerationCandidateItem] = {}
+        self._selected_generated_revision_id: str | None = None
+        self._generation_reference_future: Future[AssetRevision] | None = None
+        self._generation_reference_revision: AssetRevision | None = None
+        self._generation_references: list[GenerationReference] = []
+        self._last_generation_request: GenerationRequest | None = None
+        self._last_generation_profile: GenerationProviderProfile | None = None
+        self._smart_edit_job_id: str | None = None
+        self._smart_edit_after: str | None = None
+        self._smart_edit_import_future: Future[AssetRevision] | None = None
+        self._smart_edit_presented_job_id: str | None = None
+        self._smart_edit_source_revision_id: str | None = None
+        self._smart_edit_result_revision: AssetRevision | None = None
+        self._smart_edit_operation: str | None = None
+        self._smart_background_alpha_revision: AssetRevision | None = None
+        self._smart_background_compose_generation = 0
+        self._smart_background_compose_future: (
+            Future[tuple[AssetRevision, BackgroundCompositionResult]] | None
+        ) = None
+        self._smart_background_compose_after: str | None = None
+        self._smart_background_compose_source_revision_id: str | None = None
+        self._smart_repair_region_box: tuple[int, int, int, int] | None = None
+        self._smart_repair_selecting_region = False
+        self._smart_selection_generation = 0
+        self._smart_selection_future: Future[tuple[SmartSelectionSuggestion, ...]] | None = None
+        self._smart_selection_suggestions: tuple[SmartSelectionSuggestion, ...] = ()
+        self._smart_selection_index = -1
+        self._smart_selection_mask_box: tuple[int, int, int, int] | None = None
+        self._smart_selection_mask_preview: ImageTk.PhotoImage | None = None
+        self._smart_mask_brush_active = False
+        self._smart_mask_brush_mode = "add"
+        self._smart_mask_current_points: list[tuple[float, float]] = []
+        self._smart_mask_strokes: list[SelectionMaskStroke] = []
+        self._smart_selection_refined_mask_rle: str | None = None
+        self._smart_text_region_box: tuple[int, int, int, int] | None = None
+        self._smart_text_selecting_region = False
+        self._smart_text_adjusting_region = False
+        self._smart_text_perspective_quad: NormalizedQuad | None = None
+        self._smart_text_detection_generation = 0
+        self._smart_text_detection_future: Future[tuple[TextRegionSuggestion, ...]] | None = None
+        self._smart_text_suggestions: tuple[TextRegionSuggestion, ...] = ()
+        self._smart_text_suggestion_index = -1
+        self._smart_text_ocr_generation = 0
+        self._smart_text_ocr_future: Future[TextOcrResult | None] | None = None
+        self._smart_font_match_generation = 0
+        self._smart_font_match_future: Future[tuple[FontMatchSuggestion, ...]] | None = None
+        self._smart_alpha_brush_active = False
+        self._smart_alpha_brush_mode = "preserve"
+        self._smart_alpha_current_points: list[tuple[float, float]] = []
+        self._smart_alpha_strokes: list[AlphaBrushStroke] = []
+        self._conversion_handoff_override: tuple[Path, AssetHandoff, RevisionHandoff] | None = None
+        self.window_title_var = tk.StringVar(value=APP_NAME)
+        self._set_window_title(APP_NAME)
         self.geometry("1240x780")
         self.minsize(1040, 680)
 
@@ -241,6 +541,13 @@ class ImageEditorApp(tk.Tk):
         self.zoom_mode = tk.StringVar(value="适应")
         self.compare_original = tk.BooleanVar(value=False)
         self.split_compare_var = tk.BooleanVar(value=False)
+        self.file_compare_var = tk.BooleanVar(value=False)
+        self._comparison_image: Image.Image | None = None
+        self._comparison_path: Path | None = None
+        self._comparison_load_generation = 0
+        self._comparison_ref_lock = threading.Lock()
+        self._comparison_render_refs: dict[int, int] = {}
+        self._retired_comparison_images: dict[int, Image.Image] = {}
         self.reveal_after_save_var = tk.BooleanVar(value=False)
         self.crop_box: tuple[int, int, int, int] | None = None
         self.drag_start: tuple[int, int] | None = None
@@ -253,10 +560,50 @@ class ImageEditorApp(tk.Tk):
         self.batch_manifest_path = self.settings_store.path.with_name(
             ".light_image_editor_batch.json"
         )
+        self.recipe_store = RecipeStore()
+        initial_conversion_recipe = TransformRecipe(
+            name="当前转换设置",
+            export_profile=ExportProfile(backup_on_overwrite=True),
+        )
+        self.conversion_draft_history = ConversionDraftHistory(
+            ConversionDraft.from_recipe(initial_conversion_recipe)
+        )
+        self._conversion_recipe_override: TransformRecipe | None = None
+        self._conversion_runner: ConversionRunner | None = None
+        self._conversion_thread: threading.Thread | None = None
+        self._conversion_poll_job: str | None = None
+        self._conversion_ui_queue: queue.Queue[tuple[int, str, object]] = queue.Queue()
+        self._conversion_recovery_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._conversion_recovery_thread: threading.Thread | None = None
+        self._conversion_recovery_poll_job: str | None = None
+        self.conversion_session_store = ConversionSessionStore()
+        self.conversion_session_path = self.settings_store.path.with_name(
+            ".light_image_editor_conversion.json"
+        )
+        self.conversion_checkpoint_writer = ConversionSessionCheckpointWriter(
+            self.conversion_session_path,
+            store=self.conversion_session_store,
+        )
+        self._conversion_session: ConversionSession | None = None
+        self._conversion_run_base_session: ConversionSession | None = None
+        self._conversion_run_queue: ConversionQueue | None = None
+        self._conversion_generation = 0
+        self._active_conversion_generation: int | None = None
+        self._conversion_tray_task_id: str | None = None
+        self._restoring_conversion_session = False
+        self._last_conversion_checkpoint = 0.0
         self._animation_sequence: AnimationSequence | None = None
         self._animation_index = 0
+        self._animation_displayed_index = 0
+        self._animation_playing = False
         self._animation_job: str | None = None
         self._animation_generation = 0
+        self._animation_pending_future: Future[AnimationSequence] | None = None
+        self._animation_resume_on_viewer = False
+        self._animation_resume_after_file_compare = False
+        self.animation_position_var = tk.StringVar(value="动画未载入")
+        self.animation_frame_var = tk.IntVar(value=1)
+        self.animation_speed_var = tk.StringVar(value="1×")
         self._ratio_lock = False
         self._preview_job: str | None = None
         self._preview_poll_jobs: set[str] = set()
@@ -290,11 +637,67 @@ class ImageEditorApp(tk.Tk):
         self.height_var = tk.StringVar()
         self.max_side_var = tk.StringVar()
         self.crop_ratio_var = tk.StringVar(value="自由")
+        self.crop_action_hint_var = tk.StringVar(value="拖动图片创建裁剪框")
         self.status_var = tk.StringVar(value="打开一张图片开始编辑")
         self.info_var = tk.StringVar(value="未载入图片")
         self.crop_var = tk.StringVar(value="未设置裁剪")
         self.size_var = tk.StringVar(value="预计输出大小：-")
-        self.edit_panel_visible_var = tk.BooleanVar(value=False)
+        self.mode_hint_var = tk.StringVar(value=MODE_HINTS[ModeId.VIEWER])
+        self.generate_prompt_var = tk.StringVar()
+        self.generate_provider_var = tk.StringVar(
+            value=self.generation_provider_catalog.default().display_name
+        )
+        self.generate_negative_prompt_var = tk.StringVar()
+        self.generate_size_var = tk.StringVar(value="1024 × 1024")
+        self.generate_count_var = tk.IntVar(value=1)
+        self.generate_style_preset_var = tk.StringVar(value="无")
+        self.generate_seed_enabled_var = tk.BooleanVar(value=False)
+        self.generate_seed_var = tk.StringVar(value="0")
+        self.generate_reference_role_var = tk.StringVar(value="内容")
+        self.generate_reference_strength_var = tk.IntVar(value=50)
+        self.generate_reference_status_var = tk.StringVar(value="未选择参考图")
+        self.generate_provider_capability_var = tk.StringVar(
+            value="离线服务能力：文生图 / 负面提示词 / 参考图 · 本地 0 元"
+        )
+        self.generate_status_var = tk.StringVar(value="离线任务尚未开始")
+        self.generate_candidates_var = tk.StringVar(value="尚无候选结果")
+        self.smart_edit_status_var = tk.StringVar(value="请选择本地高清或智能去背景")
+        self.smart_edit_result_var = tk.StringVar(value="结果将作为当前图片的新修订保存")
+        self.smart_background_tolerance_var = tk.IntVar(value=24)
+        self.smart_background_feather_var = tk.IntVar(value=32)
+        self.smart_background_replace_mode_var = tk.StringVar(value="纯色背景")
+        self.smart_background_replace_color_var = tk.StringVar(value="#ffffff")
+        self.smart_background_replace_image_var = tk.StringVar(value="尚未选择背景图片")
+        self.smart_background_replace_image_path: Path | None = None
+        self.smart_alpha_brush_size_var = tk.IntVar(value=18)
+        self.smart_alpha_refinement_var = tk.StringVar(value="边缘画笔：等待去背景结果")
+        self.smart_repair_feather_var = tk.IntVar(value=8)
+        self.smart_repair_region_var = tk.StringVar(value="区域：请在画布框选需要擦除的物体")
+        self.smart_mask_brush_size_var = tk.IntVar(value=18)
+        self.smart_mask_refinement_var = tk.StringVar(value="蒙版精修：请先智能识别主体")
+        self.smart_text_value_var = tk.StringVar(value="新文字")
+        self.smart_text_font_var = tk.StringVar(value="微软雅黑")
+        self.smart_text_font_size_var = tk.IntVar(value=32)
+        self.smart_text_color_var = tk.StringVar(value="#202124")
+        self.smart_text_align_var = tk.StringVar(value="居中")
+        self.smart_text_rotation_var = tk.DoubleVar(value=0.0)
+        self.smart_text_curve_var = tk.DoubleVar(value=0.0)
+        self.smart_text_effect_var = tk.StringVar(value="普通")
+        self.smart_text_effect_color_var = tk.StringVar(value="#ffffff")
+        self.smart_text_effect_size_var = tk.IntVar(value=4)
+        self.smart_text_region_var = tk.StringVar(value="区域：请在画布框选原文字")
+        self.smart_text_ocr_var = tk.StringVar(
+            value=(
+                f"框内文字识别：{self.text_ocr_backend.display_name}可用"
+                if self.text_ocr_backend.available
+                else "框内文字识别：未安装，可继续手工输入"
+            )
+        )
+        self.smart_text_font_match_var = tk.StringVar(
+            value="字体推荐：框选文字并填写或识别原文字后可使用"
+        )
+        self.smart_text_history = TextReplacementHistory()
+        self.edit_panel_visible_var = tk.BooleanVar(value=True)
         self.thumbnail_sidebar_visible_var = tk.BooleanVar(value=True)
         self.slideshow_interval_var = tk.DoubleVar(value=3.0)
         self.slideshow_loop_var = tk.BooleanVar(value=True)
@@ -307,7 +710,10 @@ class ImageEditorApp(tk.Tk):
         self.batch_conflict_var = tk.StringVar(value="unique")
         self.batch_strip_metadata_var = tk.BooleanVar(value=False)
         self.batch_preserve_animation_var = tk.BooleanVar(value=True)
-        self.locale_var = tk.StringVar(value=self.localizer.locale)
+        self.conversion_output_dir_var = tk.StringVar()
+        self.conversion_background_var = tk.StringVar(value="不自动处理")
+        self.conversion_recipe_status_var = tk.StringVar(value="使用当前面板设置")
+        self.conversion_job_status_var = tk.StringVar(value="尚未开始转换")
         self.theme_mode_var = tk.StringVar(value="system")
         self.decode_workers_var = tk.IntVar(value=2)
         self.preview_cache_var = tk.IntVar(value=3)
@@ -315,10 +721,12 @@ class ImageEditorApp(tk.Tk):
         self.crash_reporting_consent_var = tk.BooleanVar(value=False)
         self.onboarding_completed = False
         self._theme_poll_job: str | None = None
+        self._config_save_job: str | None = None
         self._startup_jobs: list[str] = []
         self._last_theme_name = ""
         self._last_failed_path: Path | None = None
         self._onboarding_window: tk.Toplevel | None = None
+        self._feature_palette_window: FeatureCommandPalette | None = None
         self._services_shutdown = False
 
         self.rotation = 0
@@ -377,6 +785,13 @@ class ImageEditorApp(tk.Tk):
         self.recent_directories: list[str] = []
         self.recent_projects: list[str] = []
         self.recent_export_directories: list[str] = []
+        self.generation_prompt_history: list[str] = []
+        self.generation_candidate_revision_ids: list[str] = []
+        self.generation_favorite_revision_ids: list[str] = []
+        self.generate_favorites_only_var = tk.BooleanVar(value=False)
+        self.generation_reference_revision_id = ""
+        self.generation_reference_settings: list[tuple[str, str, float]] = []
+        self.task_tray_settings: list[dict[str, object]] = []
         self.favorite_actions: list[str] = ["open", "save", "undo", "redo", "crop"]
         self.custom_shortcuts: dict[str, str] = {
             key: shortcut for key, _label, shortcut in ACTION_CATALOG
@@ -394,17 +809,41 @@ class ImageEditorApp(tk.Tk):
         default_size = (round(1240 * scale), round(780 * scale))
         self.geometry(self.dpi_manager.fit_saved_geometry(self._saved_geometry, default_size))
         self._update_monitor_constraints()
+        self.window_controller: BorderlessWindowController | None = None
+        if should_use_borderless_chrome():
+            self.window_controller = BorderlessWindowController(self)
         self._build_ui()
+        self.after_idle(self._restore_task_tray_history)
+        self.after_idle(self._restore_ai_job_summary)
+        self.after_idle(self._restore_generation_candidate_history)
+        self.after_idle(self._restore_generation_reference)
+        self.after_idle(self._update_generation_provider_capability_label)
+        self.rounded_window_effect = RoundedWindowEffect(
+            self,
+            radius=28,
+            allow_region_fallback=self.window_controller is not None,
+            maximized_provider=(
+                (lambda: self.window_controller.maximized)
+                if self.window_controller is not None
+                else None
+            ),
+            fullscreen_provider=(
+                (lambda: self.window_controller.fullscreen)
+                if self.window_controller is not None
+                else None
+            ),
+        )
         self._setup_experience()
         self._bind_shortcuts()
         self._drop_target = WindowsFileDrop(self, self.open_paths)
         self._startup_jobs.append(self.after(0, self._drop_target.enable))
-        self.bind("<Configure>", self._on_configure)
+        self.bind("<Configure>", self._on_configure, add="+")
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._autosave_job = self.after(2000, self._autosave_session)
         self._source_monitor_job = self.after(2000, self._monitor_source_file)
         self._startup_jobs.append(self.after(250, self._offer_session_recovery))
         self._startup_jobs.append(self.after(650, self._offer_batch_recovery))
+        self._startup_jobs.append(self.after(800, self._offer_conversion_recovery))
         self._startup_jobs.append(self.after(900, self._offer_onboarding))
         self._startup_jobs.append(self.after(1200, self._offer_crash_report))
         self._theme_poll_job = self.after(2000, self._poll_system_theme)
@@ -423,25 +862,32 @@ class ImageEditorApp(tk.Tk):
         ):
             self.localizer.register_variable(variable)
         self.localizer.bind_mapped_windows(self)
-        self.localizer.set_locale(self.locale_var.get(), self)
-        self.thumbnail_sidebar.set_title(self.localizer.gettext("thumbnail_directory"))
-        self.title(self.localizer.translate_text(APP_NAME))
+        self.localizer.set_locale("zh-CN", self)
+        self.thumbnail_sidebar.set_title("资源库")
+        self._set_window_title(self.localizer.translate_text(APP_NAME))
         self._refresh_accessible_names()
-        toolbar_target = self.toolbar.winfo_children()[0]
-        edit_target = self.edit_toolbar.winfo_children()[0]
+        toolbar_target = self.canvas_select_button
+        edit_target = self.inspector_tabs
         self.focus_navigator = FocusNavigator(
             self,
             (
                 toolbar_target,
                 self.thumbnail_sidebar.canvas,
+                self.conversion_workspace.tree,
                 edit_target,
                 self.canvas,
                 self.panel_canvas,
+                self.task_tray.trigger_button,
+                self.dock_open_button,
                 self.status_label,
             ),
         )
         self._name_interactive_widgets(self)
         self.bind_all("<Map>", self._on_accessible_widget_map, add="+")
+
+    def _set_window_title(self, title: str) -> None:
+        self.title(title)
+        self.window_title_var.set(title)
 
     def report_callback_exception(
         self,
@@ -463,14 +909,17 @@ class ImageEditorApp(tk.Tk):
 
     def _refresh_accessible_names(self) -> None:
         set_accessible_name(self.canvas, self.localizer.gettext("accessibility_canvas"))
-        set_accessible_name(self.toolbar, self.localizer.gettext("accessibility_toolbar"))
-        set_accessible_name(self.edit_toolbar, self.localizer.gettext("accessibility_edit_tools"))
+        set_accessible_name(self.canvas_tools, self.localizer.gettext("accessibility_toolbar"))
+        set_accessible_name(self.panel_shell, self.localizer.gettext("accessibility_edit_tools"))
         set_accessible_name(self.panel_canvas, self.localizer.gettext("accessibility_panel"))
         set_accessible_name(self.status_label, self.localizer.gettext("accessibility_status"))
         set_accessible_name(
             self.thumbnail_sidebar.canvas,
             self.localizer.gettext("accessibility_thumbnails"),
         )
+        set_accessible_name(self.conversion_workspace.tree, "转换任务队列")
+        set_accessible_name(self.task_tray.trigger_button, "打开统一任务托盘")
+        set_accessible_name(self.task_tray.tree, "统一任务列表")
 
     def _apply_thumbnail_palette(self, tokens: ThemeTokens) -> None:
         self.thumbnail_sidebar.apply_palette(
@@ -481,6 +930,50 @@ class ImageEditorApp(tk.Tk):
             accent=tokens.accent,
             border=tokens.border,
         )
+        if hasattr(self, "conversion_workspace"):
+            self.conversion_workspace.apply_tokens(tokens)
+        if hasattr(self, "task_tray"):
+            self.task_tray.apply_tokens(tokens)
+        if self._feature_palette_window is not None:
+            try:
+                if self._feature_palette_window.winfo_exists():
+                    self._feature_palette_window.apply_tokens(tokens)
+            except tk.TclError:
+                self._feature_palette_window = None
+        if hasattr(self, "command_dock"):
+            self.command_dock.apply_palette(
+                background=tokens.surface_container,
+                container=tokens.surface,
+                border=tokens.border,
+            )
+        if hasattr(self, "canvas_tools"):
+            self.canvas_tools.apply_palette(
+                background=tokens.canvas,
+                container=tokens.surface,
+                border=tokens.border,
+                shadow=tokens.surface_high,
+            )
+        if hasattr(self, "animation_controls"):
+            self.animation_controls.apply_palette(
+                background=tokens.canvas,
+                container=tokens.surface,
+                border=tokens.border,
+                shadow=tokens.surface_high,
+            )
+        if hasattr(self, "crop_action_bar"):
+            self.crop_action_bar.apply_palette(
+                background=tokens.canvas,
+                container=tokens.surface,
+                border=tokens.border,
+                shadow=tokens.surface_high,
+            )
+        if hasattr(self, "animation_frame_slider"):
+            self.animation_frame_slider.apply_palette(
+                surface=tokens.surface,
+                track=tokens.surface_high,
+                accent=tokens.accent,
+                outline=tokens.border,
+            )
 
     def _on_accessible_widget_map(self, event: tk.Event) -> None:
         widget = event.widget
@@ -602,132 +1095,236 @@ class ImageEditorApp(tk.Tk):
     def _build_ui(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure("TButton", padding=(10, 7))
-        style.configure("Accent.TButton", padding=(12, 8), font=("Microsoft YaHei UI", 9, "bold"))
-        style.configure("Panel.TLabelframe", padding=12)
 
-        self.columnconfigure(0, weight=0)
+        self.columnconfigure(0, weight=0, minsize=220)
         self.columnconfigure(1, weight=1)
-        self.columnconfigure(2, weight=0)
+        self.columnconfigure(2, weight=0, minsize=296)
         self.rowconfigure(2, weight=1)
 
         self._build_menu()
+        self.config(menu="")
 
-        self.toolbar = ttk.Frame(self, padding=(12, 10))
+        self.window_titlebar: MaterialTitleBar | None = None
+        if self.window_controller is not None:
+            self.window_titlebar = MaterialTitleBar(
+                self,
+                titlevariable=self.window_title_var,
+                controller=self.window_controller,
+                close_command=self.close,
+            )
+            self.window_titlebar.grid(row=0, column=0, columnspan=3, sticky="ew")
+
+        self.toolbar = ttk.Frame(self, style="AppBar.TFrame", padding=(18, 11))
         self.toolbar.grid(row=0, column=0, columnspan=3, sticky="ew")
-        self.toolbar.columnconfigure(11, weight=1)
+        self.toolbar.columnconfigure(1, weight=1)
 
-        ttk.Button(self.toolbar, text="打开", command=self.open_file).grid(
-            row=0, column=0, padx=(0, 8)
+        brand = ttk.Frame(self.toolbar, style="AppBar.TFrame")
+        brand.grid(row=0, column=0, sticky="w", padx=(0, 18))
+        ttk.Label(brand, text="◈", style="BrandMark.TLabel").grid(
+            row=0, column=0, rowspan=2, padx=(0, 9)
         )
-        ttk.Button(self.toolbar, text="上一张", command=lambda: self.navigate_folder(-1)).grid(
-            row=0, column=1, padx=(0, 6)
+        ttk.Label(brand, text=APP_NAME, style="Title.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(
+            brand,
+            text="个性化影像工作台",
+            style="Eyebrow.TLabel",
+        ).grid(row=1, column=1, sticky="w")
+
+        context = ttk.Frame(self.toolbar, style="AppBar.TFrame")
+        context.grid(row=0, column=1, sticky="w")
+        ttk.Label(
+            context,
+            textvariable=self.info_var,
+            style="Muted.Toolbar.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            context,
+            text="本地编辑 · 自动保存",
+            style="Eyebrow.TLabel",
+        ).grid(row=1, column=0, sticky="w")
+
+        self.previous_button = ttk.Button(
+            self.toolbar,
+            text="‹",
+            width=3,
+            style="Icon.TButton",
+            command=lambda: self.navigate_folder(-1),
         )
-        ttk.Button(self.toolbar, text="下一张", command=lambda: self.navigate_folder(1)).grid(
-            row=0, column=2, padx=(0, 8)
-        )
-        ttk.Button(self.toolbar, text="实际尺寸", command=lambda: self.set_zoom("100%")).grid(
-            row=0, column=3, padx=(0, 6)
-        )
-        ttk.Button(self.toolbar, text="全屏", command=self.toggle_fullscreen).grid(
-            row=0, column=4, padx=(0, 6)
-        )
-        ttk.Button(self.toolbar, text="幻灯片", command=self.toggle_slideshow).grid(
-            row=0, column=5, padx=(0, 6)
-        )
-        ttk.Button(self.toolbar, text="属性", command=self.show_properties).grid(
-            row=0, column=6, padx=(0, 6)
-        )
+        self.previous_button.grid(row=0, column=2, padx=(8, 2))
+        ttk.Button(
+            self.toolbar,
+            text="›",
+            width=3,
+            style="Icon.TButton",
+            command=lambda: self.navigate_folder(1),
+        ).grid(row=0, column=3, padx=(0, 8))
+        ttk.Button(
+            self.toolbar,
+            text="幻灯片",
+            width=5,
+            style="Quiet.TButton",
+            command=self.toggle_slideshow,
+        ).grid(row=0, column=4, padx=(0, 2))
+        ttk.Button(
+            self.toolbar,
+            text="属性",
+            width=4,
+            style="Quiet.TButton",
+            command=self.show_properties,
+        ).grid(row=0, column=5, padx=(0, 8))
         ttk.Checkbutton(
             self.toolbar,
-            text="编辑工具",
+            text="编辑器",
+            style="Toolbar.TCheckbutton",
             variable=self.edit_panel_visible_var,
             command=self.toggle_edit_panel,
-        ).grid(row=0, column=7, padx=(0, 12))
+        ).grid(row=0, column=6, padx=(0, 8))
         ttk.Checkbutton(
             self.toolbar,
-            text="缩略图",
+            text="资源库",
+            style="Toolbar.TCheckbutton",
             variable=self.thumbnail_sidebar_visible_var,
             command=self.toggle_thumbnail_sidebar,
-        ).grid(row=0, column=8, padx=(0, 12))
-        ttk.Label(self.toolbar, text="缩放").grid(row=0, column=9, padx=(0, 4))
-        zoom = ttk.Combobox(
+        ).grid(row=0, column=7, padx=(0, 10))
+        ttk.Label(self.toolbar, text="缩放", style="Toolbar.TLabel").grid(
+            row=0, column=8, padx=(0, 4)
+        )
+        self.zoom_box = ttk.Combobox(
             self.toolbar, textvariable=self.zoom_mode, values=ZOOM_LEVELS, state="readonly", width=7
         )
-        zoom.grid(row=0, column=10, padx=(0, 8))
-        zoom.bind("<<ComboboxSelected>>", lambda _event: self._zoom_changed())
-        ttk.Label(self.toolbar, textvariable=self.info_var).grid(row=0, column=11, sticky="e")
+        self.zoom_box.grid(row=0, column=9)
+        self.zoom_box.bind("<<ComboboxSelected>>", lambda _event: self._zoom_changed())
+        self.menu_button = ttk.Button(
+            self.toolbar,
+            text="⋯",
+            width=3,
+            style="Icon.TButton",
+            command=self._show_app_menu,
+        )
+        self.menu_button.grid(row=0, column=10, padx=(8, 0))
+        self.toolbar.grid_remove()
 
-        self.edit_toolbar = ttk.Frame(self, padding=(12, 0, 12, 8))
-        self.edit_toolbar.grid(row=1, column=0, columnspan=3, sticky="ew")
-        ttk.Button(self.edit_toolbar, text="粘贴", command=self.paste_from_clipboard).grid(
-            row=0, column=0, padx=(0, 8)
+        self.mode_bar = ttk.Frame(self, style="Surface.TFrame", padding=(14, 5))
+        self.mode_bar.grid(row=1, column=0, columnspan=3, sticky="ew")
+        self.mode_bar.columnconfigure(0, weight=1)
+        self.mode_bar.columnconfigure(2, weight=1)
+        mode_group = ttk.Frame(self.mode_bar, style="Surface.TFrame")
+        mode_group.grid(row=0, column=1)
+        self.mode_buttons: dict[ModeId, MaterialButton] = {}
+        for column, mode in enumerate(ModeId):
+            button = MaterialButton(
+                mode_group,
+                text=MODE_LABELS[mode],
+                width=82,
+                height=36,
+                command=partial(self._activate_mode, mode),
+            )
+            button.grid(row=0, column=column, padx=2)
+            set_accessible_name(button, f"切换到{MODE_LABELS[mode]}模式")
+            self.mode_buttons[mode] = button
+
+        self.viewer_mode_actions = ttk.Frame(self.mode_bar, style="Surface.TFrame")
+        self.viewer_mode_actions.grid(row=0, column=0, sticky="w")
+        self.viewer_open_folder_button = MaterialButton(
+            self.viewer_mode_actions,
+            text="文件夹",
+            width=60,
+            height=30,
+            command=self.open_directory,
         )
-        ttk.Button(
-            self.edit_toolbar, text="保存为", style="Accent.TButton", command=self.save_as
-        ).grid(row=0, column=1, padx=(0, 8))
-        ttk.Button(self.edit_toolbar, text="快速导出", command=self.quick_export).grid(
-            row=0, column=2, padx=(0, 8)
+        self.viewer_open_folder_button.grid(row=0, column=0, padx=(0, 5))
+        set_accessible_name(self.viewer_open_folder_button, "打开图片文件夹")
+        viewer_previous = MaterialButton(
+            self.viewer_mode_actions,
+            text="‹",
+            width=34,
+            height=30,
+            variant="icon",
+            command=lambda: self.navigate_folder(-1),
         )
-        ttk.Button(self.edit_toolbar, text="复制结果", command=self.copy_result).grid(
-            row=0, column=3, padx=(0, 8)
+        viewer_previous.grid(row=0, column=1, padx=(0, 1))
+        set_accessible_name(viewer_previous, "上一张图片")
+        viewer_next = MaterialButton(
+            self.viewer_mode_actions,
+            text="›",
+            width=34,
+            height=30,
+            variant="icon",
+            command=lambda: self.navigate_folder(1),
         )
-        ttk.Button(self.edit_toolbar, text="批量", command=self.batch_process).grid(
-            row=0, column=4, padx=(0, 14)
+        viewer_next.grid(row=0, column=2, padx=1)
+        set_accessible_name(viewer_next, "下一张图片")
+        viewer_fit = MaterialButton(
+            self.viewer_mode_actions,
+            text="适应",
+            width=48,
+            height=30,
+            command=self.reset_view,
         )
-        ttk.Button(self.edit_toolbar, text="撤销", command=self.undo).grid(
-            row=0, column=5, padx=(0, 8)
+        viewer_fit.grid(row=0, column=3, padx=(5, 1))
+        set_accessible_name(viewer_fit, "适应窗口")
+        viewer_actual = MaterialButton(
+            self.viewer_mode_actions,
+            text="1:1",
+            width=44,
+            height=30,
+            command=lambda: self.set_zoom("100%"),
         )
-        ttk.Button(self.edit_toolbar, text="裁剪复位", command=self.reset_crop).grid(
-            row=0, column=6, padx=(0, 8)
+        viewer_actual.grid(row=0, column=4, padx=1)
+        set_accessible_name(viewer_actual, "实际尺寸")
+        self.viewer_file_compare_button = MaterialButton(
+            self.viewer_mode_actions,
+            text="双图",
+            width=54,
+            height=30,
+            command=self._toggle_file_comparison,
         )
-        ttk.Button(self.edit_toolbar, text="应用裁剪", command=self.apply_crop).grid(
-            row=0, column=7, padx=(0, 14)
+        self.viewer_file_compare_button.grid(row=0, column=5, padx=(5, 1))
+        set_accessible_name(self.viewer_file_compare_button, "选择另一张图片并排比较")
+        self.viewer_to_convert_button = MaterialButton(
+            self.viewer_mode_actions,
+            text="去转图",
+            width=60,
+            height=30,
+            variant="filled",
+            command=partial(self._activate_mode, ModeId.CONVERT),
         )
-        ttk.Button(self.edit_toolbar, text="左转", command=lambda: self.rotate(-90)).grid(
-            row=0, column=8, padx=(0, 6)
+        self.viewer_to_convert_button.grid(row=0, column=6, padx=(7, 1))
+        set_accessible_name(self.viewer_to_convert_button, "将当前图片送到转图模式")
+        self.viewer_to_edit_button = MaterialButton(
+            self.viewer_mode_actions,
+            text="去改图",
+            width=60,
+            height=30,
+            command=partial(self._activate_mode, ModeId.EDIT),
         )
-        ttk.Button(self.edit_toolbar, text="右转", command=lambda: self.rotate(90)).grid(
-            row=0, column=9, padx=(0, 6)
-        )
-        ttk.Button(self.edit_toolbar, text="水平翻转", command=self.flip_horizontal).grid(
-            row=0, column=10, padx=(0, 6)
-        )
-        ttk.Button(self.edit_toolbar, text="垂直翻转", command=self.flip_vertical).grid(
-            row=0, column=11, padx=(0, 12)
-        )
-        ttk.Checkbutton(
-            self.edit_toolbar,
-            text="对比原图",
-            variable=self.compare_original,
-            command=self._toggle_compare_original,
-        ).grid(row=0, column=12, padx=(0, 12))
-        ttk.Checkbutton(
-            self.edit_toolbar,
-            text="分屏对比",
-            variable=self.split_compare_var,
-            command=self._toggle_split_compare,
-        ).grid(row=0, column=13, padx=(0, 6))
+        self.viewer_to_edit_button.grid(row=0, column=7, padx=1)
+        set_accessible_name(self.viewer_to_edit_button, "将当前图片送到改图模式")
+        mode_status_area = ttk.Frame(self.mode_bar, style="Surface.TFrame")
+        mode_status_area.grid(row=0, column=2, sticky="e", padx=(12, 0))
         ttk.Label(
-            self.edit_toolbar,
-            text=self.localizer.gettext("split_compare_hint"),
-        ).grid(row=0, column=14, padx=(0, 6))
-
-        annotation_toolbar = ttk.Frame(self.edit_toolbar)
-        annotation_toolbar.grid(row=1, column=0, columnspan=15, sticky="ew", pady=(8, 0))
-        for column, tool in enumerate(ANNOTATION_TOOL_LABELS):
-            ttk.Button(
-                annotation_toolbar,
-                text=ANNOTATION_TOOL_LABELS[tool],
-                command=partial(self._set_annotation_tool, tool),
-            ).grid(row=0, column=column, padx=(0, 4))
-        ttk.Label(annotation_toolbar, textvariable=self.current_tool_label_var).grid(
-            row=0, column=len(ANNOTATION_TOOL_LABELS), padx=(8, 0)
+            mode_status_area,
+            textvariable=self.mode_hint_var,
+            style="Muted.Toolbar.TLabel",
+        ).grid(row=0, column=0, sticky="e", padx=(0, 8))
+        self.task_tray = TaskTray(
+            self,
+            mode_status_area,
+            on_activate=self._activate_unified_task,
+            on_cancel=self._cancel_unified_task,
+            on_retry=self._retry_unified_task,
+            on_changed=self._task_tray_changed,
         )
-
-        self.favorite_toolbar = ttk.Frame(self.edit_toolbar)
-        self.favorite_toolbar.grid(row=2, column=0, columnspan=15, sticky="ew", pady=(6, 0))
+        self.task_tray.trigger_button.grid(row=0, column=1, sticky="e")
+        self.favorite_toolbar = ttk.Frame(self.mode_bar, style="Surface.TFrame")
+        self.favorite_toolbar.grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            pady=(4, 0),
+        )
         self._refresh_favorite_toolbar()
+        set_accessible_name(self.mode_bar, "四模式导航")
 
         self.thumbnail_sidebar = ThumbnailSidebar(
             self,
@@ -735,11 +1332,27 @@ class ImageEditorApp(tk.Tk):
             loader=ThumbnailLoader(
                 max_workers=max(1, min(4, self.decode_workers_var.get())), cache_size=96
             ),
-            title=self.localizer.gettext("thumbnail_directory"),
+            title="资源库",
+            style="Surface.TFrame",
         )
-        self.thumbnail_sidebar.grid(row=2, column=0, sticky="ns")
+        self.thumbnail_sidebar.grid(row=2, column=0, sticky="nsew")
 
-        canvas_frame = ttk.Frame(self, padding=(8, 0, 8, 12))
+        self.conversion_workspace = ConversionWorkspace(
+            self,
+            self._activate_conversion_input,
+            on_queue_changed=self._conversion_queue_changed,
+            on_request_files=self._choose_conversion_files,
+            on_request_folder=self._choose_conversion_folder,
+            on_retry_tasks=self._retry_conversion_tasks,
+            on_open_result=self._open_conversion_result,
+            on_reveal_result=self._reveal_file,
+            tokens=self.theme_manager.tokens,
+        )
+        self.conversion_workspace.grid(row=2, column=0, sticky="nsew")
+        self.conversion_workspace.grid_remove()
+
+        canvas_frame = ttk.Frame(self, style="CanvasShell.TFrame", padding=(0, 0, 0, 66))
+        self.canvas_frame = canvas_frame
         canvas_frame.grid(row=2, column=1, sticky="nsew")
         canvas_frame.rowconfigure(0, weight=1)
         canvas_frame.columnconfigure(0, weight=1)
@@ -748,16 +1361,18 @@ class ImageEditorApp(tk.Tk):
             canvas_frame,
             bg="#1f232b",
             highlightthickness=1,
-            highlightcolor="#5eead4",
+            highlightcolor="#67507a",
             cursor="crosshair",
             takefocus=True,
         )
+        self.canvas.material_role = "editor-canvas"
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.canvas.bind("<ButtonPress-1>", self._canvas_press)
         self.canvas.bind("<B1-Motion>", self._canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._canvas_release)
         self.canvas.bind("<Motion>", self._canvas_motion)
         self.canvas.bind("<MouseWheel>", self._zoom_with_wheel)
+        self.canvas.bind("<Control-MouseWheel>", self._zoom_with_wheel)
         self.canvas.bind("<ButtonPress-2>", self._start_pan)
         self.canvas.bind("<B2-Motion>", self._drag_pan)
         self.canvas.bind("<ButtonRelease-2>", self._finish_pan)
@@ -770,19 +1385,607 @@ class ImageEditorApp(tk.Tk):
         self.canvas.bind("<Alt-Up>", lambda _event: self._nudge_selected(0, -1))
         self.canvas.bind("<Alt-Down>", lambda _event: self._nudge_selected(0, 1))
 
-        self.panel_shell = ttk.Frame(self, padding=(0, 0, 8, 12), width=360)
-        self.panel_shell.grid(row=2, column=2, sticky="ns")
-        self.panel_shell.rowconfigure(0, weight=1)
+        self.canvas_tools = MaterialFloatingBar(canvas_frame, max_width=178)
+        self.canvas_tools.place(x=14, y=14, anchor="nw")
+        floating_tools = self.canvas_tools.content
+        self.canvas_select_button = MaterialButton(
+            floating_tools,
+            text="↖",
+            width=38,
+            height=34,
+            variant="icon",
+            command=lambda: self._set_annotation_tool("select"),
+        )
+        self.canvas_select_button.grid(row=0, column=0, padx=1)
+        set_accessible_name(self.canvas_select_button, "选择工具")
+        self.canvas_pan_button = MaterialButton(
+            floating_tools,
+            text="✥",
+            width=38,
+            height=34,
+            variant="icon",
+            command=self._show_pan_hint,
+        )
+        self.canvas_pan_button.grid(row=0, column=1, padx=1)
+        set_accessible_name(self.canvas_pan_button, "平移画布")
+        self.canvas_fit_button = MaterialButton(
+            floating_tools,
+            text="⌕",
+            width=38,
+            height=34,
+            variant="icon",
+            command=self.reset_view,
+        )
+        self.canvas_fit_button.grid(row=0, column=2, padx=1)
+        set_accessible_name(self.canvas_fit_button, "适合画布")
+
+        self.crop_action_bar = MaterialFloatingBar(canvas_frame, max_width=520)
+        crop_action_content = self.crop_action_bar.content
+        ttk.Label(
+            crop_action_content,
+            textvariable=self.crop_action_hint_var,
+            style="Muted.Toolbar.TLabel",
+        ).grid(row=0, column=0, sticky="w", padx=(5, 10))
+        self.crop_action_apply_button = MaterialButton(
+            crop_action_content,
+            text="应用裁剪  Enter",
+            width=132,
+            height=34,
+            variant="filled",
+            command=self.apply_crop,
+        )
+        self.crop_action_apply_button.grid(row=0, column=1, padx=2)
+        self.crop_action_apply_button.state(("disabled",))
+        set_accessible_name(self.crop_action_apply_button, "应用当前裁剪区域")
+        self.crop_action_cancel_button = MaterialButton(
+            crop_action_content,
+            text="取消  Esc",
+            width=84,
+            height=34,
+            variant="tonal",
+            command=self._cancel_crop_interaction,
+        )
+        self.crop_action_cancel_button.grid(row=0, column=2, padx=(2, 5))
+        set_accessible_name(self.crop_action_cancel_button, "取消本次裁剪")
+        self.crop_action_bar.place_forget()
+
+        self.animation_controls = MaterialFloatingBar(canvas_frame, max_width=500)
+        animation_bar = self.animation_controls.content
+        animation_bar.columnconfigure(3, weight=1)
+        self.animation_previous_button = MaterialButton(
+            animation_bar,
+            text="‹",
+            width=34,
+            height=34,
+            variant="icon",
+            command=lambda: self._step_animation(-1),
+        )
+        self.animation_previous_button.grid(row=0, column=0, padx=1)
+        set_accessible_name(self.animation_previous_button, "上一帧")
+        self.animation_play_button = MaterialButton(
+            animation_bar,
+            text="暂停",
+            width=54,
+            height=34,
+            command=self._toggle_animation_playback,
+        )
+        self.animation_play_button.grid(row=0, column=1, padx=1)
+        set_accessible_name(self.animation_play_button, "暂停动画")
+        self.animation_next_button = MaterialButton(
+            animation_bar,
+            text="›",
+            width=34,
+            height=34,
+            variant="icon",
+            command=lambda: self._step_animation(1),
+        )
+        self.animation_next_button.grid(row=0, column=2, padx=1)
+        set_accessible_name(self.animation_next_button, "下一帧")
+        self.animation_frame_slider = MaterialSlider(
+            animation_bar,
+            variable=self.animation_frame_var,
+            from_=1,
+            to=1,
+            command=self._seek_animation_from_slider,
+        )
+        self.animation_frame_slider.configure(width=132)
+        self.animation_frame_slider.grid(row=0, column=3, sticky="ew", padx=(7, 3))
+        set_accessible_name(self.animation_frame_slider, "动画帧进度")
+        ttk.Label(
+            animation_bar,
+            textvariable=self.animation_position_var,
+            style="Muted.Toolbar.TLabel",
+        ).grid(row=0, column=4, padx=(3, 5))
+        ttk.Label(
+            animation_bar,
+            text="速度",
+            style="Muted.Toolbar.TLabel",
+        ).grid(row=0, column=5, padx=(1, 3))
+        self.animation_speed_box = ttk.Combobox(
+            animation_bar,
+            textvariable=self.animation_speed_var,
+            values=tuple(ANIMATION_SPEED_FACTORS),
+            state="readonly",
+            justify="center",
+            width=5,
+        )
+        self.animation_speed_box.grid(row=0, column=6, padx=(0, 2))
+        self.animation_speed_box.bind(
+            "<<ComboboxSelected>>",
+            self._animation_speed_changed,
+        )
+        set_accessible_name(self.animation_speed_box, "动画播放速度")
+        self.animation_controls.place_forget()
+        self.canvas_metadata = ttk.Label(
+            canvas_frame,
+            text="P3 色域 · 8 位    适合画布",
+            style="CanvasMeta.TLabel",
+        )
+        self.canvas_metadata.place(relx=1.0, rely=1.0, x=-18, y=-88, anchor="se")
+
+        self.generate_workspace = ttk.Frame(
+            canvas_frame,
+            style="CanvasShell.TFrame",
+            padding=(10, 10),
+        )
+        self.generate_workspace.grid(row=0, column=0, sticky="nsew")
+        self.generate_workspace.columnconfigure(0, weight=1)
+        self.generate_workspace.rowconfigure(0, weight=1)
+        generate_card = ttk.Frame(
+            self.generate_workspace,
+            style="Surface.TFrame",
+            padding=(18, 16),
+        )
+        generate_card.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        generate_card.columnconfigure(0, weight=0, minsize=300)
+        generate_card.columnconfigure(1, weight=1)
+        generate_card.rowconfigure(2, weight=1)
+        ttk.Label(generate_card, text="生图模式", style="Title.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+        ttk.Label(
+            generate_card,
+            text=("先用完全离线的模拟服务验证任务、取消和候选流转；真实模型后续按能力协议接入。"),
+            style="Muted.Toolbar.TLabel",
+            wraplength=560,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 18))
+        generation_setup = self.generation_setup_panel = ttk.Frame(
+            generate_card,
+            style="Surface.TFrame",
+        )
+        generation_setup.grid(row=2, column=0, sticky="nsew", padx=(0, 24))
+        generation_setup.columnconfigure(0, weight=1)
+        candidate_panel = self.generation_candidate_panel = ttk.Frame(
+            generate_card,
+            style="Surface.TFrame",
+        )
+        candidate_panel.grid(row=2, column=1, sticky="nsew")
+        candidate_panel.columnconfigure(0, weight=1)
+        candidate_panel.rowconfigure(2, weight=1)
+        ttk.Label(generation_setup, text="提示词").grid(row=0, column=0, sticky="w")
+        self.generate_prompt_box = ttk.Combobox(
+            generation_setup,
+            textvariable=self.generate_prompt_var,
+            values=tuple(self.generation_prompt_history),
+            state="normal",
+            width=36,
+        )
+        self.generate_prompt_box.grid(row=1, column=0, sticky="ew", pady=(5, 12))
+        self.generate_prompt_box.bind("<Return>", lambda _event: self._start_mock_generation())
+        ttk.Label(generation_setup, text="负面提示词").grid(row=2, column=0, sticky="w")
+        self.generate_negative_prompt_entry = ttk.Entry(
+            generation_setup,
+            textvariable=self.generate_negative_prompt_var,
+        )
+        self.generate_negative_prompt_entry.grid(
+            row=3,
+            column=0,
+            sticky="ew",
+            pady=(5, 10),
+        )
+        reference_box = ttk.LabelFrame(
+            generation_setup,
+            text="参考图（可选）",
+            style="Panel.TLabelframe",
+            padding=(8, 6),
+        )
+        reference_box.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        reference_box.columnconfigure(1, weight=1)
+        ttk.Label(
+            reference_box,
+            textvariable=self.generate_reference_status_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=290,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 5))
+        self.generate_reference_listbox = tk.Listbox(
+            reference_box,
+            height=3,
+            exportselection=False,
+            activestyle="none",
+            selectmode=tk.SINGLE,
+        )
+        self.generate_reference_listbox.grid(
+            row=1,
+            column=0,
+            columnspan=4,
+            sticky="ew",
+            pady=(0, 6),
+        )
+        self.generate_reference_listbox.bind(
+            "<<ListboxSelect>>",
+            self._generation_reference_selected,
+        )
+        self.generate_reference_choose_button = ttk.Button(
+            reference_box,
+            text="添加图片…",
+            width=9,
+            command=self._choose_generation_reference,
+        )
+        self.generate_reference_choose_button.grid(row=2, column=0, padx=(0, 5))
+        self.generate_reference_current_button = ttk.Button(
+            reference_box,
+            text="添加当前图",
+            width=9,
+            command=self._use_current_generation_reference,
+        )
+        self.generate_reference_current_button.grid(row=2, column=1, sticky="w")
+        self.generate_reference_remove_button = ttk.Button(
+            reference_box,
+            text="移除",
+            width=6,
+            command=self._remove_selected_generation_reference,
+        )
+        self.generate_reference_remove_button.grid(row=2, column=2, sticky="e")
+        self.generate_reference_clear_button = ttk.Button(
+            reference_box,
+            text="清空",
+            width=6,
+            command=self._clear_generation_reference,
+        )
+        self.generate_reference_clear_button.grid(row=2, column=3, sticky="e")
+        ttk.Label(reference_box, text="角色").grid(row=3, column=0, sticky="w", pady=(7, 0))
+        self.generate_reference_role_box = ttk.Combobox(
+            reference_box,
+            textvariable=self.generate_reference_role_var,
+            values=tuple(GENERATION_REFERENCE_ROLES),
+            state="readonly",
+            width=7,
+        )
+        self.generate_reference_role_box.grid(
+            row=3,
+            column=1,
+            sticky="w",
+            pady=(7, 0),
+        )
+        ttk.Label(reference_box, text="强度").grid(
+            row=3,
+            column=2,
+            sticky="e",
+            padx=(8, 4),
+            pady=(7, 0),
+        )
+        self.generate_reference_strength_spinbox = ttk.Spinbox(
+            reference_box,
+            from_=0,
+            to=100,
+            increment=5,
+            width=5,
+            textvariable=self.generate_reference_strength_var,
+            justify="center",
+        )
+        self.generate_reference_strength_spinbox.grid(
+            row=3,
+            column=3,
+            sticky="e",
+            pady=(7, 0),
+        )
+        ttk.Label(
+            reference_box,
+            textvariable=self.generate_provider_capability_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=290,
+        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(7, 0))
+        self.generate_reference_role_box.bind(
+            "<<ComboboxSelected>>",
+            self._update_selected_generation_reference_settings,
+        )
+        self.generate_reference_strength_spinbox.bind(
+            "<FocusOut>",
+            self._update_selected_generation_reference_settings,
+        )
+        self.generate_reference_strength_spinbox.bind(
+            "<Return>",
+            self._update_selected_generation_reference_settings,
+        )
+        options = ttk.Frame(generation_setup, style="Surface.TFrame")
+        options.grid(row=5, column=0, sticky="ew")
+        ttk.Label(options, text="服务").grid(row=0, column=0, sticky="w")
+        self.generate_provider_box = ttk.Combobox(
+            options,
+            textvariable=self.generate_provider_var,
+            values=tuple(
+                profile.display_name for profile in self.generation_provider_catalog.profiles
+            ),
+            state="readonly",
+            width=12,
+        )
+        self.generate_provider_box.grid(row=0, column=1, columnspan=3, sticky="ew", padx=(6, 0))
+        self.generate_provider_box.bind(
+            "<<ComboboxSelected>>",
+            self._generation_provider_selected,
+        )
+        ttk.Label(options, text="尺寸").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.generate_size_box = ttk.Combobox(
+            options,
+            textvariable=self.generate_size_var,
+            values=("768 × 768", "1024 × 1024", "1344 × 768", "768 × 1344"),
+            state="readonly",
+            width=12,
+        )
+        self.generate_size_box.grid(row=1, column=1, padx=(6, 18), pady=(8, 0))
+        ttk.Label(options, text="数量").grid(row=1, column=2, sticky="w", pady=(8, 0))
+        self.generate_count_spinbox = ttk.Spinbox(
+            options,
+            from_=1,
+            to=4,
+            textvariable=self.generate_count_var,
+            width=5,
+        )
+        self.generate_count_spinbox.grid(row=1, column=3, padx=(6, 0), pady=(8, 0))
+        ttk.Label(options, text="风格").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.generate_style_box = ttk.Combobox(
+            options,
+            textvariable=self.generate_style_preset_var,
+            values=tuple(GENERATION_STYLE_PRESETS),
+            state="readonly",
+            width=15,
+        )
+        self.generate_style_box.grid(row=2, column=1, padx=(6, 18), pady=(8, 0))
+        self.generate_seed_checkbutton = ttk.Checkbutton(
+            options,
+            text="固定种子",
+            variable=self.generate_seed_enabled_var,
+        )
+        self.generate_seed_checkbutton.grid(row=2, column=2, sticky="w", pady=(8, 0))
+        self.generate_seed_entry = ttk.Entry(
+            options,
+            textvariable=self.generate_seed_var,
+            width=9,
+        )
+        self.generate_seed_entry.grid(row=2, column=3, padx=(6, 0), pady=(8, 0))
+        generate_actions = ttk.Frame(generation_setup, style="Surface.TFrame")
+        generate_actions.grid(row=6, column=0, sticky="w", pady=(14, 10))
+        self.mock_generate_button = MaterialButton(
+            generate_actions,
+            text="运行离线测试",
+            width=132,
+            variant="filled",
+            command=self._start_mock_generation,
+        )
+        self.mock_generate_button.grid(row=0, column=0, padx=(0, 8))
+        self.mock_cancel_button = MaterialButton(
+            generate_actions,
+            text="取消任务",
+            width=92,
+            command=self._cancel_mock_generation,
+        )
+        self.mock_cancel_button.grid(row=0, column=1)
+        self.mock_retry_button = MaterialButton(
+            generate_actions,
+            text="重试失败任务",
+            width=112,
+            command=self._retry_failed_generation,
+        )
+        self.mock_retry_button.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(
+            candidate_panel,
+            textvariable=self.generate_status_var,
+            style="InspectorTitle.TLabel",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 3))
+        ttk.Label(
+            candidate_panel,
+            textvariable=self.generate_candidates_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=560,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(0, 6))
+        candidate_shell = ttk.Frame(candidate_panel, style="Surface.TFrame")
+        candidate_shell.grid(row=2, column=0, sticky="nsew")
+        candidate_shell.columnconfigure(0, weight=1)
+        candidate_shell.rowconfigure(0, weight=1)
+        candidate_canvas = tk.Canvas(
+            candidate_shell,
+            width=264,
+            height=360,
+            highlightthickness=0,
+        )
+        candidate_canvas.material_role = "panel"
+        candidate_canvas.grid(row=0, column=0, sticky="nsew")
+        candidate_scroll = ttk.Scrollbar(
+            candidate_shell,
+            orient="vertical",
+            command=candidate_canvas.yview,
+        )
+        candidate_scroll.grid(row=0, column=1, sticky="ns")
+        candidate_canvas.configure(yscrollcommand=candidate_scroll.set)
+        self.generation_candidate_grid = GenerationCandidateGrid(
+            candidate_canvas,
+            on_select=self._select_generated_candidate,
+            columns=2,
+            thumbnail_size=(112, 74),
+        )
+        candidate_window = candidate_canvas.create_window(
+            0,
+            0,
+            window=self.generation_candidate_grid,
+            anchor="nw",
+        )
+        self.generation_candidate_grid.bind(
+            "<Configure>",
+            lambda _event: candidate_canvas.configure(scrollregion=candidate_canvas.bbox("all")),
+        )
+        candidate_canvas.bind(
+            "<Configure>",
+            lambda event: candidate_canvas.itemconfigure(candidate_window, width=event.width),
+        )
+        candidate_actions = ttk.Frame(candidate_panel, style="Surface.TFrame")
+        candidate_actions.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        candidate_actions.columnconfigure((0, 1, 2), weight=1, uniform="candidate-action")
+        self.generated_open_button = MaterialButton(
+            candidate_actions,
+            text="打开查看",
+            width=82,
+            height=36,
+            command=lambda: self._send_generated_candidate_to_mode(ModeId.VIEWER),
+        )
+        self.generated_open_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.generated_edit_button = MaterialButton(
+            candidate_actions,
+            text="发送到改图",
+            width=82,
+            height=36,
+            command=lambda: self._send_generated_candidate_to_mode(ModeId.EDIT),
+        )
+        self.generated_edit_button.grid(row=0, column=1, sticky="ew", padx=4)
+        self.generated_convert_button = MaterialButton(
+            candidate_actions,
+            text="发送到转图",
+            width=82,
+            height=36,
+            variant="tonal",
+            command=lambda: self._send_generated_candidate_to_mode(ModeId.CONVERT),
+        )
+        self.generated_convert_button.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+        self.generated_variation_button = MaterialButton(
+            candidate_actions,
+            text="基于所选生成变体",
+            height=36,
+            variant="filled",
+            command=self._generate_selected_candidate_variation,
+        )
+        self.generated_variation_button.grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            sticky="ew",
+            pady=(8, 0),
+        )
+        self.generated_favorite_button = MaterialButton(
+            candidate_actions,
+            text="收藏候选",
+            height=34,
+            variant="tonal",
+            command=self._toggle_generated_candidate_favorite,
+        )
+        self.generated_favorite_button.grid(
+            row=2,
+            column=0,
+            sticky="ew",
+            padx=(0, 4),
+            pady=(8, 0),
+        )
+        self.generated_remove_button = MaterialButton(
+            candidate_actions,
+            text="删除候选",
+            height=34,
+            command=self._remove_generated_candidate,
+        )
+        self.generated_remove_button.grid(
+            row=2,
+            column=1,
+            sticky="ew",
+            padx=4,
+            pady=(8, 0),
+        )
+        self.generated_favorites_only_checkbutton = ttk.Checkbutton(
+            candidate_actions,
+            text="仅看收藏",
+            variable=self.generate_favorites_only_var,
+            command=self._generation_favorites_filter_changed,
+        )
+        self.generated_favorites_only_checkbutton.grid(
+            row=2,
+            column=2,
+            sticky="w",
+            padx=(4, 0),
+            pady=(8, 0),
+        )
+        for button in (
+            self.generated_open_button,
+            self.generated_edit_button,
+            self.generated_convert_button,
+            self.generated_variation_button,
+            self.generated_favorite_button,
+            self.generated_remove_button,
+        ):
+            button.state(("disabled",))
+        self.mock_cancel_button.state(("disabled",))
+        self.mock_retry_button.state(("disabled",))
+        set_accessible_name(self.generate_prompt_box, "生图提示词与历史")
+        set_accessible_name(self.generate_negative_prompt_entry, "生图负面提示词")
+        set_accessible_name(self.generate_reference_listbox, "已选择的生成参考图")
+        set_accessible_name(self.generate_reference_choose_button, "添加本地生成参考图")
+        set_accessible_name(self.generate_reference_current_button, "添加当前图片作为生成参考图")
+        set_accessible_name(self.generate_reference_remove_button, "移除所选生成参考图")
+        set_accessible_name(self.generate_reference_clear_button, "清空生成参考图")
+        set_accessible_name(self.generate_reference_role_box, "参考图角色")
+        set_accessible_name(self.generate_reference_strength_spinbox, "参考图强度")
+        set_accessible_name(self.generate_style_box, "生成风格预设")
+        set_accessible_name(self.generate_seed_checkbutton, "启用固定生成种子")
+        set_accessible_name(self.generate_seed_entry, "生成种子")
+        set_accessible_name(self.generate_provider_box, "生图服务选择")
+        set_accessible_name(self.mock_retry_button, "重试失败的生图任务")
+        set_accessible_name(self.generated_open_button, "打开所选生成候选")
+        set_accessible_name(self.generated_edit_button, "将所选生成候选发送到改图")
+        set_accessible_name(self.generated_convert_button, "将所选生成候选发送到转图")
+        set_accessible_name(self.generated_variation_button, "基于所选生成候选创建变体")
+        set_accessible_name(self.generated_favorite_button, "收藏或取消收藏所选生成候选")
+        set_accessible_name(self.generated_remove_button, "从生图工作区删除所选候选")
+        set_accessible_name(self.generated_favorites_only_checkbutton, "仅显示收藏的生成候选")
+        self.generate_workspace.grid_remove()
+
+        self.panel_shell = ttk.Frame(
+            self,
+            style="Surface.TFrame",
+            padding=(12, 6, 12, 8),
+            width=296,
+        )
+        self.panel_shell.grid(row=2, column=2, sticky="nsew")
+        self.panel_shell.grid_propagate(False)
+        self.panel_shell.rowconfigure(1, weight=1)
         self.panel_shell.columnconfigure(0, weight=1)
-        panel_canvas = tk.Canvas(self.panel_shell, width=340, highlightthickness=0)
+
+        inspector_header = ttk.Frame(self.panel_shell, style="InspectorHeader.TFrame")
+        self.inspector_header = inspector_header
+        inspector_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        inspector_header.columnconfigure(0, weight=1)
+        self.inspector_tabs = MaterialTabStrip(
+            inspector_header,
+            tabs=(
+                ("convert", "转图"),
+                ("adjust", "调整"),
+                ("smart", "智能"),
+                ("annotation", "标注"),
+                ("history", "历史"),
+            ),
+            command=self._show_inspector_tab,
+            selected="adjust",
+        )
+        self.inspector_tabs.grid(row=0, column=0, sticky="ew")
+
+        panel_canvas = tk.Canvas(self.panel_shell, width=270, highlightthickness=0)
         self.panel_canvas = panel_canvas
-        panel_canvas.grid(row=0, column=0, sticky="ns")
+        panel_canvas.material_role = "panel"
+        panel_canvas.grid(row=1, column=0, sticky="nsew")
         panel_scroll = ttk.Scrollbar(
             self.panel_shell, orient="vertical", command=panel_canvas.yview
         )
-        panel_scroll.grid(row=0, column=1, sticky="ns")
+        panel_scroll.grid(row=1, column=1, sticky="ns")
         panel_canvas.configure(yscrollcommand=panel_scroll.set)
-        panel = ttk.Frame(panel_canvas, padding=(8, 0, 12, 12))
+        panel = ttk.Frame(panel_canvas, style="Surface.TFrame", padding=(4, 0, 8, 8))
+        self.panel_content = panel
         panel_window = panel_canvas.create_window(0, 0, window=panel, anchor="nw")
         panel.bind(
             "<Configure>",
@@ -801,7 +2004,80 @@ class ImageEditorApp(tk.Tk):
         panel_canvas.bind("<Leave>", lambda _event: panel_canvas.unbind_all("<MouseWheel>"))
         panel.columnconfigure(0, weight=1)
 
+        conversion_job_box = ttk.LabelFrame(
+            panel,
+            text="转换任务",
+            style="Panel.TLabelframe",
+        )
+        self.conversion_job_box = conversion_job_box
+        conversion_job_box.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        conversion_job_box.columnconfigure(0, weight=1)
+        ttk.Label(
+            conversion_job_box,
+            textvariable=self.conversion_recipe_status_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=248,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew", pady=(4, 7))
+        conversion_recipe_actions = ttk.Frame(conversion_job_box)
+        conversion_recipe_actions.grid(row=1, column=0, sticky="ew", pady=(0, 9))
+        conversion_recipe_actions.columnconfigure((0, 1, 2), weight=1, uniform="recipe")
+        ttk.Button(
+            conversion_recipe_actions,
+            text="导入配方",
+            command=self._import_conversion_recipe,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        ttk.Button(
+            conversion_recipe_actions,
+            text="导出配方",
+            command=self._export_conversion_recipe,
+        ).grid(row=0, column=1, sticky="ew", padx=3)
+        ttk.Button(
+            conversion_recipe_actions,
+            text="当前设置",
+            command=self._use_current_conversion_settings,
+        ).grid(row=0, column=2, sticky="ew", padx=(3, 0))
+        ttk.Label(conversion_job_box, text="输出文件夹").grid(row=2, column=0, sticky="w")
+        conversion_output_row = ttk.Frame(conversion_job_box)
+        conversion_output_row.grid(row=3, column=0, sticky="ew", pady=(4, 9))
+        conversion_output_row.columnconfigure(0, weight=1)
+        ttk.Entry(
+            conversion_output_row,
+            textvariable=self.conversion_output_dir_var,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        ttk.Button(
+            conversion_output_row,
+            text="选择…",
+            width=7,
+            command=self._choose_conversion_output_directory,
+        ).grid(row=0, column=1)
+        conversion_run_actions = ttk.Frame(conversion_job_box)
+        conversion_run_actions.grid(row=4, column=0, sticky="ew")
+        conversion_run_actions.columnconfigure((0, 1), weight=1, uniform="run")
+        self.conversion_start_button = ttk.Button(
+            conversion_run_actions,
+            text="开始转换",
+            style="Accent.TButton",
+            command=self._start_conversion_queue,
+        )
+        self.conversion_start_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.conversion_cancel_button = ttk.Button(
+            conversion_run_actions,
+            text="取消任务",
+            command=self._cancel_conversion_queue,
+        )
+        self.conversion_cancel_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.conversion_cancel_button.state(("disabled",))
+        ttk.Label(
+            conversion_job_box,
+            textvariable=self.conversion_job_status_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=248,
+            justify="left",
+        ).grid(row=5, column=0, sticky="ew", pady=(8, 2))
+
         export_box = ttk.LabelFrame(panel, text="导出", style="Panel.TLabelframe")
+        self.export_box = export_box
         export_box.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         export_box.columnconfigure(1, weight=1)
         ttk.Label(export_box, text="预设").grid(row=0, column=0, sticky="w", pady=5)
@@ -817,7 +2093,7 @@ class ImageEditorApp(tk.Tk):
         fmt = ttk.Combobox(
             export_box,
             textvariable=self.format_var,
-            values=("JPEG", "PNG", "WEBP", "AVIF", "BMP", "TIFF"),
+            values=("JPEG", "PNG", "WEBP", "AVIF", "BMP", "TIFF", "GIF"),
             state="readonly",
         )
         fmt.grid(row=1, column=1, sticky="ew", pady=5)
@@ -835,29 +2111,57 @@ class ImageEditorApp(tk.Tk):
         suffix_entry = ttk.Entry(export_box, textvariable=self.filename_suffix_var)
         suffix_entry.grid(row=5, column=1, sticky="ew", pady=5)
         suffix_entry.bind("<KeyRelease>", lambda _event: self._save_config())
+        ttk.Label(export_box, text="透明底色").grid(
+            row=6,
+            column=0,
+            sticky="w",
+            pady=5,
+        )
+        transparency_row = ttk.Frame(export_box)
+        transparency_row.grid(row=6, column=1, sticky="ew", pady=5)
+        transparency_row.columnconfigure(0, weight=1)
+        transparency_box = ttk.Combobox(
+            transparency_row,
+            textvariable=self.conversion_background_var,
+            values=tuple(TRANSPARENCY_BACKGROUND_LABELS),
+            state="readonly",
+            width=12,
+        )
+        transparency_box.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        transparency_box.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self._update_conversion_draft_from_controls(),
+        )
+        ttk.Button(
+            transparency_row,
+            text="自定义",
+            width=6,
+            command=self._choose_conversion_transparency_background,
+        ).grid(row=0, column=1)
         ttk.Checkbutton(
             export_box,
             text="保留 EXIF / ICC / DPI / XMP",
             variable=self.preserve_metadata_var,
             command=self._custom_export_changed,
-        ).grid(row=6, column=1, sticky="w", pady=(6, 0))
+        ).grid(row=7, column=1, sticky="w", pady=(6, 0))
         ttk.Checkbutton(
             export_box,
             text="覆盖前创建 .bak 备份",
             variable=self.backup_on_overwrite_var,
             command=self._save_config,
-        ).grid(row=7, column=1, sticky="w", pady=(4, 0))
+        ).grid(row=8, column=1, sticky="w", pady=(4, 0))
         ttk.Checkbutton(
             export_box,
             text="保存后定位文件",
             variable=self.reveal_after_save_var,
             command=self._save_config,
-        ).grid(row=8, column=1, sticky="w", pady=(4, 0))
+        ).grid(row=9, column=1, sticky="w", pady=(4, 0))
         ttk.Label(export_box, textvariable=self.size_var).grid(
-            row=9, column=0, columnspan=2, sticky="w", pady=(8, 0)
+            row=10, column=0, columnspan=2, sticky="w", pady=(8, 0)
         )
 
         resize_box = ttk.LabelFrame(panel, text="尺寸", style="Panel.TLabelframe")
+        self.resize_box = resize_box
         resize_box.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         resize_box.columnconfigure(1, weight=1)
         ttk.Label(resize_box, text="宽度").grid(row=0, column=0, sticky="w", pady=5)
@@ -902,26 +2206,46 @@ class ImageEditorApp(tk.Tk):
             row=6, column=0, columnspan=2, sticky="w", pady=(10, 0)
         )
 
-        adjust_box = ttk.LabelFrame(panel, text="快速调色", style="Panel.TLabelframe")
+        adjust_box = ttk.Frame(
+            panel,
+            style="Surface.TFrame",
+            padding=(10, 8, 10, 8),
+        )
         adjust_box.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         adjust_box.columnconfigure(1, weight=1)
-        self._slider(adjust_box, "亮度", self.brightness_var, -100, 100, 0, self._live_adjust)
-        self._slider(adjust_box, "对比度", self.contrast_var, -100, 100, 1, self._live_adjust)
-        self._slider(adjust_box, "饱和度", self.saturation_var, -100, 100, 2, self._live_adjust)
-        self._slider(adjust_box, "锐化", self.sharpness_var, 0, 100, 3, self._live_adjust)
-        adjust_actions = ttk.Frame(adjust_box)
-        adjust_actions.grid(row=4, column=1, sticky="ew", pady=(8, 0))
-        grayscale_check = ttk.Checkbutton(
-            adjust_actions, text="黑白", variable=self.grayscale_var, command=self._live_adjust
+        ttk.Label(adjust_box, text="光线", style="InspectorTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 4)
         )
-        grayscale_check.grid(row=0, column=0, sticky="w", padx=(0, 10))
-        auto_check = ttk.Checkbutton(
-            adjust_actions,
-            text="自动优化",
-            variable=self.auto_contrast_var,
-            command=self._live_adjust,
+        self.auto_adjust_button = MaterialButton(
+            adjust_box,
+            text="自动",
+            width=42,
+            height=24,
+            variant="text",
+            command=self._toggle_auto_adjust,
         )
-        auto_check.grid(row=0, column=1, sticky="w")
+        self.auto_adjust_button.set_selected(self.auto_contrast_var.get())
+        self.auto_adjust_button.grid(row=0, column=1, sticky="e", pady=(0, 4))
+        self._slider(adjust_box, "曝光", self.brightness_var, -100, 100, 1, self._live_adjust)
+        self._slider(adjust_box, "对比度", self.contrast_var, -100, 100, 2, self._live_adjust)
+        self._slider(
+            adjust_box,
+            "高光",
+            self.highlights_var,
+            -100,
+            100,
+            3,
+            lambda: self._advanced_color_changed("highlights", self.highlights_var.get()),
+        )
+        self._slider(
+            adjust_box,
+            "阴影",
+            self.shadows_var,
+            -100,
+            100,
+            4,
+            lambda: self._advanced_color_changed("shadows", self.shadows_var.get()),
+        )
 
         geometry_box = ttk.LabelFrame(panel, text="精细旋转", style="Panel.TLabelframe")
         geometry_box.grid(row=3, column=0, sticky="ew", pady=(0, 10))
@@ -951,17 +2275,41 @@ class ImageEditorApp(tk.Tk):
             row=1, column=2, padx=(6, 0)
         )
 
-        tone_box = ttk.LabelFrame(panel, text="高级调色", style="Panel.TLabelframe")
+        tone_box = ttk.Frame(
+            panel,
+            style="Surface.TFrame",
+            padding=(10, 8, 10, 8),
+        )
         tone_box.grid(row=4, column=0, sticky="ew", pady=(0, 10))
         tone_box.columnconfigure(1, weight=1)
+        ttk.Label(tone_box, text="颜色", style="InspectorTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 4)
+        )
+        MaterialButton(
+            tone_box,
+            text="重置",
+            width=42,
+            height=24,
+            variant="text",
+            command=self._reset_color_controls,
+        ).grid(row=0, column=1, sticky="e", pady=(0, 4))
         self._slider(
             tone_box,
             "色温",
             self.temperature_var,
             -100,
             100,
-            0,
+            1,
             lambda: self._advanced_color_changed("temperature", self.temperature_var.get()),
+        )
+        self._slider(
+            tone_box,
+            "自然饱和度",
+            self.saturation_var,
+            -100,
+            100,
+            2,
+            self._live_adjust,
         )
         self._slider(
             tone_box,
@@ -969,51 +2317,74 @@ class ImageEditorApp(tk.Tk):
             self.tint_var,
             -100,
             100,
-            1,
+            3,
             lambda: self._advanced_color_changed("tint", self.tint_var.get()),
         )
+
+        detail_section = ttk.Frame(panel, style="Surface.TFrame")
+        detail_section.columnconfigure(0, weight=1)
+        self.detail_expanded_var = tk.BooleanVar(value=False)
+        self.detail_toggle_button = ttk.Button(
+            detail_section,
+            text="细节  ⌄",
+            style="Quiet.TButton",
+            command=self._toggle_detail_section,
+        )
+        self.detail_toggle_button.grid(row=0, column=0, sticky="ew")
+        self.detail_body = ttk.Frame(detail_section, style="Surface.TFrame", padding=(4, 8, 4, 4))
+        self.detail_body.grid(row=1, column=0, sticky="ew")
+        self.detail_body.columnconfigure(1, weight=1)
         self._slider(
-            tone_box,
-            "阴影",
-            self.shadows_var,
-            -100,
+            self.detail_body,
+            "锐化",
+            self.sharpness_var,
+            0,
             100,
-            2,
-            lambda: self._advanced_color_changed("shadows", self.shadows_var.get()),
+            0,
+            self._live_adjust,
         )
         self._slider(
-            tone_box,
-            "高光",
-            self.highlights_var,
-            -100,
-            100,
-            3,
-            lambda: self._advanced_color_changed("highlights", self.highlights_var.get()),
-        )
-        self._slider(
-            tone_box,
+            self.detail_body,
             "降噪",
             self.denoise_var,
             0,
             100,
-            4,
+            1,
             lambda: self._advanced_color_changed("denoise", self.denoise_var.get()),
         )
-        self._slider(tone_box, "黑场", self.level_black_var, 0, 254, 5, self._levels_changed)
-        self._slider(tone_box, "白场", self.level_white_var, 1, 255, 6, self._levels_changed)
-        ttk.Label(tone_box, text="Gamma").grid(row=7, column=0, sticky="w", pady=5)
-        gamma_scale = ttk.Scale(
-            tone_box,
+        self._slider(
+            self.detail_body,
+            "黑场",
+            self.level_black_var,
+            0,
+            254,
+            2,
+            self._levels_changed,
+        )
+        self._slider(
+            self.detail_body,
+            "白场",
+            self.level_white_var,
+            1,
+            255,
+            3,
+            self._levels_changed,
+        )
+        ttk.Label(self.detail_body, text="Gamma").grid(row=4, column=0, sticky="w", pady=5)
+        gamma_scale = MaterialSlider(
+            self.detail_body,
             from_=0.1,
             to=3.0,
-            orient="horizontal",
             variable=self.level_gamma_var,
-            command=lambda _value: self._levels_changed(),
+            command=self._levels_changed,
         )
-        gamma_scale.grid(row=7, column=1, sticky="ew", pady=5)
-        gamma_scale.bind("<ButtonPress-1>", self._begin_slider_command)
-        gamma_scale.bind("<ButtonRelease-1>", self._end_slider_command)
-        ttk.Label(tone_box, textvariable=self.level_gamma_var, width=6).grid(row=7, column=2)
+        gamma_scale.grid(row=4, column=1, sticky="ew", pady=5)
+        gamma_scale.bind("<<MaterialSliderStart>>", self._begin_slider_command)
+        gamma_scale.bind("<<MaterialSliderEnd>>", self._end_slider_command)
+        ttk.Label(self.detail_body, textvariable=self.level_gamma_var, width=6).grid(
+            row=4, column=2
+        )
+        self.detail_body.grid_remove()
 
         curve_box = ttk.LabelFrame(panel, text="曲线", style="Panel.TLabelframe")
         curve_box.grid(row=5, column=0, sticky="ew", pady=(0, 10))
@@ -1045,6 +2416,7 @@ class ImageEditorApp(tk.Tk):
         self.histogram_canvas = tk.Canvas(
             analysis_box, height=105, background="#171b22", highlightthickness=0
         )
+        self.histogram_canvas.material_role = "histogram"
         self.histogram_canvas.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         self.history_tree = ttk.Treeview(
             analysis_box,
@@ -1216,21 +2588,6087 @@ class ImageEditorApp(tk.Tk):
             command=self._workspace_setting_changed,
         ).grid(row=1, column=0, sticky="w", pady=(7, 0))
 
-        self.status_label = ttk.Label(
-            self, textvariable=self.status_var, anchor="w", padding=(12, 6)
+        look_box = ttk.Frame(
+            panel,
+            style="Surface.TFrame",
+            padding=(8, 4, 8, 2),
         )
-        self.status_label.grid(row=3, column=0, columnspan=3, sticky="ew")
+        look_box.columnconfigure(0, weight=1)
+        self.look_strip = MaterialLookStrip(look_box, self._apply_material_look)
+        self.look_strip.grid(row=0, column=0, sticky="ew")
+
+        annotation_tools_box = ttk.LabelFrame(
+            panel,
+            text="标注工具",
+            style="Panel.TLabelframe",
+        )
+        annotation_tools_box.columnconfigure((0, 1, 2), weight=1)
+        self.annotation_tool_buttons: dict[str, ttk.Button] = {}
+        for index, tool in enumerate(ANNOTATION_TOOL_LABELS):
+            button = ttk.Button(
+                annotation_tools_box,
+                text=ANNOTATION_TOOL_LABELS[tool],
+                style=(
+                    "ToolShelfActive.TButton"
+                    if tool == self.annotation_tool_var.get()
+                    else "ToolShelf.TButton"
+                ),
+                command=partial(self._set_annotation_tool, tool),
+            )
+            button.grid(row=index // 3, column=index % 3, sticky="ew", padx=2, pady=2)
+            self.annotation_tool_buttons[tool] = button
+        ttk.Button(
+            annotation_tools_box,
+            text="应用裁剪",
+            style="Accent.TButton",
+            command=self.apply_crop,
+        ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=2, pady=(8, 2))
+        ttk.Button(
+            annotation_tools_box,
+            text="重置",
+            style="Quiet.TButton",
+            command=self.reset_crop,
+        ).grid(row=4, column=2, sticky="ew", padx=2, pady=(8, 2))
+
+        smart_edit_box = ttk.LabelFrame(
+            panel,
+            text="智能改图",
+            style="Panel.TLabelframe",
+        )
+        smart_edit_box.columnconfigure(0, weight=1)
+        ttk.Label(
+            smart_edit_box,
+            text="本地高清与智能去背景都会生成新修订，不会覆盖原图。",
+            style="Muted.Toolbar.TLabel",
+            wraplength=244,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew", pady=(4, 9))
+        smart_scale_actions = ttk.Frame(smart_edit_box)
+        smart_scale_actions.grid(row=1, column=0, sticky="ew")
+        smart_scale_actions.columnconfigure((0, 1), weight=1, uniform="smart-scale")
+        self.smart_upscale_2x_button = MaterialButton(
+            smart_scale_actions,
+            text="2× 高清",
+            width=112,
+            height=38,
+            variant="filled",
+            command=lambda: self._start_smart_upscale(2),
+        )
+        self.smart_upscale_2x_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.smart_upscale_4x_button = MaterialButton(
+            smart_scale_actions,
+            text="4× 高清",
+            width=112,
+            height=38,
+            command=lambda: self._start_smart_upscale(4),
+        )
+        self.smart_upscale_4x_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+
+        smart_background_box = ttk.Frame(smart_edit_box)
+        smart_background_box.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        smart_background_box.columnconfigure((1, 3), weight=1)
+        ttk.Label(
+            smart_background_box,
+            text="容差",
+            style="Muted.Toolbar.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        self.smart_background_tolerance_spinbox = ttk.Spinbox(
+            smart_background_box,
+            from_=0,
+            to=254,
+            increment=1,
+            width=4,
+            textvariable=self.smart_background_tolerance_var,
+            justify="center",
+        )
+        self.smart_background_tolerance_spinbox.grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(4, 10),
+        )
+        ttk.Label(
+            smart_background_box,
+            text="羽化",
+            style="Muted.Toolbar.TLabel",
+        ).grid(row=0, column=2, sticky="w")
+        self.smart_background_feather_spinbox = ttk.Spinbox(
+            smart_background_box,
+            from_=1,
+            to=255,
+            increment=1,
+            width=4,
+            textvariable=self.smart_background_feather_var,
+            justify="center",
+        )
+        self.smart_background_feather_spinbox.grid(
+            row=0,
+            column=3,
+            sticky="ew",
+            padx=(4, 0),
+        )
+        self.smart_remove_background_button = MaterialButton(
+            smart_edit_box,
+            text="智能去背景",
+            height=38,
+            variant="tonal",
+            command=self._start_smart_remove_background,
+        )
+        self.smart_remove_background_button.grid(
+            row=3,
+            column=0,
+            sticky="ew",
+            pady=(7, 0),
+        )
+        set_accessible_name(self.smart_background_tolerance_spinbox, "去背景容差")
+        set_accessible_name(self.smart_background_feather_spinbox, "去背景边缘羽化")
+        set_accessible_name(self.smart_remove_background_button, "开始智能去背景")
+
+        smart_alpha_box = ttk.LabelFrame(
+            smart_edit_box,
+            text="去背景边缘细化",
+            style="Panel.TLabelframe",
+        )
+        smart_alpha_box.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        smart_alpha_box.columnconfigure((0, 1), weight=1, uniform="smart-alpha")
+        ttk.Label(
+            smart_alpha_box,
+            textvariable=self.smart_alpha_refinement_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=220,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(2, 5))
+        ttk.Label(smart_alpha_box, text="画笔大小").grid(
+            row=1,
+            column=0,
+            sticky="w",
+        )
+        self.smart_alpha_brush_size_spinbox = ttk.Spinbox(
+            smart_alpha_box,
+            from_=2,
+            to=256,
+            increment=2,
+            width=6,
+            textvariable=self.smart_alpha_brush_size_var,
+            justify="center",
+        )
+        self.smart_alpha_brush_size_spinbox.grid(row=1, column=1, sticky="e")
+        self.smart_alpha_preserve_button = MaterialButton(
+            smart_alpha_box,
+            text="保留主体画笔",
+            height=34,
+            command=lambda: self._activate_smart_alpha_brush("preserve"),
+        )
+        self.smart_alpha_preserve_button.grid(
+            row=2,
+            column=0,
+            sticky="ew",
+            padx=(0, 4),
+            pady=(6, 0),
+        )
+        self.smart_alpha_remove_button = MaterialButton(
+            smart_alpha_box,
+            text="删除背景画笔",
+            height=34,
+            command=lambda: self._activate_smart_alpha_brush("remove"),
+        )
+        self.smart_alpha_remove_button.grid(
+            row=2,
+            column=1,
+            sticky="ew",
+            padx=(4, 0),
+            pady=(6, 0),
+        )
+        self.smart_alpha_clear_button = MaterialButton(
+            smart_alpha_box,
+            text="清除笔划",
+            height=32,
+            command=self._clear_smart_alpha_strokes,
+        )
+        self.smart_alpha_clear_button.grid(
+            row=3,
+            column=0,
+            sticky="ew",
+            padx=(0, 4),
+            pady=(6, 0),
+        )
+        self.smart_alpha_apply_button = MaterialButton(
+            smart_alpha_box,
+            text="应用边缘细化",
+            height=32,
+            variant="tonal",
+            command=self._apply_smart_alpha_refinement,
+        )
+        self.smart_alpha_apply_button.grid(
+            row=3,
+            column=1,
+            sticky="ew",
+            padx=(4, 0),
+            pady=(6, 0),
+        )
+        self._smart_alpha_controls = (
+            self.smart_alpha_brush_size_spinbox,
+            self.smart_alpha_preserve_button,
+            self.smart_alpha_remove_button,
+            self.smart_alpha_clear_button,
+            self.smart_alpha_apply_button,
+        )
+        set_accessible_name(self.smart_alpha_brush_size_spinbox, "边缘细化画笔大小")
+        set_accessible_name(self.smart_alpha_preserve_button, "使用保留主体画笔")
+        set_accessible_name(self.smart_alpha_remove_button, "使用删除背景画笔")
+        set_accessible_name(self.smart_alpha_clear_button, "清除全部边缘细化笔划")
+        set_accessible_name(self.smart_alpha_apply_button, "应用去背景边缘细化")
+
+        smart_background_replace_box = ttk.LabelFrame(
+            smart_edit_box,
+            text="替换背景",
+            style="Panel.TLabelframe",
+        )
+        smart_background_replace_box.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        smart_background_replace_box.columnconfigure(1, weight=1)
+        ttk.Label(smart_background_replace_box, text="类型").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            pady=3,
+        )
+        self.smart_background_replace_mode_box = ttk.Combobox(
+            smart_background_replace_box,
+            textvariable=self.smart_background_replace_mode_var,
+            values=("纯色背景", "自定义图片"),
+            state="readonly",
+            width=12,
+        )
+        self.smart_background_replace_mode_box.grid(
+            row=0,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            pady=3,
+        )
+        self.smart_background_replace_mode_box.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self._smart_background_mode_changed(),
+        )
+        ttk.Label(smart_background_replace_box, text="底色").grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=3,
+        )
+        self.smart_background_replace_color_entry = ttk.Entry(
+            smart_background_replace_box,
+            textvariable=self.smart_background_replace_color_var,
+            width=10,
+        )
+        self.smart_background_replace_color_entry.grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            pady=3,
+        )
+        self.smart_background_replace_color_button = ttk.Button(
+            smart_background_replace_box,
+            text="选择颜色",
+            command=self._choose_smart_background_color,
+        )
+        self.smart_background_replace_color_button.grid(
+            row=1,
+            column=2,
+            padx=(6, 0),
+            pady=3,
+        )
+        ttk.Label(
+            smart_background_replace_box,
+            textvariable=self.smart_background_replace_image_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=150,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 3))
+        self.smart_background_replace_image_button = ttk.Button(
+            smart_background_replace_box,
+            text="选择背景图",
+            command=self._choose_smart_background_image,
+        )
+        self.smart_background_replace_image_button.grid(
+            row=2,
+            column=2,
+            padx=(6, 0),
+            pady=(4, 3),
+        )
+        self.smart_background_replace_button = MaterialButton(
+            smart_background_replace_box,
+            text="应用背景",
+            height=36,
+            variant="tonal",
+            command=self._apply_smart_background_replacement,
+        )
+        self.smart_background_replace_button.grid(
+            row=3,
+            column=0,
+            columnspan=3,
+            sticky="ew",
+            pady=(6, 0),
+        )
+        self._smart_background_replace_controls = (
+            self.smart_background_replace_mode_box,
+            self.smart_background_replace_color_entry,
+            self.smart_background_replace_color_button,
+            self.smart_background_replace_image_button,
+        )
+        set_accessible_name(self.smart_background_replace_mode_box, "背景替换类型")
+        set_accessible_name(self.smart_background_replace_color_entry, "背景替换底色")
+        set_accessible_name(self.smart_background_replace_color_button, "选择背景替换底色")
+        set_accessible_name(self.smart_background_replace_image_button, "选择自定义背景图片")
+        set_accessible_name(self.smart_background_replace_button, "应用背景替换")
+        self.smart_background_replace_button.state(("disabled",))
+
+        smart_repair_box = ttk.LabelFrame(
+            smart_edit_box,
+            text="物体擦除与局部修复",
+            style="Panel.TLabelframe",
+        )
+        smart_repair_box.grid(row=6, column=0, sticky="ew", pady=(12, 0))
+        smart_repair_box.columnconfigure(1, weight=1)
+        ttk.Label(
+            smart_repair_box,
+            textvariable=self.smart_repair_region_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=220,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="ew", pady=(2, 5))
+        ttk.Label(smart_repair_box, text="边缘羽化").grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=3,
+        )
+        self.smart_repair_feather_spinbox = ttk.Spinbox(
+            smart_repair_box,
+            from_=0,
+            to=64,
+            increment=1,
+            textvariable=self.smart_repair_feather_var,
+            justify="center",
+            width=7,
+        )
+        self.smart_repair_feather_spinbox.grid(
+            row=1,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            pady=3,
+        )
+        smart_repair_actions = ttk.Frame(smart_repair_box)
+        smart_repair_actions.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(5, 0))
+        smart_repair_actions.columnconfigure((0, 1), weight=1, uniform="smart-repair")
+        self.smart_repair_detect_button = MaterialButton(
+            smart_repair_actions,
+            text="智能识别主体区域",
+            height=36,
+            variant="tonal",
+            command=self._detect_smart_repair_region,
+        )
+        self.smart_repair_detect_button.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(0, 4),
+            pady=(0, 6),
+        )
+        self.smart_repair_next_button = MaterialButton(
+            smart_repair_actions,
+            text="下一个主体",
+            height=36,
+            command=self._select_next_smart_repair_suggestion,
+        )
+        self.smart_repair_next_button.grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(4, 0),
+            pady=(0, 6),
+        )
+        self.smart_repair_select_button = MaterialButton(
+            smart_repair_actions,
+            text="框选擦除区域",
+            height=36,
+            command=self._select_smart_repair_region,
+        )
+        self.smart_repair_select_button.grid(row=1, column=0, sticky="ew", padx=(0, 4))
+        self.smart_repair_apply_button = MaterialButton(
+            smart_repair_actions,
+            text="擦除并修复",
+            height=36,
+            variant="tonal",
+            command=self._start_smart_region_repair,
+        )
+        self.smart_repair_apply_button.grid(row=1, column=1, sticky="ew", padx=(4, 0))
+        ttk.Label(
+            smart_repair_box,
+            textvariable=self.smart_mask_refinement_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=220,
+            justify="left",
+        ).grid(row=3, column=0, columnspan=3, sticky="ew", pady=(9, 3))
+        ttk.Label(smart_repair_box, text="蒙版画笔").grid(
+            row=4,
+            column=0,
+            sticky="w",
+            pady=3,
+        )
+        self.smart_mask_brush_size_spinbox = ttk.Spinbox(
+            smart_repair_box,
+            from_=2,
+            to=256,
+            increment=1,
+            textvariable=self.smart_mask_brush_size_var,
+            justify="center",
+            width=7,
+        )
+        self.smart_mask_brush_size_spinbox.grid(
+            row=4,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            pady=3,
+        )
+        smart_mask_actions = ttk.Frame(smart_repair_box)
+        smart_mask_actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        smart_mask_actions.columnconfigure((0, 1), weight=1, uniform="smart-mask")
+        self.smart_mask_add_button = MaterialButton(
+            smart_mask_actions,
+            text="加入蒙版",
+            height=34,
+            variant="tonal",
+            command=lambda: self._activate_smart_mask_brush("add"),
+        )
+        self.smart_mask_add_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.smart_mask_remove_button = MaterialButton(
+            smart_mask_actions,
+            text="移出蒙版",
+            height=34,
+            command=lambda: self._activate_smart_mask_brush("remove"),
+        )
+        self.smart_mask_remove_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.smart_mask_undo_button = MaterialButton(
+            smart_mask_actions,
+            text="撤销笔划",
+            height=34,
+            command=self._undo_smart_mask_stroke,
+        )
+        self.smart_mask_undo_button.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=(0, 4),
+            pady=(6, 0),
+        )
+        self.smart_mask_reset_button = MaterialButton(
+            smart_mask_actions,
+            text="重置蒙版",
+            height=34,
+            command=self._reset_smart_mask_refinement,
+        )
+        self.smart_mask_reset_button.grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            padx=(4, 0),
+            pady=(6, 0),
+        )
+        self._smart_mask_controls = (
+            self.smart_mask_brush_size_spinbox,
+            self.smart_mask_add_button,
+            self.smart_mask_remove_button,
+            self.smart_mask_undo_button,
+            self.smart_mask_reset_button,
+        )
+        set_accessible_name(self.smart_repair_feather_spinbox, "物体擦除边缘羽化")
+        set_accessible_name(self.smart_repair_detect_button, "离线智能识别需要擦除的主体区域")
+        set_accessible_name(self.smart_repair_next_button, "选择下一个智能主体候选")
+        set_accessible_name(self.smart_repair_select_button, "在画布框选需要擦除的物体")
+        set_accessible_name(self.smart_repair_apply_button, "擦除框选物体并局部修复")
+        set_accessible_name(self.smart_mask_brush_size_spinbox, "主体蒙版精修画笔大小")
+        set_accessible_name(self.smart_mask_add_button, "使用加入主体蒙版画笔")
+        set_accessible_name(self.smart_mask_remove_button, "使用移出主体蒙版画笔")
+        set_accessible_name(self.smart_mask_undo_button, "撤销上一条主体蒙版笔划")
+        set_accessible_name(self.smart_mask_reset_button, "重置为自动识别主体蒙版")
+        self.smart_repair_apply_button.state(("disabled",))
+        for control in self._smart_mask_controls:
+            control.state(("disabled",))
+
+        smart_text_box = ttk.LabelFrame(
+            smart_edit_box,
+            text="替换图片文字",
+            style="Panel.TLabelframe",
+        )
+        smart_text_box.grid(row=7, column=0, sticky="ew", pady=(12, 0))
+        smart_text_box.columnconfigure(1, weight=1)
+        ttk.Label(smart_text_box, text="新文字").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            pady=3,
+        )
+        self.smart_text_entry = ttk.Entry(
+            smart_text_box,
+            textvariable=self.smart_text_value_var,
+        )
+        self.smart_text_entry.grid(row=0, column=1, columnspan=2, sticky="ew", pady=3)
+        ttk.Label(smart_text_box, text="字体").grid(row=1, column=0, sticky="w", pady=3)
+        self.smart_text_font_box = ttk.Combobox(
+            smart_text_box,
+            textvariable=self.smart_text_font_var,
+            values=SMART_TEXT_FONTS,
+            state="readonly",
+            width=11,
+        )
+        self.smart_text_font_box.grid(row=1, column=1, sticky="ew", pady=3)
+        self.smart_text_font_size_spinbox = ttk.Spinbox(
+            smart_text_box,
+            from_=8,
+            to=512,
+            increment=1,
+            width=5,
+            textvariable=self.smart_text_font_size_var,
+            justify="center",
+        )
+        self.smart_text_font_size_spinbox.grid(
+            row=1,
+            column=2,
+            sticky="e",
+            padx=(6, 0),
+            pady=3,
+        )
+        ttk.Label(smart_text_box, text="颜色").grid(row=2, column=0, sticky="w", pady=3)
+        self.smart_text_color_entry = ttk.Entry(
+            smart_text_box,
+            textvariable=self.smart_text_color_var,
+            width=10,
+        )
+        self.smart_text_color_entry.grid(row=2, column=1, sticky="ew", pady=3)
+        self.smart_text_color_button = ttk.Button(
+            smart_text_box,
+            text="选择",
+            command=self._choose_smart_text_color,
+        )
+        self.smart_text_color_button.grid(row=2, column=2, padx=(6, 0), pady=3)
+        ttk.Label(smart_text_box, text="排版").grid(row=3, column=0, sticky="w", pady=3)
+        self.smart_text_align_box = ttk.Combobox(
+            smart_text_box,
+            textvariable=self.smart_text_align_var,
+            values=tuple(SMART_TEXT_ALIGNMENTS),
+            state="readonly",
+            width=7,
+        )
+        self.smart_text_align_box.grid(row=3, column=1, sticky="ew", pady=3)
+        self.smart_text_rotation_spinbox = ttk.Spinbox(
+            smart_text_box,
+            from_=-180,
+            to=180,
+            increment=1,
+            width=5,
+            textvariable=self.smart_text_rotation_var,
+            justify="center",
+        )
+        self.smart_text_rotation_spinbox.grid(
+            row=3,
+            column=2,
+            sticky="e",
+            padx=(6, 0),
+            pady=3,
+        )
+        ttk.Label(smart_text_box, text="弧度").grid(row=4, column=0, sticky="w", pady=3)
+        self.smart_text_curve_spinbox = ttk.Spinbox(
+            smart_text_box,
+            from_=-100,
+            to=100,
+            increment=5,
+            textvariable=self.smart_text_curve_var,
+            justify="center",
+        )
+        self.smart_text_curve_spinbox.grid(
+            row=4,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            pady=3,
+        )
+        ttk.Label(smart_text_box, text="字效").grid(row=5, column=0, sticky="w", pady=3)
+        self.smart_text_effect_box = ttk.Combobox(
+            smart_text_box,
+            textvariable=self.smart_text_effect_var,
+            values=tuple(SMART_TEXT_EFFECTS),
+            state="readonly",
+            width=9,
+        )
+        self.smart_text_effect_box.grid(row=5, column=1, sticky="ew", pady=3)
+        self.smart_text_effect_size_spinbox = ttk.Spinbox(
+            smart_text_box,
+            from_=0,
+            to=64,
+            increment=1,
+            width=5,
+            textvariable=self.smart_text_effect_size_var,
+            justify="center",
+        )
+        self.smart_text_effect_size_spinbox.grid(
+            row=5,
+            column=2,
+            sticky="e",
+            padx=(6, 0),
+            pady=3,
+        )
+        ttk.Label(smart_text_box, text="辅助色").grid(row=6, column=0, sticky="w", pady=3)
+        self.smart_text_effect_color_entry = ttk.Entry(
+            smart_text_box,
+            textvariable=self.smart_text_effect_color_var,
+            width=10,
+        )
+        self.smart_text_effect_color_entry.grid(row=6, column=1, sticky="ew", pady=3)
+        self.smart_text_effect_color_button = ttk.Button(
+            smart_text_box,
+            text="选择",
+            command=self._choose_smart_text_effect_color,
+        )
+        self.smart_text_effect_color_button.grid(row=6, column=2, padx=(6, 0), pady=3)
+        ttk.Label(
+            smart_text_box,
+            textvariable=self.smart_text_region_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=220,
+            justify="left",
+        ).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(5, 3))
+        smart_text_actions = ttk.Frame(smart_text_box)
+        smart_text_actions.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(5, 0))
+        smart_text_actions.columnconfigure((0, 1), weight=1, uniform="smart-text")
+        self.smart_text_select_button = MaterialButton(
+            smart_text_actions,
+            text="框选原文字",
+            height=36,
+            command=self._select_smart_text_region,
+        )
+        self.smart_text_select_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.smart_text_replace_button = MaterialButton(
+            smart_text_actions,
+            text="替换文字",
+            height=36,
+            variant="tonal",
+            command=self._start_smart_text_replacement,
+        )
+        self.smart_text_replace_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.smart_text_detect_button = MaterialButton(
+            smart_text_actions,
+            text="自动检测文字",
+            height=34,
+            command=self._detect_smart_text_regions,
+        )
+        self.smart_text_detect_button.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=(0, 4),
+            pady=(6, 0),
+        )
+        self.smart_text_next_region_button = MaterialButton(
+            smart_text_actions,
+            text="下一个区域",
+            height=34,
+            command=self._select_next_smart_text_suggestion,
+        )
+        self.smart_text_next_region_button.grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            padx=(4, 0),
+            pady=(6, 0),
+        )
+        self.smart_text_recognize_button = MaterialButton(
+            smart_text_actions,
+            text="识别框内文字",
+            height=34,
+            variant="tonal",
+            command=self._recognize_smart_text_region,
+        )
+        self.smart_text_recognize_button.grid(
+            row=2,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(6, 0),
+        )
+        self.smart_text_font_match_button = MaterialButton(
+            smart_text_actions,
+            text="推荐相似字体",
+            height=34,
+            command=self._recommend_smart_text_font,
+        )
+        self.smart_text_font_match_button.grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(6, 0),
+        )
+        ttk.Label(
+            smart_text_box,
+            textvariable=self.smart_text_ocr_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=220,
+            justify="left",
+        ).grid(row=9, column=0, columnspan=3, sticky="ew", pady=(5, 0))
+        ttk.Label(
+            smart_text_box,
+            textvariable=self.smart_text_font_match_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=220,
+            justify="left",
+        ).grid(row=10, column=0, columnspan=3, sticky="ew", pady=(5, 0))
+        smart_text_history_actions = ttk.Frame(smart_text_box)
+        smart_text_history_actions.grid(
+            row=11,
+            column=0,
+            columnspan=3,
+            sticky="ew",
+            pady=(6, 0),
+        )
+        smart_text_history_actions.columnconfigure((0, 1), weight=1, uniform="smart-text-history")
+        self.smart_text_undo_button = MaterialButton(
+            smart_text_history_actions,
+            text="撤销文字参数",
+            height=32,
+            command=self._undo_smart_text_draft,
+        )
+        self.smart_text_undo_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.smart_text_redo_button = MaterialButton(
+            smart_text_history_actions,
+            text="重做文字参数",
+            height=32,
+            command=self._redo_smart_text_draft,
+        )
+        self.smart_text_redo_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self._smart_text_input_widgets = (
+            self.smart_text_entry,
+            self.smart_text_font_box,
+            self.smart_text_font_size_spinbox,
+            self.smart_text_color_entry,
+            self.smart_text_color_button,
+            self.smart_text_align_box,
+            self.smart_text_rotation_spinbox,
+            self.smart_text_curve_spinbox,
+            self.smart_text_effect_box,
+            self.smart_text_effect_color_entry,
+            self.smart_text_effect_color_button,
+            self.smart_text_effect_size_spinbox,
+        )
+        set_accessible_name(self.smart_text_entry, "替换后的文字")
+        set_accessible_name(self.smart_text_font_box, "替换文字字体")
+        set_accessible_name(self.smart_text_font_size_spinbox, "替换文字字号")
+        set_accessible_name(self.smart_text_color_entry, "替换文字颜色")
+        set_accessible_name(self.smart_text_align_box, "替换文字对齐方式")
+        set_accessible_name(self.smart_text_rotation_spinbox, "替换文字旋转角度")
+        set_accessible_name(self.smart_text_curve_spinbox, "替换文字弧度百分比")
+        set_accessible_name(self.smart_text_effect_box, "替换文字字效")
+        set_accessible_name(self.smart_text_effect_color_entry, "替换文字字效辅助色")
+        set_accessible_name(self.smart_text_effect_color_button, "选择替换文字字效辅助色")
+        set_accessible_name(self.smart_text_effect_size_spinbox, "替换文字字效强度")
+        set_accessible_name(self.smart_text_select_button, "在画布框选原文字区域")
+        set_accessible_name(self.smart_text_replace_button, "修复背景并替换文字")
+        set_accessible_name(self.smart_text_detect_button, "自动检测可能的文字区域")
+        set_accessible_name(self.smart_text_next_region_button, "选择下一个文字区域建议")
+        set_accessible_name(self.smart_text_recognize_button, "离线识别框选区域中的原文字")
+        set_accessible_name(self.smart_text_font_match_button, "离线推荐框选原文字的相似字体")
+        set_accessible_name(self.smart_text_undo_button, "撤销文字替换参数")
+        set_accessible_name(self.smart_text_redo_button, "重做文字替换参数")
+        self.smart_text_undo_button.state(("disabled",))
+        self.smart_text_redo_button.state(("disabled",))
+        self.smart_text_next_region_button.state(("disabled",))
+        smart_result_actions = ttk.Frame(smart_edit_box)
+        smart_result_actions.grid(row=8, column=0, sticky="ew", pady=(8, 0))
+        smart_result_actions.columnconfigure((0, 1), weight=1, uniform="smart-result")
+        self.smart_edit_compare_button = MaterialButton(
+            smart_result_actions,
+            text="对比结果",
+            width=112,
+            height=36,
+            command=self._compare_smart_result,
+        )
+        self.smart_edit_compare_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.smart_edit_send_button = MaterialButton(
+            smart_result_actions,
+            text="发送到转图",
+            width=112,
+            height=36,
+            command=self._send_smart_result_to_conversion,
+        )
+        self.smart_edit_send_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        smart_cancel_actions = ttk.Frame(smart_edit_box)
+        smart_cancel_actions.grid(row=9, column=0, sticky="ew", pady=(6, 0))
+        smart_cancel_actions.columnconfigure((0, 1), weight=1, uniform="smart-cancel")
+        self.smart_edit_cancel_button = MaterialButton(
+            smart_cancel_actions,
+            text="取消任务",
+            width=112,
+            height=34,
+            command=self._cancel_smart_edit,
+        )
+        self.smart_edit_cancel_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.smart_edit_discard_button = MaterialButton(
+            smart_cancel_actions,
+            text="放弃候选",
+            width=112,
+            height=34,
+            command=self._discard_smart_result,
+        )
+        self.smart_edit_discard_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ttk.Label(
+            smart_edit_box,
+            textvariable=self.smart_edit_status_var,
+            style="InspectorTitle.TLabel",
+            wraplength=244,
+            justify="left",
+        ).grid(row=10, column=0, sticky="ew", pady=(10, 3))
+        ttk.Label(
+            smart_edit_box,
+            textvariable=self.smart_edit_result_var,
+            style="Muted.Toolbar.TLabel",
+            wraplength=244,
+            justify="left",
+        ).grid(row=11, column=0, sticky="ew")
+        self.smart_edit_cancel_button.state(("disabled",))
+        self.smart_edit_compare_button.state(("disabled",))
+        self.smart_edit_send_button.state(("disabled",))
+        self.smart_edit_discard_button.state(("disabled",))
+
+        self.inspector_groups: dict[str, tuple[tk.Misc, ...]] = {
+            "convert": (conversion_job_box, resize_box, export_box),
+            "adjust": (
+                look_box,
+                adjust_box,
+                tone_box,
+                detail_section,
+                curve_box,
+            ),
+            "smart": (smart_edit_box,),
+            "annotation": (
+                annotation_tools_box,
+                annotation_box,
+                geometry_box,
+                watermark_box,
+                geometry_workflow_box,
+            ),
+            "history": (analysis_box, workflow_box, help_box),
+        }
+        self.detail_advanced_widgets = (curve_box,)
+        for widgets in self.inspector_groups.values():
+            for row, widget in enumerate(widgets):
+                widget.grid_configure(row=row, column=0, sticky="ew", pady=(0, 10))
+        self.panel_sections = {key: widgets[0] for key, widgets in self.inspector_groups.items()}
+
+        panel_footer = ttk.Frame(self.panel_shell, style="Surface.TFrame", padding=(4, 10, 4, 2))
+        panel_footer.grid(row=2, column=0, columnspan=2, sticky="ew")
+        panel_footer.columnconfigure(0, weight=1)
+        self.export_footer_button = MaterialButton(
+            panel_footer,
+            text="导出图像  Ctrl+E",
+            width=252,
+            height=44,
+            variant="filled",
+            command=self.quick_export,
+        )
+        self.export_footer_button.grid(row=0, column=0, sticky="ew")
+        set_accessible_name(self.export_footer_button, "导出图像")
+
+        self.command_dock = MaterialCommandDock(self)
+        self._place_command_dock()
+        dock = self.command_dock.content
+        self.dock_open_button = MaterialButton(
+            dock,
+            text="打开",
+            width=58,
+            variant="filled",
+            command=self.open_file,
+        )
+        self.dock_open_button.grid(row=0, column=0, padx=(0, 2))
+        MaterialButton(
+            dock,
+            text="保存",
+            width=48,
+            command=self.save_as,
+        ).grid(row=0, column=1, padx=2)
+        MaterialButton(
+            dock,
+            text="导出",
+            width=48,
+            command=self.quick_export,
+        ).grid(row=0, column=2, padx=(2, 8))
+        ttk.Separator(dock, orient="vertical").grid(row=0, column=3, sticky="ns", padx=4)
+        self.dock_undo_button = MaterialButton(
+            dock,
+            text="↶",
+            width=38,
+            height=38,
+            variant="icon",
+            command=self.undo,
+        )
+        self.dock_undo_button.grid(row=0, column=4, padx=1)
+        set_accessible_name(self.dock_undo_button, "撤销")
+        self.dock_redo_button = MaterialButton(
+            dock,
+            text="↷",
+            width=38,
+            height=38,
+            variant="icon",
+            command=self.redo,
+        )
+        self.dock_redo_button.grid(row=0, column=5, padx=1)
+        set_accessible_name(self.dock_redo_button, "重做")
+        self.dock_crop_button = MaterialButton(
+            dock,
+            text="⌗",
+            width=38,
+            height=38,
+            variant="icon",
+            command=self._enter_convert_crop,
+        )
+        self.dock_crop_button.set_selected(True)
+        self.dock_crop_button.grid(row=0, column=6, padx=1)
+        set_accessible_name(self.dock_crop_button, "裁剪")
+        self.dock_rotate_button = MaterialButton(
+            dock,
+            text="↻",
+            width=38,
+            height=38,
+            variant="icon",
+            command=self._rotate_from_dock,
+        )
+        self.dock_rotate_button.grid(row=0, column=7, padx=1)
+        set_accessible_name(self.dock_rotate_button, "向右旋转")
+        self.dock_compare_button = MaterialButton(
+            dock,
+            text="◐",
+            width=38,
+            height=38,
+            variant="icon",
+            command=self._toggle_dock_compare,
+        )
+        self.dock_compare_button.grid(row=0, column=8, padx=(1, 4))
+        set_accessible_name(self.dock_compare_button, "对比原图")
+        self._dock_compare_trace = self.compare_original.trace_add(
+            "write",
+            lambda *_args: self.dock_compare_button.set_selected(self.compare_original.get()),
+        )
+        self.dock_split_button = MaterialButton(
+            dock,
+            text="分屏",
+            width=52,
+            height=38,
+            command=self._toggle_dock_split_compare,
+        )
+        self.dock_split_button.grid(row=0, column=9, padx=(1, 4))
+        set_accessible_name(self.dock_split_button, "分屏对比")
+        self._dock_split_trace = self.split_compare_var.trace_add(
+            "write",
+            lambda *_args: self.dock_split_button.set_selected(self.split_compare_var.get()),
+        )
+        ttk.Separator(dock, orient="vertical").grid(row=0, column=10, sticky="ns", padx=4)
+        self.dock_fullscreen_button = MaterialButton(
+            dock,
+            text="⛶",
+            width=38,
+            height=38,
+            variant="icon",
+            command=self.toggle_fullscreen,
+        )
+        self.dock_fullscreen_button.grid(row=0, column=11, padx=1)
+        set_accessible_name(self.dock_fullscreen_button, "全屏")
+        self.dock_menu_button = MaterialButton(
+            dock,
+            text="全部功能",
+            width=82,
+            variant="filled",
+            command=self._show_feature_palette,
+        )
+        self.dock_menu_button.grid(row=0, column=12, padx=(4, 1))
+        set_accessible_name(self.dock_menu_button, "打开全部功能搜索")
+
+        self.status_label = ttk.Label(
+            canvas_frame,
+            textvariable=self.status_var,
+            style="CanvasMeta.TLabel",
+            anchor="w",
+            padding=(0, 0),
+        )
+        self._place_canvas_status()
         if not self.edit_panel_visible_var.get():
-            self.edit_toolbar.grid_remove()
             self.panel_shell.grid_remove()
         if not self.thumbnail_sidebar_visible_var.get():
             self.thumbnail_sidebar.grid_remove()
+        self._show_inspector_tab("adjust", sync_mode=False)
+        self._validate_feature_callbacks()
+        self._mode_unsubscribe = self.mode_router.subscribe(self._on_mode_transition)
+        self._apply_mode_layout(self.mode_router.active_mode, announce=False)
         self.after_idle(self._show_empty_state)
+
+    def _activate_mode(self, mode: ModeId) -> None:
+        self.mode_router.switch(mode)
+
+    def _restore_task_tray_history(self) -> None:
+        restored: list[UnifiedTaskItem] = []
+        invalid = 0
+        for payload in self.task_tray_settings[:50]:
+            try:
+                item = UnifiedTaskItem.from_json(payload)
+            except (TypeError, ValueError):
+                invalid += 1
+                continue
+            if not item.status.terminal:
+                item = replace(
+                    item,
+                    status=UnifiedTaskStatus.UNKNOWN,
+                    detail=f"上次退出时任务尚未结束 · {item.detail}",
+                    cancellable=False,
+                    retryable=False,
+                )
+            restored.append(item)
+        self.task_tray.set_items(restored, notify=False)
+        if invalid:
+            self._schedule_config_save()
+
+    def _task_tray_changed(self, items: tuple[UnifiedTaskItem, ...]) -> None:
+        self.task_tray_settings = [item.to_json() for item in items]
+        self._schedule_config_save()
+
+    @staticmethod
+    def _unified_status_from_job(status: JobStatus) -> UnifiedTaskStatus:
+        return {
+            JobStatus.SUBMITTING: UnifiedTaskStatus.PENDING,
+            JobStatus.QUEUED: UnifiedTaskStatus.PENDING,
+            JobStatus.RUNNING: UnifiedTaskStatus.RUNNING,
+            JobStatus.SUCCEEDED: UnifiedTaskStatus.SUCCEEDED,
+            JobStatus.FAILED: UnifiedTaskStatus.FAILED,
+            JobStatus.CANCELLED: UnifiedTaskStatus.CANCELLED,
+            JobStatus.UNKNOWN: UnifiedTaskStatus.UNKNOWN,
+        }[status]
+
+    def _sync_ai_task_to_tray(
+        self,
+        snapshot: ManagedJobSnapshot,
+        *,
+        title: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        kind = (
+            UnifiedTaskKind.GENERATION
+            if snapshot.request_kind is JobRequestKind.GENERATION
+            else UnifiedTaskKind.SMART_EDIT
+        )
+        mode = (
+            ModeId.GENERATE if snapshot.request_kind is JobRequestKind.GENERATION else ModeId.EDIT
+        )
+        previous = self.task_tray.get(snapshot.job_id)
+        if title is None:
+            title = (
+                previous.title
+                if previous is not None
+                else "图片生成"
+                if kind is UnifiedTaskKind.GENERATION
+                else "智能改图"
+            )
+        if detail is None:
+            if snapshot.error is not None:
+                detail = snapshot.error.message
+            elif snapshot.status is JobStatus.SUCCEEDED:
+                detail = f"已完成 · {len(snapshot.outputs)} 个输出"
+            else:
+                detail = {
+                    JobStatus.SUBMITTING: "正在安全提交",
+                    JobStatus.QUEUED: "等待 Provider 执行",
+                    JobStatus.RUNNING: "Provider 正在处理",
+                    JobStatus.CANCELLED: "任务已取消，没有自动重试",
+                    JobStatus.UNKNOWN: "状态未知，没有自动重试",
+                    JobStatus.FAILED: "任务失败",
+                    JobStatus.SUCCEEDED: "任务完成",
+                }[snapshot.status]
+        unified_status = self._unified_status_from_job(snapshot.status)
+        retryable = bool(
+            kind is UnifiedTaskKind.GENERATION
+            and unified_status in {UnifiedTaskStatus.FAILED, UnifiedTaskStatus.UNKNOWN}
+            and snapshot.job_id == self._mock_generation_job_id
+            and self._last_generation_request is not None
+        )
+        self.task_tray.upsert(
+            UnifiedTaskItem(
+                task_id=snapshot.job_id,
+                kind=kind,
+                title=title,
+                status=unified_status,
+                mode=mode,
+                detail=detail,
+                cancellable=not unified_status.terminal,
+                retryable=retryable,
+                created_at=snapshot.created_at,
+                updated_at=snapshot.updated_at,
+            )
+        )
+
+    def _sync_conversion_task_to_tray(
+        self,
+        session: ConversionSession,
+        *,
+        active: bool,
+        detail: str | None = None,
+        status_override: UnifiedTaskStatus | None = None,
+    ) -> None:
+        task_id = self._conversion_tray_task_id
+        if task_id is None:
+            task_id = f"conversion:{self._conversion_generation}"
+            self._conversion_tray_task_id = task_id
+        total = len(session.tasks)
+        succeeded = sum(task.status is ConversionTaskStatus.SUCCEEDED for task in session.tasks)
+        failed = sum(task.status is ConversionTaskStatus.FAILED for task in session.tasks)
+        cancelled = sum(task.status is ConversionTaskStatus.CANCELLED for task in session.tasks)
+        finished = succeeded + failed + cancelled
+        unfinished = total - finished
+        if status_override is not None:
+            status = status_override
+        elif active:
+            status = UnifiedTaskStatus.RUNNING
+        elif unfinished:
+            status = UnifiedTaskStatus.UNKNOWN
+        elif failed:
+            status = UnifiedTaskStatus.FAILED
+        elif cancelled:
+            status = UnifiedTaskStatus.CANCELLED
+        else:
+            status = UnifiedTaskStatus.SUCCEEDED
+        if detail is None:
+            detail = (
+                f"共 {total} 项 · 成功 {succeeded} · 失败 {failed} · "
+                f"取消 {cancelled} · 待处理 {unfinished}"
+            )
+        self.task_tray.upsert(
+            UnifiedTaskItem(
+                task_id=task_id,
+                kind=UnifiedTaskKind.CONVERSION,
+                title=f"批量转换 {total} 项",
+                status=status,
+                mode=ModeId.CONVERT,
+                detail=detail,
+                progress_current=finished,
+                progress_total=max(1, total),
+                cancellable=active,
+                retryable=(not active and not unfinished and bool(failed or cancelled)),
+            )
+        )
+
+    def _activate_unified_task(self, item: UnifiedTaskItem) -> None:
+        self.mode_router.switch(item.mode)
+        if item.kind is UnifiedTaskKind.SMART_EDIT:
+            self._show_inspector_tab("smart")
+        elif item.kind is UnifiedTaskKind.CONVERSION:
+            self.conversion_workspace.set_task_filter("全部")
+        self.status_var.set(f"已前往任务：{item.title}")
+
+    def _cancel_unified_task(self, item: UnifiedTaskItem) -> None:
+        if item.kind is UnifiedTaskKind.CONVERSION:
+            if item.task_id == self._conversion_tray_task_id:
+                self._cancel_conversion_queue()
+            return
+        if item.kind is UnifiedTaskKind.GENERATION and item.task_id == self._mock_generation_job_id:
+            self._cancel_mock_generation()
+            return
+        if item.kind is UnifiedTaskKind.SMART_EDIT and item.task_id == self._smart_edit_job_id:
+            self._cancel_smart_edit()
+            return
+        try:
+            snapshot = self.ai_job_manager.cancel(item.task_id)
+        except Exception:
+            self.status_var.set("任务记录已失效，无法取消")
+            return
+        self._sync_ai_task_to_tray(snapshot)
+
+    def _retry_unified_task(self, item: UnifiedTaskItem) -> None:
+        if item.kind is UnifiedTaskKind.GENERATION and item.task_id == self._mock_generation_job_id:
+            self._retry_failed_generation()
+            return
+        if item.kind is UnifiedTaskKind.CONVERSION and self._conversion_session is not None:
+            retryable = tuple(
+                task
+                for task in self._conversion_session.tasks
+                if task.status in {ConversionTaskStatus.FAILED, ConversionTaskStatus.CANCELLED}
+            )
+            self._retry_conversion_tasks(retryable)
+            return
+        self.status_var.set("该任务缺少可安全复用的原始请求，不能自动重试")
+
+    def _show_task_tray(self) -> None:
+        self.task_tray.show()
+
+    def _restore_ai_job_summary(self) -> None:
+        try:
+            jobs = self.ai_job_manager.list_jobs()
+        except Exception:
+            return
+        edit_jobs = tuple(job for job in jobs if job.request_kind is JobRequestKind.EDIT)
+        generation_jobs = tuple(
+            job for job in jobs if job.request_kind is JobRequestKind.GENERATION
+        )
+        edit_unknown = sum(job.status is JobStatus.UNKNOWN for job in edit_jobs)
+        edit_succeeded = sum(job.status is JobStatus.SUCCEEDED for job in edit_jobs)
+        generation_unknown = sum(job.status is JobStatus.UNKNOWN for job in generation_jobs)
+        generation_succeeded = sum(job.status is JobStatus.SUCCEEDED for job in generation_jobs)
+        for job in jobs:
+            self._sync_ai_task_to_tray(job)
+        if self._ai_job_recovery_error is not None:
+            self.smart_edit_status_var.set(
+                "旧智能任务记录已损坏并隔离；基础看图、转图和本地编辑不受影响"
+            )
+            self.generate_status_var.set("旧生成任务记录已损坏并隔离，未自动重试")
+            return
+        if edit_unknown:
+            self.smart_edit_status_var.set(
+                f"恢复到 {edit_unknown} 个状态未知的改图任务；为避免重复执行，未自动重试"
+            )
+        elif edit_succeeded:
+            self.smart_edit_status_var.set(f"已恢复 {edit_succeeded} 条完成的改图任务记录")
+        if edit_jobs:
+            self.smart_edit_result_var.set(
+                f"本地任务记录：{len(edit_jobs)} 条 · 完成 {edit_succeeded} · 未知 {edit_unknown}"
+            )
+        if generation_unknown:
+            self.generate_status_var.set(
+                f"恢复到 {generation_unknown} 个状态未知的生成任务；未自动提交或重试"
+            )
+        elif generation_succeeded:
+            self.generate_status_var.set(f"已恢复 {generation_succeeded} 条完成的生成任务记录")
+
+    def _feature_callbacks(self) -> dict[str, Callable[[], object]]:
+        show_menu = self._show_app_menu
+        return {
+            "activate_pan": self._show_pan_hint,
+            "actual_size": lambda: self.set_zoom("100%"),
+            "animation_next": lambda: self._step_animation(1),
+            "animation_previous": lambda: self._step_animation(-1),
+            "animation_toggle": self._toggle_animation_playback,
+            "apply_canvas_expansion": self.apply_canvas_expansion,
+            "apply_crop": self.apply_crop,
+            "apply_perspective": self.apply_perspective,
+            "auto_straighten": self.auto_straighten,
+            "batch_process": self.batch_process,
+            "batch_process_folder": self.batch_process_folder,
+            "cancel_mock_generation": self._cancel_mock_generation,
+            "close": self.close,
+            "compare_original": self._toggle_dock_compare,
+            "configure_slideshow": self.configure_slideshow,
+            "configure_workflow": self.configure_workflow,
+            "conversion_add_files": self.conversion_workspace.request_files,
+            "conversion_add_folder": self.conversion_workspace.request_folder,
+            "conversion_queue_cancel": self._cancel_conversion_queue,
+            "conversion_queue_run": self._start_conversion_queue,
+            "conversion_recipe_export": self._export_conversion_recipe,
+            "conversion_recipe_import": self._import_conversion_recipe,
+            "copy_current": self.copy_current,
+            "copy_result": self.copy_result,
+            "delete_current_to_recycle_bin": self.delete_current_to_recycle_bin,
+            "enter_crop_tool": self._enter_convert_crop,
+            "export_current_animation": self.export_current_animation,
+            "export_diagnostic_report": self.export_diagnostic_report,
+            "export_settings": lambda: self._show_inspector_tab("convert"),
+            "fine_rotation_changed": self._fine_rotation_changed,
+            "flip_horizontal": self.flip_horizontal,
+            "flip_vertical": self.flip_vertical,
+            "move_current": self.move_current,
+            "navigate_first": lambda: self.navigate_folder_to("first"),
+            "navigate_last": lambda: self.navigate_folder_to("last"),
+            "navigate_next": lambda: self.navigate_folder(1),
+            "navigate_previous": lambda: self.navigate_folder(-1),
+            "open_directory": self.open_directory,
+            "open_file": self.open_file,
+            "open_project_dialog": self.open_project_dialog,
+            "open_recent_directory": show_menu,
+            "open_recent_export_directory": show_menu,
+            "open_recent_file": show_menu,
+            "open_recent_project": show_menu,
+            "open_recycle_bin": open_recycle_bin,
+            "open_settings": self.open_settings,
+            "paste_from_clipboard": self.paste_from_clipboard,
+            "quick_export": self.quick_export,
+            "redo": self.redo,
+            "rename_current": self.rename_current,
+            "reset_crop": self.reset_crop,
+            "reset_edits": self.reset_edits,
+            "reset_view": self.reset_view,
+            "resize_settings": lambda: self._show_inspector_tab("convert"),
+            "reveal_current": self.reveal_current,
+            "rotate_left": lambda: self.rotate(-90),
+            "rotate_right": self._rotate_from_dock,
+            "save_as": self.save_as,
+            "save_project_dialog": self.save_project_dialog,
+            "select_annotation_tool": partial(self._enter_edit_annotation_tool, "select"),
+            "select_arrow_tool": partial(self._enter_edit_annotation_tool, "arrow"),
+            "select_blur_tool": partial(self._enter_edit_annotation_tool, "blur"),
+            "select_ellipse_tool": partial(self._enter_edit_annotation_tool, "ellipse"),
+            "select_freehand_tool": partial(self._enter_edit_annotation_tool, "freehand"),
+            "select_line_tool": partial(self._enter_edit_annotation_tool, "line"),
+            "select_mosaic_tool": partial(self._enter_edit_annotation_tool, "mosaic"),
+            "select_number_tool": partial(self._enter_edit_annotation_tool, "number"),
+            "select_perspective_tool": partial(
+                self._enter_edit_annotation_tool,
+                "perspective",
+            ),
+            "select_rectangle_tool": partial(self._enter_edit_annotation_tool, "rectangle"),
+            "select_redact_tool": partial(self._enter_edit_annotation_tool, "redact"),
+            "select_text_tool": partial(self._enter_edit_annotation_tool, "text"),
+            "show_adjustments": lambda: self._show_inspector_tab("adjust"),
+            "show_annotations": lambda: self._show_inspector_tab("annotation"),
+            "show_generate_workspace": partial(self._activate_mode, ModeId.GENERATE),
+            "choose_generation_reference": self._choose_generation_reference,
+            "show_history": lambda: self._show_inspector_tab("history"),
+            "show_smart_edit": lambda: self._show_inspector_tab("smart"),
+            "show_onboarding": self.show_onboarding,
+            "show_properties": self.show_properties,
+            "show_shortcut_help": self.show_shortcut_help,
+            "show_feature_palette": self._show_feature_palette,
+            "show_task_tray": self._show_task_tray,
+            "start_mock_generation": self._start_mock_generation,
+            "generate_open_candidate": lambda: self._send_generated_candidate_to_mode(
+                ModeId.VIEWER
+            ),
+            "generate_send_to_edit": lambda: self._send_generated_candidate_to_mode(ModeId.EDIT),
+            "generate_send_to_convert": lambda: self._send_generated_candidate_to_mode(
+                ModeId.CONVERT
+            ),
+            "retry_failed_generation": self._retry_failed_generation,
+            "generate_candidate_variation": self._generate_selected_candidate_variation,
+            "generate_toggle_candidate_favorite": self._toggle_generated_candidate_favorite,
+            "generate_remove_candidate": self._remove_generated_candidate,
+            "generate_toggle_favorites_filter": self._toggle_generation_favorites_filter,
+            "smart_compare_result": self._compare_smart_result,
+            "smart_discard_result": self._discard_smart_result,
+            "smart_alpha_preserve": partial(
+                self._activate_smart_alpha_brush,
+                "preserve",
+            ),
+            "smart_alpha_remove": partial(
+                self._activate_smart_alpha_brush,
+                "remove",
+            ),
+            "smart_alpha_clear": self._clear_smart_alpha_strokes,
+            "smart_alpha_apply": self._apply_smart_alpha_refinement,
+            "smart_choose_background_color": self._choose_smart_background_color,
+            "smart_choose_background_image": self._choose_smart_background_image,
+            "smart_apply_background": self._apply_smart_background_replacement,
+            "smart_detect_repair_region": self._detect_smart_repair_region,
+            "smart_next_repair_region": self._select_next_smart_repair_suggestion,
+            "smart_mask_add": partial(self._activate_smart_mask_brush, "add"),
+            "smart_mask_remove": partial(self._activate_smart_mask_brush, "remove"),
+            "smart_mask_undo": self._undo_smart_mask_stroke,
+            "smart_mask_reset": self._reset_smart_mask_refinement,
+            "smart_select_repair_region": self._select_smart_repair_region,
+            "smart_apply_region_repair": self._start_smart_region_repair,
+            "smart_detect_text_regions": self._detect_smart_text_regions,
+            "smart_next_text_region": self._select_next_smart_text_suggestion,
+            "smart_recognize_text": self._recognize_smart_text_region,
+            "smart_recommend_font": self._recommend_smart_text_font,
+            "smart_remove_background": self._start_smart_remove_background,
+            "smart_send_to_convert": self._send_smart_result_to_conversion,
+            "smart_replace_text": self._start_smart_text_replacement,
+            "smart_upscale_2x": lambda: self._start_smart_upscale(2),
+            "smart_upscale_4x": lambda: self._start_smart_upscale(4),
+            "toggle_edit_panel": self.toggle_edit_panel,
+            "toggle_fullscreen": self.toggle_fullscreen,
+            "toggle_immersive": self.toggle_immersive,
+            "toggle_file_comparison": self._toggle_file_comparison,
+            "toggle_slideshow": self.toggle_slideshow,
+            "toggle_split_compare": self._toggle_dock_split_compare,
+            "toggle_thumbnail_sidebar": self.toggle_thumbnail_sidebar,
+            "undo": self.undo,
+            "update_watermark": self._watermark_changed,
+            "zoom_150": lambda: self.set_zoom("150%"),
+            "zoom_200": lambda: self.set_zoom("200%"),
+            "zoom_50": lambda: self.set_zoom("50%"),
+        }
+
+    def _validate_feature_callbacks(self) -> None:
+        commands = self._feature_callbacks()
+        missing = sorted(
+            feature.command
+            for feature in self.feature_registry
+            if feature.command is not None and feature.command not in commands
+        )
+        if missing:
+            raise RuntimeError("功能注册表存在未绑定命令：" + "、".join(missing))
+
+    def resolve_feature_callback(self, feature_id: str) -> Callable[[], object]:
+        feature = self.feature_registry[feature_id]
+        if feature.command is None:
+            raise KeyError(f"功能没有命令：{feature_id}")
+        return self._feature_callbacks()[feature.command]
+
+    def invoke_feature(self, feature_id: str) -> object:
+        feature = self.feature_registry[feature_id]
+        if feature.mode is not None and feature.mode is not self.mode_router.active_mode:
+            self.mode_router.switch(feature.mode)
+        return self.resolve_feature_callback(feature_id)()
+
+    def _enter_convert_crop(self) -> None:
+        self.mode_router.switch(ModeId.CONVERT)
+        self._set_annotation_tool("crop")
+        self.status_var.set("裁剪：在图片上拖动框选，然后点击“应用裁剪”或按 Enter")
+        self._update_crop_action_bar()
+
+    def _crop_confirmation_available(self) -> bool:
+        return (
+            self.original is not None
+            and self.annotation_tool_var.get() == "crop"
+            and self.mode_router.active_mode in {ModeId.CONVERT, ModeId.EDIT}
+            and not self._smart_repair_selecting_region
+            and not self._smart_text_selecting_region
+            and not self._smart_text_adjusting_region
+            and not self._side_by_side_comparison_active()
+            and not self._is_immersive
+        )
+
+    def _update_crop_action_bar(self) -> None:
+        if not hasattr(self, "crop_action_bar"):
+            return
+        if not self._crop_confirmation_available():
+            self.crop_action_bar.place_forget()
+            return
+        if self.crop_box is None:
+            self.crop_action_hint_var.set("拖动图片创建裁剪框")
+            self.crop_action_apply_button.state(("disabled",))
+        else:
+            left, top, right, bottom = self.crop_box
+            self.crop_action_hint_var.set(f"已选择 {right - left} × {bottom - top}")
+            self.crop_action_apply_button.state(("!disabled",))
+        self.crop_action_bar.place(
+            in_=self.canvas_frame,
+            relx=0.5,
+            rely=1.0,
+            y=-78,
+            anchor="s",
+        )
+        self.crop_action_bar.tk.call("raise", self.crop_action_bar._w)
+
+    def _cancel_crop_interaction(self) -> None:
+        self.crop_box = None
+        self.drag_start = None
+        self.crop_drag_start_box = None
+        self.crop_action = "new"
+        if self.document is not None and self.mode_router.active_mode is not ModeId.CONVERT:
+            self.document.update_state("crop_cancel", crop_box=None)
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            self.crop_var.set(
+                "配方中已有裁切"
+                if self.conversion_draft_history.current.crop_box is not None
+                else "未设置裁剪"
+            )
+        else:
+            self.crop_var.set("未设置裁剪")
+        self._set_annotation_tool("select")
+        self._draw_crop()
+        self.status_var.set("已取消本次裁剪；已应用的裁剪保持不变")
+        self._refresh_preview()
+
+    def _enter_edit_annotation_tool(self, tool: str) -> None:
+        self._show_inspector_tab("annotation")
+        self._set_annotation_tool(tool)
+
+    def _rotate_from_dock(self) -> None:
+        self.mode_router.switch(ModeId.CONVERT)
+        self.rotate(90)
+
+    def _on_mode_transition(self, transition: ModeTransition) -> None:
+        if transition.mode is not ModeId.EDIT and self._smart_alpha_brush_active:
+            self._smart_alpha_brush_active = False
+            self._smart_alpha_current_points.clear()
+            self.canvas.delete("smart-alpha-brush")
+            self.canvas.configure(cursor="arrow")
+        if transition.mode is not ModeId.EDIT and self._smart_mask_brush_active:
+            self._smart_mask_brush_active = False
+            self._smart_mask_current_points.clear()
+            self.canvas.delete("smart-mask-brush")
+            self.canvas.configure(cursor="arrow")
+        if transition.changed_mode or transition.reason == "snapshot":
+            self._apply_mode_layout(transition.mode)
+
+    def _apply_mode_layout(self, mode: ModeId, *, announce: bool = True) -> None:
+        resume_animation = False
+        if mode is not ModeId.VIEWER and self._animation_playing:
+            self._animation_resume_on_viewer = True
+            self._animation_playing = False
+            self._cancel_animation_timer()
+        elif (
+            mode is ModeId.VIEWER
+            and self._animation_resume_on_viewer
+            and self._animation_sequence is not None
+            and not self.file_compare_var.get()
+        ):
+            self._animation_resume_on_viewer = False
+            self._animation_playing = True
+            self._animation_index = (
+                self._animation_displayed_index + 1
+            ) % self._animation_sequence.frame_count
+            resume_animation = True
+        for candidate, button in self.mode_buttons.items():
+            button.set_selected(candidate is mode)
+        self.mode_hint_var.set(MODE_HINTS[mode])
+        if mode is ModeId.CONVERT:
+            self._apply_conversion_draft_to_controls()
+        elif mode is ModeId.EDIT and self.document is not None:
+            self._apply_document_state(self.document.state)
+            self._sync_controls_from_timeline()
+        self.generate_workspace.grid_remove()
+        if mode is ModeId.VIEWER:
+            self.viewer_mode_actions.grid()
+        else:
+            self.viewer_mode_actions.grid_remove()
+
+        sidebar_titles = {
+            ModeId.VIEWER: "资源库",
+            ModeId.CONVERT: "转换队列",
+            ModeId.EDIT: "资源与版本",
+            ModeId.GENERATE: "参考资源",
+        }
+        self.thumbnail_sidebar.title_var.set(sidebar_titles[mode])
+
+        show_side_area = self.thumbnail_sidebar_visible_var.get() and not self._is_immersive
+        if mode is ModeId.CONVERT:
+            self.thumbnail_sidebar.grid_remove()
+            if show_side_area:
+                self.conversion_workspace.grid()
+            else:
+                self.conversion_workspace.grid_remove()
+            self._enqueue_current_conversion_handoff()
+        else:
+            self.conversion_workspace.grid_remove()
+            if show_side_area:
+                self.thumbnail_sidebar.grid()
+                self.thumbnail_sidebar.select(self.navigation.current)
+            else:
+                self.thumbnail_sidebar.grid_remove()
+
+        if mode is ModeId.VIEWER:
+            self.panel_shell.grid_remove()
+        elif mode is ModeId.CONVERT:
+            self.panel_shell.grid()
+            self._show_inspector_tab("convert", sync_mode=False)
+        elif mode is ModeId.EDIT:
+            self.panel_shell.grid()
+            stored_tab = str(self.mode_router.state_for(ModeId.EDIT).get("inspector_tab", "adjust"))
+            if stored_tab not in {"adjust", "smart", "annotation", "history"}:
+                stored_tab = "adjust"
+            self._show_inspector_tab(stored_tab, sync_mode=False)
+        else:
+            self.panel_shell.grid_remove()
+            self.generate_workspace.grid()
+            self.generate_workspace.tkraise()
+
+        if mode is ModeId.GENERATE:
+            self.canvas_tools.place_forget()
+            self.status_label.place_forget()
+            self.canvas_metadata.place_forget()
+        elif not self._is_immersive:
+            self.canvas_tools.place(x=14, y=14, anchor="nw")
+            self._place_canvas_status()
+        self._update_animation_controls()
+
+        if announce:
+            self.status_var.set(f"已切换到{MODE_LABELS[mode]}模式")
+        if resume_animation:
+            self._show_animation_frame()
+        else:
+            self._schedule_preview()
+        self._update_crop_action_bar()
+
+    def _choose_smart_text_color(self) -> None:
+        selected = colorchooser.askcolor(
+            self.smart_text_color_var.get(),
+            title="选择替换文字颜色",
+            parent=self,
+        )[1]
+        if selected:
+            self.smart_text_color_var.set(selected.lower())
+
+    def _choose_smart_text_effect_color(self) -> None:
+        selected = colorchooser.askcolor(
+            self.smart_text_effect_color_var.get(),
+            title="选择文字字效辅助色",
+            parent=self,
+        )[1]
+        if selected:
+            self.smart_text_effect_color_var.set(selected.lower())
+
+    def _detect_smart_text_regions(self) -> None:
+        if self.document is None or self._current_asset_revision is None:
+            self.smart_edit_status_var.set("请先打开一张图片并等待资源登记完成")
+            return
+        future = self._smart_text_detection_future
+        if future is not None and not future.done():
+            self.smart_edit_status_var.set("正在分析文字区域，请稍候")
+            return
+        try:
+            source_path = self.asset_repository.resolve_content(
+                self._current_asset_revision.revision_id
+            )
+        except Exception:
+            self.smart_edit_status_var.set("当前图片无法用于离线文字检测")
+            return
+        self._smart_text_detection_generation += 1
+        generation = self._smart_text_detection_generation
+        self._smart_text_suggestions = ()
+        self._smart_text_suggestion_index = -1
+        self._smart_text_perspective_quad = None
+        self.smart_text_curve_var.set(0)
+        self.smart_text_effect_var.set("普通")
+        self.smart_text_region_var.set("区域：正在离线分析可能的文字行…")
+        self.smart_edit_status_var.set("正在后台检测文字区域；不会上传图片")
+        self._smart_text_detection_future = self._analysis_executor.submit(
+            detect_text_regions,
+            source_path,
+        )
+        self._update_smart_edit_buttons()
+        self.after(30, lambda: self._poll_smart_text_detection(generation))
+
+    def _poll_smart_text_detection(self, generation: int) -> None:
+        if generation != self._smart_text_detection_generation:
+            return
+        future = self._smart_text_detection_future
+        if future is None:
+            return
+        if not future.done():
+            self.after(40, lambda: self._poll_smart_text_detection(generation))
+            return
+        self._smart_text_detection_future = None
+        try:
+            suggestions = future.result()
+        except Exception:
+            self._smart_text_suggestions = ()
+            self._smart_text_suggestion_index = -1
+            self.smart_text_region_var.set("区域：自动检测失败，请手工框选")
+            self.smart_edit_status_var.set("离线检测失败；手工框选和原有编辑功能不受影响")
+            self._update_smart_edit_buttons()
+            return
+        self._smart_text_suggestions = suggestions
+        self._smart_text_suggestion_index = -1
+        if not suggestions:
+            self.smart_text_region_var.set("区域：未发现明显文字，请手工框选")
+            self.smart_edit_status_var.set("未发现明显文字区域；可继续手工框选")
+            self._update_smart_edit_buttons()
+            return
+        self._select_next_smart_text_suggestion()
+
+    def _select_next_smart_text_suggestion(self) -> None:
+        suggestions = self._smart_text_suggestions
+        if not suggestions or self.original is None:
+            self.smart_edit_status_var.set("当前没有可切换的文字区域建议")
+            return
+        self._smart_text_suggestion_index = (self._smart_text_suggestion_index + 1) % len(
+            suggestions
+        )
+        suggestion = suggestions[self._smart_text_suggestion_index]
+        left, top, right, bottom = suggestion.region
+        width, height = self.original.size
+        box = (
+            max(0, min(width - 1, math.floor(left * width))),
+            max(0, min(height - 1, math.floor(top * height))),
+            max(1, min(width, math.ceil(right * width))),
+            max(1, min(height, math.ceil(bottom * height))),
+        )
+        if box[2] <= box[0] or box[3] <= box[1]:
+            self.smart_edit_status_var.set("文字区域建议无效，请手工框选")
+            return
+        self._smart_text_region_box = box
+        self._smart_text_perspective_quad = suggestion.perspective_quad
+        self.crop_box = box
+        self._smart_text_selecting_region = False
+        self.smart_text_rotation_var.set(suggestion.rotation)
+        self.smart_text_curve_var.set(round(suggestion.curve * 100, 6))
+        effect_label = SMART_TEXT_EFFECT_LABELS[suggestion.visual_effect]
+        previous_effect = SMART_TEXT_EFFECTS.get(self.smart_text_effect_var.get(), "plain")
+        self.smart_text_effect_var.set(effect_label)
+        if suggestion.estimated_fill_color is not None:
+            self.smart_text_color_var.set(suggestion.estimated_fill_color)
+        if suggestion.estimated_effect_color is not None:
+            self.smart_text_effect_color_var.set(suggestion.estimated_effect_color)
+        elif previous_effect != suggestion.visual_effect:
+            self.smart_text_effect_color_var.set(
+                SMART_TEXT_EFFECT_DEFAULT_COLORS[suggestion.visual_effect]
+            )
+        if suggestion.estimated_effect_size is not None:
+            self.smart_text_effect_size_var.set(suggestion.estimated_effect_size)
+        elif suggestion.visual_effect == "gradient":
+            self.smart_text_effect_size_var.set(0)
+        if suggestion.visual_effect in {"outline", "shadow", "glow"}:
+            try:
+                effect_size = int(self.smart_text_effect_size_var.get())
+            except (TypeError, ValueError, tk.TclError):
+                effect_size = 0
+            if effect_size < 1:
+                self.smart_text_effect_size_var.set(4)
+        self._update_smart_text_region_label()
+        self._draw_crop()
+        confidence = round(suggestion.confidence * 100)
+        if suggestion.perspective_quad is not None:
+            perspective_planes = tuple(
+                item for item in suggestions if item.perspective_quad is not None
+            )
+            if len(perspective_planes) > 1:
+                plane_index = perspective_planes.index(suggestion) + 1
+                angle_label = (
+                    f"透视文字平面 {plane_index}/{len(perspective_planes)}"
+                    f" · 方向 {suggestion.rotation:+.0f}°"
+                )
+            else:
+                angle_label = f"透视文字 · 方向 {suggestion.rotation:+.0f}°"
+        elif abs(suggestion.curve) >= 0.05:
+            curve_direction = "上拱" if suggestion.curve > 0 else "下弯"
+            angle_label = (
+                f"弧形文字 {curve_direction} {suggestion.curve * 100:+.0f}%"
+                f" · 方向 {suggestion.rotation:+.0f}°"
+            )
+        elif abs(suggestion.rotation) < 0.05:
+            angle_label = "水平文字"
+        elif abs(suggestion.rotation) >= 74.5:
+            angle_label = f"竖排文字方向 {suggestion.rotation:+.0f}°"
+        else:
+            angle_label = f"检测角度 {suggestion.rotation:+.0f}°"
+        visual_effect_label = {
+            "plain": "",
+            "outline": "描边文字",
+            "shadow": "投影文字",
+            "gradient": "渐变填充文字",
+            "glow": "发光文字",
+        }[suggestion.visual_effect]
+        visual_effect_suffix = (
+            f" · {visual_effect_label}（已估计主色、辅助色和强度，可校正）"
+            if visual_effect_label
+            else ""
+        )
+        color_estimate_suffix = (
+            f" · 估计文字色 {suggestion.estimated_fill_color}"
+            if not visual_effect_label and suggestion.estimated_fill_color is not None
+            else ""
+        )
+        self.smart_edit_status_var.set(
+            f"文字区域建议 {self._smart_text_suggestion_index + 1}/{len(suggestions)}"
+            f" · {angle_label}{visual_effect_suffix}{color_estimate_suffix}"
+            f" · 可信度 {confidence}% · 可拖动边框校正"
+        )
+        self._update_smart_edit_buttons()
+
+    def _recognize_smart_text_region(self) -> None:
+        revision = self._current_asset_revision
+        if self.document is None or revision is None:
+            self.smart_edit_status_var.set("请先打开一张图片并等待资源登记完成")
+            return
+        if not self.text_ocr_backend.available:
+            self.smart_text_ocr_var.set("框内文字识别：本机不可用")
+            self.smart_edit_status_var.set(
+                f"{self.text_ocr_backend.unavailable_reason}；可继续手工输入新文字"
+            )
+            return
+        future = self._smart_text_ocr_future
+        if future is not None and not future.done():
+            self.smart_edit_status_var.set("正在识别框内文字，请稍候")
+            return
+        region = self._smart_text_region_box or self.crop_box
+        if region is None:
+            self.smart_edit_status_var.set("请先自动检测或手工框选原文字区域")
+            return
+        width = revision.width or (self.original.width if self.original is not None else 0)
+        height = revision.height or (self.original.height if self.original is not None else 0)
+        if width < 1 or height < 1:
+            self.smart_edit_status_var.set("当前图片尺寸无效，无法识别文字")
+            return
+        left, top, right, bottom = region
+        left = max(0, min(width - 1, left))
+        top = max(0, min(height - 1, top))
+        right = max(left + 1, min(width, right))
+        bottom = max(top + 1, min(height, bottom))
+        normalized = (left / width, top / height, right / width, bottom / height)
+        try:
+            rotation = float(self.smart_text_rotation_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            self.smart_edit_status_var.set("旋转角度必须是数字，无法识别文字")
+            return
+        if not -180 <= rotation <= 180:
+            self.smart_edit_status_var.set("旋转角度必须在 -180 到 180 度之间")
+            return
+        try:
+            curve_percent = float(self.smart_text_curve_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            self.smart_edit_status_var.set("弧度必须是数字，无法识别文字")
+            return
+        if not math.isfinite(curve_percent) or not -100 <= curve_percent <= 100:
+            self.smart_edit_status_var.set("弧度必须在 -100% 到 100% 之间")
+            return
+        if self._smart_text_perspective_quad is not None and abs(curve_percent) >= 0.05:
+            self.smart_edit_status_var.set("透视四角与弧形文字校正不能同时使用")
+            return
+        try:
+            source_path = self.asset_repository.resolve_content(revision.revision_id)
+        except Exception:
+            self.smart_edit_status_var.set("当前图片无法用于离线文字识别")
+            return
+        self._smart_text_ocr_generation += 1
+        generation = self._smart_text_ocr_generation
+        curve = curve_percent / 100
+        self.smart_text_ocr_var.set("框内文字识别：正在本地处理…")
+        self.smart_edit_status_var.set(
+            "正在本地校直弧形文字并识别；图片不会上传"
+            if abs(curve) >= 0.05
+            else "正在后台识别框内文字；图片不会上传"
+        )
+        if self._smart_text_perspective_quad is not None:
+            self._smart_text_ocr_future = self._analysis_executor.submit(
+                self.text_ocr_backend.recognize,
+                source_path,
+                region=normalized,
+                rotation=rotation,
+                quadrilateral=self._smart_text_perspective_quad,
+            )
+        elif abs(curve) >= 0.05:
+            self._smart_text_ocr_future = self._analysis_executor.submit(
+                self.text_ocr_backend.recognize,
+                source_path,
+                region=normalized,
+                rotation=rotation,
+                curve=curve,
+            )
+        else:
+            self._smart_text_ocr_future = self._analysis_executor.submit(
+                self.text_ocr_backend.recognize,
+                source_path,
+                region=normalized,
+                rotation=rotation,
+            )
+        self._update_smart_edit_buttons()
+        self.after(30, lambda: self._poll_smart_text_ocr(generation))
+
+    def _poll_smart_text_ocr(self, generation: int) -> None:
+        if generation != self._smart_text_ocr_generation:
+            return
+        future = self._smart_text_ocr_future
+        if future is None:
+            return
+        if not future.done():
+            self.after(40, lambda: self._poll_smart_text_ocr(generation))
+            return
+        self._smart_text_ocr_future = None
+        try:
+            result = future.result()
+        except TextOcrUnavailableError as error:
+            self.smart_text_ocr_var.set("框内文字识别：本机不可用")
+            self.smart_edit_status_var.set(f"{error}；可继续手工输入新文字")
+            self._update_smart_edit_buttons()
+            return
+        except Exception:
+            self.smart_text_ocr_var.set("框内文字识别：识别失败")
+            self.smart_edit_status_var.set("离线文字识别失败；手工输入和原有编辑功能不受影响")
+            self._update_smart_edit_buttons()
+            return
+        if result is None:
+            self.smart_text_ocr_var.set("框内文字识别：未发现清晰文字")
+            self.smart_edit_status_var.set("框内未识别到文字；可调整区域或继续手工输入")
+            self._update_smart_edit_buttons()
+            return
+        recognized = result.text.strip()
+        truncated = len(recognized) > 500
+        if truncated:
+            recognized = recognized[:500]
+        self.smart_text_value_var.set(recognized)
+        suffix = " · 已截取前 500 字" if truncated else ""
+        confidence_label = (
+            "系统未提供可信度"
+            if result.confidence is None
+            else f"可信度 {round(result.confidence * 100)}%"
+        )
+        enhancement_label = (
+            " · 已增强低对比文字" if result.preprocessing == "adaptive-contrast" else ""
+        )
+        geometry_label = (
+            " · 已校直弧形文字"
+            if result.geometry_correction == "curve"
+            else " · 已校正透视文字"
+            if result.geometry_correction == "perspective"
+            else ""
+        )
+        self.smart_text_ocr_var.set(
+            f"识别结果：{result.language_label} · {confidence_label}"
+            f"{geometry_label}{enhancement_label}{suffix}"
+        )
+        self.smart_edit_status_var.set(
+            "弧形文字已校直并填入新文字输入框；请校对后执行替换"
+            if result.geometry_correction == "curve"
+            else "识别内容已填入新文字输入框；请校对后执行替换"
+        )
+        self._update_smart_edit_buttons()
+
+    def _recommend_smart_text_font(self) -> None:
+        source_revision = self._smart_edit_ready_source()
+        if source_revision is None:
+            return
+        future = self._smart_font_match_future
+        if future is not None and not future.done():
+            self.smart_edit_status_var.set("字体推荐正在本地分析，请稍候")
+            return
+        region = self._smart_text_region_box or self.crop_box
+        if region is None:
+            self.smart_edit_status_var.set("请先框选需要比较字体的原文字区域")
+            return
+        text = self.smart_text_value_var.get().strip()
+        if not text or len(text) > 200:
+            self.smart_edit_status_var.set("字体推荐文字必须包含 1 到 200 个字符")
+            return
+        width = source_revision.width or (self.original.width if self.original is not None else 0)
+        height = source_revision.height or (
+            self.original.height if self.original is not None else 0
+        )
+        if width < 1 or height < 1:
+            self.smart_edit_status_var.set("当前图片尺寸无法用于字体推荐")
+            return
+        left, top, right, bottom = region
+        left = max(0, min(width - 1, left))
+        top = max(0, min(height - 1, top))
+        right = max(left + 1, min(width, right))
+        bottom = max(top + 1, min(height, bottom))
+        if right - left < 8 or bottom - top < 8:
+            self.smart_edit_status_var.set("字体推荐区域过小，请重新框选")
+            return
+        try:
+            rotation = float(self.smart_text_rotation_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            self.smart_edit_status_var.set("字体推荐旋转角度必须是数字")
+            return
+        try:
+            source_path = self.asset_repository.resolve_content(source_revision.revision_id)
+        except Exception:
+            self.smart_edit_status_var.set("当前图片无法用于离线字体推荐")
+            return
+        normalized_region = (
+            left / width,
+            top / height,
+            right / width,
+            bottom / height,
+        )
+        self._smart_text_region_box = (left, top, right, bottom)
+        self._update_smart_text_region_label()
+        self._smart_font_match_generation += 1
+        generation = self._smart_font_match_generation
+        self.smart_text_font_match_var.set("字体推荐：正在本地比较候选字体…")
+        self.smart_edit_status_var.set("正在后台比较文字轮廓；图片不会上传")
+        self._smart_font_match_future = self._analysis_executor.submit(
+            match_fonts,
+            source_path,
+            region=normalized_region,
+            text=text,
+            rotation=rotation,
+            maximum_results=3,
+        )
+        self._update_smart_edit_buttons()
+        self.after(30, lambda: self._poll_smart_font_match(generation))
+
+    def _poll_smart_font_match(self, generation: int) -> None:
+        if generation != self._smart_font_match_generation:
+            return
+        future = self._smart_font_match_future
+        if future is None:
+            return
+        if not future.done():
+            self.after(40, lambda: self._poll_smart_font_match(generation))
+            return
+        self._smart_font_match_future = None
+        try:
+            suggestions = future.result()
+        except FontMatchError as error:
+            self.smart_text_font_match_var.set("字体推荐：未得到可靠结果")
+            self.smart_edit_status_var.set(f"{error}；可继续手工选择字体")
+            self._update_smart_edit_buttons()
+            return
+        except Exception:
+            self.smart_text_font_match_var.set("字体推荐：本地比较失败")
+            self.smart_edit_status_var.set("字体推荐失败；手工排版和其他编辑功能不受影响")
+            self._update_smart_edit_buttons()
+            return
+        best = suggestions[0]
+        self.smart_text_font_var.set(best.font_family)
+        summary = " · ".join(
+            f"{item.font_family} {round(item.score * 100)}%" for item in suggestions
+        )
+        self.smart_text_font_match_var.set(f"字体推荐：{summary}")
+        self.smart_edit_status_var.set(f"已选用最相似候选“{best.font_family}”；请预览并按需调整")
+        self._update_smart_edit_buttons()
+
+    def _reset_smart_edit_for_new_document(self) -> None:
+        self._smart_background_compose_generation += 1
+        if self._smart_background_compose_after is not None:
+            try:
+                self.after_cancel(self._smart_background_compose_after)
+            except tk.TclError:
+                pass
+            self._smart_background_compose_after = None
+        background_future = self._smart_background_compose_future
+        if background_future is not None and not background_future.done():
+            background_future.cancel()
+        self._smart_background_compose_future = None
+        self._smart_background_compose_source_revision_id = None
+        self._smart_background_alpha_revision = None
+        self._smart_text_detection_generation += 1
+        detection_future = self._smart_text_detection_future
+        if detection_future is not None and not detection_future.done():
+            detection_future.cancel()
+        self._smart_text_detection_future = None
+        self._smart_text_suggestions = ()
+        self._smart_text_suggestion_index = -1
+        self._smart_text_ocr_generation += 1
+        ocr_future = self._smart_text_ocr_future
+        if ocr_future is not None and not ocr_future.done():
+            ocr_future.cancel()
+        self._smart_text_ocr_future = None
+        self._smart_selection_generation += 1
+        selection_future = self._smart_selection_future
+        if selection_future is not None and not selection_future.done():
+            selection_future.cancel()
+        self._smart_selection_future = None
+        self._smart_selection_suggestions = ()
+        self._smart_selection_index = -1
+        self._clear_smart_selection_mask()
+        self._smart_font_match_generation += 1
+        font_match_future = self._smart_font_match_future
+        if font_match_future is not None and not font_match_future.done():
+            font_match_future.cancel()
+        self._smart_font_match_future = None
+        self._smart_alpha_brush_active = False
+        self._smart_alpha_current_points.clear()
+        self._smart_alpha_strokes.clear()
+        self.smart_alpha_refinement_var.set("边缘画笔：等待去背景结果")
+        self.canvas.delete("smart-alpha-brush")
+        if self._smart_edit_after is not None:
+            try:
+                self.after_cancel(self._smart_edit_after)
+            except tk.TclError:
+                pass
+            self._smart_edit_after = None
+        if self._smart_edit_job_id is not None:
+            try:
+                snapshot = self.ai_job_manager.get_job(self._smart_edit_job_id)
+                if not snapshot.status.terminal:
+                    self.ai_job_manager.cancel(self._smart_edit_job_id)
+            except Exception:
+                pass
+        self._smart_edit_job_id = None
+        self._smart_edit_import_future = None
+        self._smart_edit_presented_job_id = None
+        self._smart_edit_source_revision_id = None
+        self._smart_edit_result_revision = None
+        self._smart_edit_operation = None
+        self._smart_repair_region_box = None
+        self._smart_repair_selecting_region = False
+        self._smart_text_region_box = None
+        self._smart_text_selecting_region = False
+        self._smart_text_adjusting_region = False
+        self._smart_text_perspective_quad = None
+        self.smart_text_effect_var.set("普通")
+        self.smart_text_effect_color_var.set("#ffffff")
+        self.smart_text_effect_size_var.set(4)
+        self.smart_text_history.reset()
+        self.smart_edit_status_var.set("请选择本地高清、智能去背景或文字替换")
+        self.smart_edit_result_var.set("结果将作为当前图片的新修订保存")
+        self.smart_text_ocr_var.set(
+            f"框内文字识别：{self.text_ocr_backend.display_name}可用"
+            if self.text_ocr_backend.available
+            else "框内文字识别：未安装，可继续手工输入"
+        )
+        self.smart_text_font_match_var.set("字体推荐：框选文字并填写或识别原文字后可使用")
+        self._update_smart_text_region_label()
+        self._update_smart_repair_region_label()
+        self._update_smart_edit_buttons()
+
+    def _detect_smart_repair_region(self) -> None:
+        source_revision = self._smart_edit_ready_source()
+        if source_revision is None:
+            return
+        future = self._smart_selection_future
+        if future is not None and not future.done():
+            self.smart_edit_status_var.set("智能选区正在本地分析，请稍候")
+            return
+        try:
+            source_path = self.asset_repository.resolve_content(source_revision.revision_id)
+        except Exception:
+            self.smart_edit_status_var.set("当前图片无法用于离线智能选区")
+            return
+        self._smart_selection_generation += 1
+        generation = self._smart_selection_generation
+        self._smart_repair_selecting_region = False
+        self._smart_selection_suggestions = ()
+        self._smart_selection_index = -1
+        self._clear_smart_selection_mask()
+        self.smart_repair_region_var.set("区域：正在离线识别主要主体…")
+        self.smart_edit_status_var.set("正在后台分析显著区域；图片不会上传")
+        self._smart_selection_future = self._analysis_executor.submit(
+            detect_smart_selection,
+            source_path,
+        )
+        self._update_smart_edit_buttons()
+        self.after(30, lambda: self._poll_smart_repair_region(generation))
+
+    def _poll_smart_repair_region(self, generation: int) -> None:
+        if generation != self._smart_selection_generation:
+            return
+        future = self._smart_selection_future
+        if future is None:
+            return
+        if not future.done():
+            self.after(40, lambda: self._poll_smart_repair_region(generation))
+            return
+        self._smart_selection_future = None
+        try:
+            suggestions = future.result()
+        except SmartSelectionError as error:
+            self._smart_repair_region_box = None
+            self._smart_selection_suggestions = ()
+            self._smart_selection_index = -1
+            self._clear_smart_selection_mask()
+            self._update_smart_repair_region_label()
+            self.smart_edit_status_var.set(f"{error}；请继续手工框选")
+            self._update_smart_edit_buttons()
+            return
+        except Exception:
+            self._smart_repair_region_box = None
+            self._smart_selection_suggestions = ()
+            self._smart_selection_index = -1
+            self._clear_smart_selection_mask()
+            self._update_smart_repair_region_label()
+            self.smart_edit_status_var.set("智能选区失败；手工框选和其他编辑功能不受影响")
+            self._update_smart_edit_buttons()
+            return
+        if not suggestions:
+            self._smart_repair_region_box = None
+            self._smart_selection_suggestions = ()
+            self._smart_selection_index = -1
+            self._clear_smart_selection_mask()
+            self._update_smart_repair_region_label()
+            self.smart_edit_status_var.set("未发现可靠主体，请手工框选需要擦除的区域")
+            self._update_smart_edit_buttons()
+            return
+        self._smart_selection_suggestions = suggestions
+        self._smart_selection_index = -1
+        self._select_next_smart_repair_suggestion()
+
+    def _select_next_smart_repair_suggestion(self) -> None:
+        suggestions = self._smart_selection_suggestions
+        if not suggestions:
+            self.smart_edit_status_var.set("尚无智能主体候选，请先执行识别")
+            self._update_smart_edit_buttons()
+            return
+        source_revision = self._smart_edit_ready_source()
+        if source_revision is None:
+            return
+        width = source_revision.width or (self.original.width if self.original is not None else 0)
+        height = source_revision.height or (
+            self.original.height if self.original is not None else 0
+        )
+        if width < 1 or height < 1:
+            self.smart_edit_status_var.set("当前图片尺寸无法用于智能选区")
+            self._update_smart_edit_buttons()
+            return
+        self._smart_selection_index = (self._smart_selection_index + 1) % len(suggestions)
+        suggestion = suggestions[self._smart_selection_index]
+        self._reset_smart_mask_refinement(announce=False, redraw=False)
+        left = max(0, min(width - 1, round(suggestion.region[0] * width)))
+        top = max(0, min(height - 1, round(suggestion.region[1] * height)))
+        right = max(left + 1, min(width, round(suggestion.region[2] * width)))
+        bottom = max(top + 1, min(height, round(suggestion.region[3] * height)))
+        box = (left, top, right, bottom)
+        if self.file_compare_var.get():
+            self._disable_file_comparison(announce=False)
+        self._smart_text_selecting_region = False
+        self._smart_text_perspective_quad = None
+        self._smart_repair_selecting_region = True
+        self._smart_repair_region_box = box
+        self._smart_selection_mask_box = box
+        self.crop_box = box
+        if self.document is not None:
+            self.document.update_state("smart_repair_auto_region", crop_box=box)
+        self._set_annotation_tool("crop")
+        self._draw_smart_selection_mask()
+        self._draw_crop()
+        confidence = round(suggestion.confidence * 100)
+        source_label = (
+            "颜色分离"
+            if suggestion.selection_kind == "color_split"
+            else (
+                "形状分离"
+                if suggestion.selection_kind == "shape_split"
+                else ("透明轮廓" if suggestion.source == "alpha" else "背景对比")
+            )
+        )
+        self.smart_repair_region_var.set(
+            f"区域：{right - left} × {bottom - top} · "
+            f"候选 {self._smart_selection_index + 1}/{len(suggestions)} · "
+            f"{source_label} {confidence}%"
+        )
+        self.smart_edit_status_var.set(
+            "像素蒙版已显示；可切换候选，也可拖动边框校正（校正后改用矩形修复）"
+        )
+        self._update_smart_edit_buttons()
+
+    def _select_smart_repair_region(self) -> None:
+        if self.document is None or self.document.source_path is None:
+            self.smart_edit_status_var.set("请先打开一张图片")
+            return
+        if self.file_compare_var.get():
+            self._disable_file_comparison(announce=False)
+        self._smart_selection_suggestions = ()
+        self._smart_selection_index = -1
+        self._clear_smart_selection_mask()
+        self._smart_text_selecting_region = False
+        self._smart_text_perspective_quad = None
+        self._smart_repair_selecting_region = True
+        self._smart_repair_region_box = None
+        self.crop_box = None
+        self.document.update_state("smart_repair_region_start", crop_box=None)
+        self._set_annotation_tool("crop")
+        self.smart_repair_region_var.set("区域：请在画布拖动框选需要擦除的物体")
+        self.smart_edit_status_var.set("在画布框选物体；松开后可继续调整边框")
+        self._draw_crop()
+
+    def _update_smart_repair_region_label(self) -> None:
+        region = self._smart_repair_region_box
+        if region is None:
+            self.smart_repair_region_var.set("区域：请在画布框选需要擦除的物体")
+            return
+        left, top, right, bottom = region
+        self.smart_repair_region_var.set(
+            f"区域：{right - left} × {bottom - top} · 位置 {left},{top}"
+        )
+
+    def _clear_smart_selection_mask(self) -> None:
+        self._smart_mask_brush_active = False
+        self._smart_mask_current_points.clear()
+        self._smart_mask_strokes.clear()
+        self._smart_selection_refined_mask_rle = None
+        self._smart_selection_mask_box = None
+        self._smart_selection_mask_preview = None
+        if hasattr(self, "smart_mask_refinement_var"):
+            self.smart_mask_refinement_var.set("蒙版精修：请先智能识别主体")
+        if hasattr(self, "canvas"):
+            self.canvas.delete("smart-selection-mask")
+            self.canvas.delete("smart-mask-brush")
+
+    def _effective_smart_selection_mask(self) -> tuple[str, tuple[int, int]] | None:
+        if not 0 <= self._smart_selection_index < len(self._smart_selection_suggestions):
+            return None
+        suggestion = self._smart_selection_suggestions[self._smart_selection_index]
+        if suggestion.mask_size is None or suggestion.mask_rle is None:
+            return None
+        return (
+            self._smart_selection_refined_mask_rle or suggestion.mask_rle,
+            suggestion.mask_size,
+        )
+
+    def _reset_smart_mask_refinement(
+        self,
+        *,
+        announce: bool = True,
+        redraw: bool = True,
+    ) -> None:
+        self._smart_mask_brush_active = False
+        self._smart_mask_current_points.clear()
+        self._smart_mask_strokes.clear()
+        self._smart_selection_refined_mask_rle = None
+        if hasattr(self, "canvas"):
+            self.canvas.delete("smart-mask-brush")
+        self._sync_smart_mask_region_box()
+        if redraw and hasattr(self, "canvas"):
+            self._draw_smart_selection_mask()
+            self._draw_crop()
+        if hasattr(self, "smart_mask_refinement_var"):
+            self.smart_mask_refinement_var.set(
+                "蒙版精修：自动蒙版已恢复"
+                if self._effective_smart_selection_mask() is not None
+                else "蒙版精修：请先智能识别主体"
+            )
+        if announce:
+            self.smart_edit_status_var.set("已重置为当前主体的自动像素蒙版")
+            self._update_smart_edit_buttons()
+
+    def _sync_smart_mask_region_box(self) -> None:
+        effective = self._effective_smart_selection_mask()
+        if effective is None:
+            return
+        source_revision = self._smart_edit_ready_source()
+        if source_revision is None:
+            return
+        width = source_revision.width or (self.original.width if self.original is not None else 0)
+        height = source_revision.height or (
+            self.original.height if self.original is not None else 0
+        )
+        if width < 1 or height < 1:
+            return
+        if self._smart_selection_refined_mask_rle is None:
+            suggestion = self._smart_selection_suggestions[self._smart_selection_index]
+            box = (
+                max(0, min(width - 1, round(suggestion.region[0] * width))),
+                max(0, min(height - 1, round(suggestion.region[1] * height))),
+                max(1, min(width, round(suggestion.region[2] * width))),
+                max(1, min(height, round(suggestion.region[3] * height))),
+            )
+        else:
+            mask_rle, mask_size = effective
+            mask = decode_selection_mask(mask_rle, mask_size, target_size=(width, height))
+            try:
+                bounds = mask.getbbox()
+            finally:
+                mask.close()
+            if bounds is None:
+                return
+            box = bounds
+        left, top, right, bottom = box
+        right = max(left + 1, right)
+        bottom = max(top + 1, bottom)
+        normalized_box = (left, top, right, bottom)
+        self._smart_selection_mask_box = normalized_box
+        self._smart_repair_region_box = normalized_box
+        self.crop_box = normalized_box
+        if self.document is not None:
+            self.document.update_state("smart_repair_mask_region", crop_box=normalized_box)
+
+    def _activate_smart_mask_brush(self, mode: str) -> None:
+        if mode not in {"add", "remove"}:
+            raise ValueError("主体蒙版画笔模式无效")
+        if self._effective_smart_selection_mask() is None:
+            self.smart_edit_status_var.set("请先智能识别一个带像素蒙版的主体")
+            return
+        if self.file_compare_var.get():
+            self._disable_file_comparison(announce=False)
+        self._smart_alpha_brush_active = False
+        self._smart_mask_brush_mode = mode
+        self._smart_mask_brush_active = True
+        self._smart_repair_selecting_region = False
+        self._set_annotation_tool("select")
+        label = "加入蒙版" if mode == "add" else "移出蒙版"
+        self.smart_mask_refinement_var.set(f"当前：{label}画笔 · 在画布拖动")
+        self.smart_edit_status_var.set(f"{label}画笔已启用；每次松开鼠标形成一条可撤销笔划")
+        self.canvas.configure(cursor="crosshair")
+
+    def _rebuild_smart_mask_refinement(self) -> None:
+        if not 0 <= self._smart_selection_index < len(self._smart_selection_suggestions):
+            raise SmartSelectionError("当前没有可修整的主体蒙版")
+        suggestion = self._smart_selection_suggestions[self._smart_selection_index]
+        if suggestion.mask_rle is None or suggestion.mask_size is None:
+            raise SmartSelectionError("当前主体候选没有像素蒙版")
+        self._smart_selection_refined_mask_rle = (
+            refine_selection_mask(
+                suggestion.mask_rle,
+                suggestion.mask_size,
+                tuple(self._smart_mask_strokes),
+            )
+            if self._smart_mask_strokes
+            else None
+        )
+        self._sync_smart_mask_region_box()
+        self._draw_smart_selection_mask()
+        self._draw_crop()
+
+    def _undo_smart_mask_stroke(self) -> None:
+        if not self._smart_mask_strokes:
+            self.smart_edit_status_var.set("当前没有可撤销的主体蒙版笔划")
+            return
+        self._smart_mask_strokes.pop()
+        self._smart_mask_current_points.clear()
+        self.canvas.delete("smart-mask-brush")
+        self._rebuild_smart_mask_refinement()
+        self._update_smart_mask_refinement_label()
+        self.smart_edit_status_var.set("已撤销上一条主体蒙版笔划")
+        self._update_smart_edit_buttons()
+
+    def _update_smart_mask_refinement_label(self) -> None:
+        add_count = sum(stroke.mode == "add" for stroke in self._smart_mask_strokes)
+        remove_count = len(self._smart_mask_strokes) - add_count
+        self.smart_mask_refinement_var.set(
+            f"蒙版笔划：加入 {add_count} · 移出 {remove_count}"
+            if self._smart_mask_strokes
+            else "蒙版精修：自动蒙版未修改"
+        )
+
+    def _start_smart_mask_stroke(self, event: tk.Event) -> None:
+        if self.base_preview_image is None:
+            return
+        self._smart_mask_current_points = [self._canvas_to_normalized(event.x, event.y)]
+        self._draw_smart_mask_strokes()
+
+    def _drag_smart_mask_stroke(self, event: tk.Event) -> None:
+        if not self._smart_mask_current_points:
+            return
+        point = self._canvas_to_normalized(event.x, event.y)
+        previous = self._smart_mask_current_points[-1]
+        if (point[0] - previous[0]) ** 2 + (point[1] - previous[1]) ** 2 < 0.000004:
+            return
+        total_points = sum(len(stroke.points) for stroke in self._smart_mask_strokes)
+        if total_points + len(self._smart_mask_current_points) >= 10_000:
+            self.smart_edit_status_var.set("主体蒙版采样点已达到 10,000 个上限")
+            return
+        self._smart_mask_current_points.append(point)
+        self._draw_smart_mask_strokes()
+
+    def _finish_smart_mask_stroke(self, _event: tk.Event) -> None:
+        if not self._smart_mask_current_points or self.base_preview_image is None:
+            return
+        if len(self._smart_mask_strokes) >= 100:
+            self.smart_edit_status_var.set("主体蒙版笔划已达到 100 条上限")
+            self._smart_mask_current_points.clear()
+            return
+        try:
+            brush_size = int(self.smart_mask_brush_size_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            brush_size = 18
+        brush_size = max(2, min(256, brush_size))
+        radius = min(
+            0.25,
+            max(0.001, brush_size / min(self.base_preview_image.size) / 2),
+        )
+        stroke = SelectionMaskStroke(
+            mode=self._smart_mask_brush_mode,
+            radius=radius,
+            points=tuple(self._smart_mask_current_points),
+        )
+        self._smart_mask_current_points.clear()
+        self._smart_mask_strokes.append(stroke)
+        try:
+            self._rebuild_smart_mask_refinement()
+        except SmartSelectionError as error:
+            self._smart_mask_strokes.pop()
+            self._rebuild_smart_mask_refinement()
+            self.smart_edit_status_var.set(f"{error}；已放弃本条笔划")
+            return
+        self.canvas.delete("smart-mask-brush")
+        self._update_smart_mask_refinement_label()
+        self.smart_edit_status_var.set("主体蒙版已实时更新；可继续精修、撤销或直接执行擦除")
+        self._update_smart_edit_buttons()
+
+    def _draw_smart_mask_strokes(self) -> None:
+        self.canvas.delete("smart-mask-brush")
+        image = self.base_preview_image
+        if image is None or not self._smart_mask_current_points:
+            return
+        try:
+            brush_size = int(self.smart_mask_brush_size_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            brush_size = 18
+        brush_size = max(2, min(256, brush_size))
+        canvas_points = [
+            self._normalized_to_canvas(x, y) for x, y in self._smart_mask_current_points
+        ]
+        color = "#2e7d32" if self._smart_mask_brush_mode == "add" else "#c62828"
+        width = max(3, round(brush_size * self.preview_scale))
+        flattened = [coordinate for point in canvas_points for coordinate in point]
+        if len(canvas_points) > 1:
+            self.canvas.create_line(
+                *flattened,
+                fill=color,
+                width=width,
+                capstyle=tk.ROUND,
+                joinstyle=tk.ROUND,
+                stipple="gray50",
+                tags="smart-mask-brush",
+            )
+        else:
+            x, y = canvas_points[0]
+            radius_canvas = width / 2
+            self.canvas.create_oval(
+                x - radius_canvas,
+                y - radius_canvas,
+                x + radius_canvas,
+                y + radius_canvas,
+                fill=color,
+                outline="",
+                stipple="gray50",
+                tags="smart-mask-brush",
+            )
+
+    def _draw_smart_selection_mask(self) -> None:
+        self.canvas.delete("smart-selection-mask")
+        self._smart_selection_mask_preview = None
+        if (
+            self.base_preview_image is None
+            or self.preview is None
+            or not 0 <= self._smart_selection_index < len(self._smart_selection_suggestions)
+        ):
+            return
+        effective = self._effective_smart_selection_mask()
+        if effective is None:
+            return
+        mask_rle, mask_size = effective
+        try:
+            mask = decode_selection_mask(
+                mask_rle,
+                mask_size,
+                target_size=self.base_preview_image.size,
+            )
+        except SmartSelectionError:
+            return
+        try:
+            display_size = (self.preview.width(), self.preview.height())
+            if mask.size != display_size:
+                displayed_mask = mask.resize(display_size, Image.Resampling.NEAREST)
+            else:
+                displayed_mask = mask.copy()
+            try:
+                accent = ImageColor.getrgb(self.theme_manager.tokens.accent)
+                overlay = Image.new("RGBA", display_size, (*accent, 0))
+                alpha = displayed_mask.point(lambda value: 92 if value else 0)
+                try:
+                    overlay.putalpha(alpha)
+                    preview = ImageTk.PhotoImage(overlay, master=self.canvas)
+                finally:
+                    alpha.close()
+                    overlay.close()
+            finally:
+                displayed_mask.close()
+        finally:
+            mask.close()
+        self._smart_selection_mask_preview = preview
+        self.canvas.create_image(
+            self.preview_offset[0],
+            self.preview_offset[1],
+            image=preview,
+            anchor="nw",
+            tags="smart-selection-mask",
+        )
+
+    def _start_smart_region_repair(self) -> None:
+        source_revision = self._smart_edit_ready_source()
+        if source_revision is None:
+            return
+        region = self._smart_repair_region_box or self.crop_box
+        if region is None:
+            self.smart_edit_status_var.set("请先在画布框选需要擦除的物体")
+            return
+        width = source_revision.width or (self.original.width if self.original is not None else 0)
+        height = source_revision.height or (
+            self.original.height if self.original is not None else 0
+        )
+        left, top, right, bottom = region
+        left = max(0, min(width - 1, left))
+        top = max(0, min(height - 1, top))
+        right = max(left + 1, min(width, right))
+        bottom = max(top + 1, min(height, bottom))
+        if right - left < 4 or bottom - top < 4:
+            self.smart_edit_status_var.set("擦除区域过小，请重新框选")
+            return
+        try:
+            feather = int(self.smart_repair_feather_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            self.smart_edit_status_var.set("修复羽化必须是整数")
+            return
+        if not 0 <= feather <= 64:
+            self.smart_edit_status_var.set("修复羽化必须在 0 到 64 像素之间")
+            return
+        self._smart_repair_region_box = (left, top, right, bottom)
+        self._smart_repair_selecting_region = False
+        self._set_annotation_tool("select")
+        self._update_smart_repair_region_label()
+        suggestion = (
+            self._smart_selection_suggestions[self._smart_selection_index]
+            if 0 <= self._smart_selection_index < len(self._smart_selection_suggestions)
+            else None
+        )
+        use_mask = (
+            suggestion is not None
+            and suggestion.mask_size is not None
+            and suggestion.mask_rle is not None
+            and self._effective_smart_selection_mask() is not None
+            and self._smart_selection_mask_box == (left, top, right, bottom)
+        )
+        operation = "erase_mask" if use_mask else "erase_region"
+        parameters: tuple[tuple[str, Scalar], ...] = (
+            ("operation", operation),
+            ("region_left", left / width),
+            ("region_top", top / height),
+            ("region_right", right / width),
+            ("region_bottom", bottom / height),
+            ("feather", feather),
+        )
+        if use_mask:
+            assert suggestion is not None
+            assert suggestion.mask_size is not None
+            assert suggestion.mask_rle is not None
+            effective = self._effective_smart_selection_mask()
+            assert effective is not None
+            effective_mask_rle, effective_mask_size = effective
+            parameters = (
+                *parameters,
+                ("mask_width", effective_mask_size[0]),
+                ("mask_height", effective_mask_size[1]),
+                ("mask_rle", effective_mask_rle),
+                ("mask_refined", bool(self._smart_mask_strokes)),
+                ("mask_stroke_count", len(self._smart_mask_strokes)),
+                (
+                    "mask_point_count",
+                    sum(len(stroke.points) for stroke in self._smart_mask_strokes),
+                ),
+            )
+        self._smart_mask_brush_active = False
+        submitted = self._submit_smart_edit(
+            source_revision,
+            operation=operation,
+            prompt=("按主体像素蒙版擦除并局部修复" if use_mask else "擦除框选物体并局部修复"),
+            parameters=parameters,
+            result_summary=(
+                f"{'像素蒙版' if use_mask else '矩形区域'}："
+                f"{right - left} × {bottom - top} · 羽化 {feather}px"
+            ),
+        )
+        if submitted:
+            self._update_smart_edit_buttons()
+
+    def _select_smart_text_region(self) -> None:
+        if self.document is None or self.document.source_path is None:
+            self.smart_edit_status_var.set("请先打开一张图片")
+            return
+        if self.file_compare_var.get():
+            self._disable_file_comparison(announce=False)
+        self._smart_text_suggestions = ()
+        self._smart_text_suggestion_index = -1
+        self._smart_text_perspective_quad = None
+        self.smart_text_curve_var.set(0)
+        self.smart_text_effect_var.set("普通")
+        self._smart_repair_selecting_region = False
+        self._smart_text_selecting_region = True
+        self._smart_text_region_box = None
+        self.crop_box = None
+        self.document.update_state("smart_text_region_start", crop_box=None)
+        self._set_annotation_tool("crop")
+        self.smart_text_region_var.set("区域：请在画布拖动框选原文字")
+        self.smart_edit_status_var.set("在画布框选原文字区域；松开后可校正边框")
+        self._draw_crop()
+
+    def _update_smart_text_region_label(self) -> None:
+        region = self._smart_text_region_box
+        if region is None:
+            self.smart_text_region_var.set("区域：请在画布框选原文字")
+            return
+        left, top, right, bottom = region
+        perspective_label = (
+            " · 透视四角已校正" if self._smart_text_perspective_quad is not None else ""
+        )
+        try:
+            curve_percent = float(self.smart_text_curve_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            curve_percent = 0.0
+        curve_label = (
+            f" · 弧度 {curve_percent:+.0f}%"
+            if self._smart_text_perspective_quad is None and abs(curve_percent) >= 0.05
+            else ""
+        )
+        effect_label = self.smart_text_effect_var.get()
+        effect_suffix = f" · {effect_label}字效" if effect_label != "普通" else ""
+        self.smart_text_region_var.set(
+            f"区域：{right - left} × {bottom - top} · 位置 {left},{top}"
+            f"{perspective_label}{curve_label}{effect_suffix}"
+        )
+
+    def _start_smart_text_replacement(self) -> None:
+        source_revision = self._smart_edit_ready_source()
+        if source_revision is None:
+            return
+        region = self._smart_text_region_box or self.crop_box
+        if region is None:
+            self.smart_edit_status_var.set("请先在画布框选需要替换的原文字")
+            return
+        width = source_revision.width or (self.original.width if self.original is not None else 0)
+        height = source_revision.height or (
+            self.original.height if self.original is not None else 0
+        )
+        left, top, right, bottom = region
+        left = max(0, min(width - 1, left))
+        top = max(0, min(height - 1, top))
+        right = max(left + 1, min(width, right))
+        bottom = max(top + 1, min(height, bottom))
+        if right - left < 4 or bottom - top < 4:
+            self.smart_edit_status_var.set("文字区域过小，请重新框选")
+            return
+        text = self.smart_text_value_var.get().strip()
+        if not text or len(text) > 500:
+            self.smart_edit_status_var.set("新文字必须包含 1 到 500 个字符")
+            return
+        font_family = self.smart_text_font_var.get()
+        if font_family not in SMART_TEXT_FONTS:
+            self.smart_edit_status_var.set("请选择受支持的中文字体")
+            return
+        try:
+            font_size = int(self.smart_text_font_size_var.get())
+            rotation = float(self.smart_text_rotation_var.get())
+            curve_percent = float(self.smart_text_curve_var.get())
+            effect_size = int(self.smart_text_effect_size_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            self.smart_edit_status_var.set("字号、旋转角度、弧度和字效强度必须是数字")
+            return
+        if not 8 <= font_size <= 512:
+            self.smart_edit_status_var.set("字号必须在 8 到 512 像素之间")
+            return
+        if not -180 <= rotation <= 180:
+            self.smart_edit_status_var.set("旋转角度必须在 -180 到 180 度之间")
+            return
+        if not -100 <= curve_percent <= 100:
+            self.smart_edit_status_var.set("文字弧度必须在 -100% 到 100% 之间")
+            return
+        effect_label = self.smart_text_effect_var.get()
+        visual_effect = SMART_TEXT_EFFECTS.get(effect_label)
+        if visual_effect is None:
+            self.smart_edit_status_var.set("请选择受支持的文字字效")
+            return
+        if not 0 <= effect_size <= 64:
+            self.smart_edit_status_var.set("字效强度必须在 0 到 64 像素之间")
+            return
+        if visual_effect in {"outline", "shadow", "glow"} and effect_size < 1:
+            self.smart_edit_status_var.set("描边、投影或发光强度必须至少为 1 像素")
+            return
+        color = self.smart_text_color_var.get().strip().lower()
+        try:
+            ImageColor.getrgb(color)
+        except ValueError:
+            self.smart_edit_status_var.set("文字颜色无效，请使用 #RRGGBB 格式")
+            return
+        effect_color = self.smart_text_effect_color_var.get().strip().lower()
+        try:
+            ImageColor.getrgb(effect_color)
+        except ValueError:
+            self.smart_edit_status_var.set("字效辅助色无效，请使用 #RRGGBB 格式")
+            return
+        align_label = self.smart_text_align_var.get()
+        align = SMART_TEXT_ALIGNMENTS.get(align_label)
+        if align is None:
+            self.smart_edit_status_var.set("请选择文字对齐方式")
+            return
+        self._smart_text_region_box = (left, top, right, bottom)
+        self._update_smart_text_region_label()
+        try:
+            draft = TextReplacementDraft(
+                region=(left / width, top / height, right / width, bottom / height),
+                text=text,
+                font_family=font_family,
+                font_size=font_size,
+                color=color,
+                align=align,
+                rotation=rotation,
+                curve=curve_percent / 100,
+                perspective_quad=self._smart_text_perspective_quad,
+                visual_effect=visual_effect,
+                effect_color=effect_color,
+                effect_size=effect_size,
+            )
+        except ValueError as error:
+            self.smart_edit_status_var.set(str(error))
+            return
+        submitted = self._submit_smart_edit(
+            source_revision,
+            operation="replace_text",
+            prompt="替换图片文字",
+            parameters=draft.to_parameters(),
+            result_summary=(
+                f"文字：{text[:18]} · {font_family} {font_size}px · {align_label}"
+                f" · {effect_label}字效 · 弧度 {curve_percent:+.0f}%"
+            ),
+        )
+        if submitted:
+            self.smart_text_history.push(draft)
+            self._update_smart_edit_buttons()
+
+    def _load_smart_text_draft(self, draft: TextReplacementDraft) -> None:
+        width = self.original.width if self.original is not None else 1
+        height = self.original.height if self.original is not None else 1
+        left, top, right, bottom = draft.region
+        self._smart_text_region_box = (
+            round(left * width),
+            round(top * height),
+            round(right * width),
+            round(bottom * height),
+        )
+        self.crop_box = self._smart_text_region_box
+        self._smart_text_perspective_quad = draft.perspective_quad
+        self.smart_text_value_var.set(draft.text)
+        self.smart_text_font_var.set(draft.font_family)
+        self.smart_text_font_size_var.set(draft.font_size)
+        self.smart_text_color_var.set(draft.color)
+        align_label = next(
+            label for label, value in SMART_TEXT_ALIGNMENTS.items() if value == draft.align
+        )
+        self.smart_text_align_var.set(align_label)
+        self.smart_text_rotation_var.set(draft.rotation)
+        self.smart_text_curve_var.set(round(draft.curve * 100, 6))
+        self.smart_text_effect_var.set(SMART_TEXT_EFFECT_LABELS[draft.visual_effect])
+        self.smart_text_effect_color_var.set(draft.effect_color)
+        self.smart_text_effect_size_var.set(draft.effect_size)
+        self._update_smart_text_region_label()
+        self._draw_crop()
+
+    def _undo_smart_text_draft(self) -> None:
+        draft = self.smart_text_history.undo()
+        if draft is None:
+            self.smart_edit_status_var.set("没有可撤销的文字参数")
+            return
+        self._load_smart_text_draft(draft)
+        self.smart_edit_status_var.set("已撤销文字参数；可检查后重新生成候选")
+        self._update_smart_edit_buttons()
+
+    def _redo_smart_text_draft(self) -> None:
+        draft = self.smart_text_history.redo()
+        if draft is None:
+            self.smart_edit_status_var.set("没有可重做的文字参数")
+            return
+        self._load_smart_text_draft(draft)
+        self.smart_edit_status_var.set("已重做文字参数；可检查后重新生成候选")
+        self._update_smart_edit_buttons()
+
+    def _start_smart_upscale(self, scale: int) -> None:
+        if scale not in {2, 4}:
+            raise ValueError("本地高清倍数必须是 2 或 4")
+        source_revision = self._smart_edit_ready_source()
+        if source_revision is None:
+            return
+        width = source_revision.width or (self.original.width if self.original is not None else 0)
+        height = source_revision.height or (
+            self.original.height if self.original is not None else 0
+        )
+        target_width, target_height = width * scale, height * scale
+        if (
+            target_width < 1
+            or target_height < 1
+            or target_width > 16_384
+            or target_height > 16_384
+            or target_width * target_height > 128_000_000
+        ):
+            self.smart_edit_status_var.set("目标尺寸超过本地高清安全上限")
+            return
+        self._submit_smart_edit(
+            source_revision,
+            operation="upscale",
+            prompt=f"本地高清 {scale}×",
+            parameters=(("operation", "upscale"), ("scale", scale)),
+            result_summary=f"目标尺寸：{target_width} × {target_height}",
+        )
+
+    def _start_smart_remove_background(self) -> None:
+        source_revision = self._smart_edit_ready_source()
+        if source_revision is None:
+            return
+        try:
+            tolerance = int(self.smart_background_tolerance_var.get())
+            feather = int(self.smart_background_feather_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            self.smart_edit_status_var.set("背景容差和羽化必须是整数")
+            return
+        if not 0 <= tolerance <= 254:
+            self.smart_edit_status_var.set("背景容差必须在 0 到 254 之间")
+            return
+        if not 1 <= feather <= 255:
+            self.smart_edit_status_var.set("边缘羽化必须在 1 到 255 之间")
+            return
+        submitted = self._submit_smart_edit(
+            source_revision,
+            operation="remove_background",
+            prompt="离线智能去背景",
+            parameters=(
+                ("operation", "remove_background"),
+                ("tolerance", tolerance),
+                ("feather", feather),
+            ),
+            result_summary=f"输出：透明 PNG · 容差 {tolerance} · 羽化 {feather}",
+        )
+        if submitted:
+            self._smart_alpha_brush_active = False
+            self._smart_alpha_current_points.clear()
+            self._smart_alpha_strokes.clear()
+            self.canvas.delete("smart-alpha-brush")
+            self.canvas.configure(cursor="arrow")
+            self.smart_alpha_refinement_var.set("边缘画笔：等待去背景结果")
+
+    def _smart_background_mode_changed(self) -> None:
+        mode = self.smart_background_replace_mode_var.get()
+        if mode == "自定义图片" and self.smart_background_replace_image_path is None:
+            self.smart_edit_status_var.set("自定义图片会居中铺满裁切；请先选择背景图")
+        elif mode == "自定义图片":
+            self.smart_edit_status_var.set("自定义背景图会居中铺满裁切，并以底色填充透明区域")
+        else:
+            self.smart_edit_status_var.set("纯色背景会与透明结果合成并创建新的不透明 PNG 修订")
+        self._update_smart_edit_buttons()
+
+    def _choose_smart_background_color(self) -> None:
+        selected = colorchooser.askcolor(
+            self.smart_background_replace_color_var.get(),
+            parent=self,
+            title="选择替换背景底色",
+        )[1]
+        if selected:
+            self.smart_background_replace_color_var.set(selected.lower())
+            self.smart_edit_status_var.set(f"背景底色已选择：{selected.lower()}")
+
+    def _choose_smart_background_image(self) -> None:
+        patterns = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_INPUTS))
+        selected = filedialog.askopenfilename(
+            parent=self,
+            title="选择自定义背景图片",
+            filetypes=[("图片文件", patterns), ("所有文件", "*.*")],
+        )
+        if not selected:
+            return
+        path = Path(selected)
+        self.smart_background_replace_image_path = path
+        self.smart_background_replace_image_var.set(f"背景图：{path.name}")
+        self.smart_background_replace_mode_var.set("自定义图片")
+        self.smart_edit_status_var.set("背景图已选择；应用时会安全解码并居中铺满裁切")
+        self._update_smart_edit_buttons()
+
+    def _apply_smart_background_replacement(self) -> None:
+        alpha_revision = self._smart_background_alpha_revision
+        if alpha_revision is None:
+            self.smart_edit_status_var.set("请先完成一次智能去背景或边缘细化")
+            return
+        try:
+            mode = self.smart_background_replace_mode_var.get()
+            if mode == "纯色背景":
+                spec = BackgroundSpec.solid_color(self.smart_background_replace_color_var.get())
+            elif mode == "自定义图片":
+                if self.smart_background_replace_image_path is None:
+                    self.smart_edit_status_var.set("请先选择一张自定义背景图片")
+                    return
+                spec = BackgroundSpec.custom_image(
+                    self.smart_background_replace_image_path,
+                    fallback_color=self.smart_background_replace_color_var.get(),
+                )
+            else:
+                self.smart_edit_status_var.set("背景替换类型无效")
+                return
+        except ValueError as error:
+            self.smart_edit_status_var.set(str(error))
+            return
+        future = self._smart_background_compose_future
+        if future is not None and not future.done():
+            self.smart_edit_status_var.set("已有背景替换正在运行")
+            return
+        self._smart_background_compose_generation += 1
+        generation = self._smart_background_compose_generation
+        source_revision_id = alpha_revision.revision_id
+        self._smart_background_compose_source_revision_id = source_revision_id
+        self.smart_edit_status_var.set("正在后台合成背景并准备安全入库")
+        self.smart_edit_result_var.set(
+            "纯色背景" if spec.kind is BackgroundKind.COLOR else "自定义图片 · 居中铺满裁切"
+        )
+        self._smart_background_compose_future = self._asset_executor.submit(
+            self._compose_and_import_smart_background,
+            source_revision_id,
+            spec,
+        )
+        self._update_smart_edit_buttons()
+        self._smart_background_compose_after = self.after(
+            40,
+            lambda: self._finish_smart_background_replacement(
+                generation,
+                source_revision_id,
+            ),
+        )
+
+    def _compose_and_import_smart_background(
+        self,
+        source_revision_id: str,
+        spec: BackgroundSpec,
+    ) -> tuple[AssetRevision, BackgroundCompositionResult]:
+        source_revision = self.asset_repository.get_revision(source_revision_id)
+        source_path = self.asset_repository.resolve_content(source_revision_id)
+        asset = self.asset_repository.get_asset(source_revision.asset_id)
+        staging_parent = self.settings_store.path.parent
+        staging_parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".light-image-editor-background-",
+            dir=staging_parent,
+        ) as directory:
+            staged = Path(directory) / "background-result.png"
+            result = compose_background(source_path, staged, spec)
+            if not result.source_had_transparency:
+                raise ValueError("当前去背景结果没有透明区域，无法显示替换背景")
+            parameters: dict[str, Scalar] = {
+                "operation": "replace_background",
+                "background_kind": spec.kind.value,
+                "background_color": spec.color,
+                "background_sha256": result.background_sha256,
+            }
+            if spec.image_path is not None:
+                parameters["background_file_name"] = spec.image_path.name
+            provenance = Provenance(
+                origin="content_edit",
+                actor="local_background_compositor",
+                source_revision_ids=(source_revision.revision_id,),
+                parameters=parameters,
+            )
+            suffix = "纯色背景" if spec.kind is BackgroundKind.COLOR else "自定义背景"
+            revision = self.asset_repository.import_managed(
+                staged,
+                provenance=provenance,
+                asset_id=source_revision.asset_id,
+                parent_revision_id=source_revision.revision_id,
+                asset_name=f"{Path(asset.name).stem}-{suffix}.png",
+                expected_media_type="image/png",
+            )
+            return revision, result
+
+    def _finish_smart_background_replacement(
+        self,
+        generation: int,
+        source_revision_id: str,
+    ) -> None:
+        self._smart_background_compose_after = None
+        future = self._smart_background_compose_future
+        if future is None:
+            return
+        if not future.done():
+            self._smart_background_compose_after = self.after(
+                50,
+                lambda: self._finish_smart_background_replacement(
+                    generation,
+                    source_revision_id,
+                ),
+            )
+            return
+        self._smart_background_compose_future = None
+        try:
+            revision, result = future.result()
+        except Exception as error:
+            if generation == self._smart_background_compose_generation:
+                self.smart_edit_status_var.set(f"背景替换失败：{error}")
+                self.smart_edit_result_var.set("透明修订保持不变，可调整设置后重试")
+                self._update_smart_edit_buttons()
+            return
+        if (
+            generation != self._smart_background_compose_generation
+            or self._smart_background_compose_source_revision_id != source_revision_id
+            or self._smart_background_alpha_revision is None
+            or self._smart_background_alpha_revision.revision_id != source_revision_id
+        ):
+            return
+        current_revision = self._current_asset_revision
+        if current_revision is None or current_revision.asset_id != revision.asset_id:
+            return
+        self._smart_edit_result_revision = revision
+        self._smart_edit_operation = "replace_background"
+        kind_label = "纯色" if result.background_sha256 is None else "自定义图片"
+        self.smart_edit_status_var.set(f"{kind_label}背景替换完成 · 已保存为新的托管修订")
+        self.smart_edit_result_var.set(
+            f"结果：{revision.width} × {revision.height} · 不透明 PNG · 修订 {revision.sequence}"
+        )
+        self.mode_router.update_state(
+            {
+                "smart_operation": "replace_background",
+                "smart_result_revision_id": revision.revision_id,
+                "smart_result_parent_revision_id": revision.parent_revision_id,
+                "smart_result_width": revision.width,
+                "smart_result_height": revision.height,
+                "smart_result_operation": "replace_background",
+                "smart_background_kind": revision.provenance.parameters.get("background_kind"),
+                "smart_background_sha256": result.background_sha256,
+            },
+            mode=ModeId.EDIT,
+        )
+        self._update_smart_edit_buttons()
+
+    def _activate_smart_alpha_brush(self, mode: str) -> None:
+        if mode not in {"preserve", "remove"}:
+            raise ValueError("边缘细化画笔模式无效")
+        revision = self._smart_background_alpha_revision
+        if revision is None:
+            self.smart_edit_status_var.set("请先完成一次智能去背景")
+            return
+        if self.file_compare_var.get():
+            self._disable_file_comparison(announce=False)
+        self._smart_mask_brush_active = False
+        self._smart_mask_current_points.clear()
+        self.canvas.delete("smart-mask-brush")
+        self._smart_alpha_brush_mode = mode
+        self._smart_alpha_brush_active = True
+        label = "保留主体" if mode == "preserve" else "删除背景"
+        self.smart_alpha_refinement_var.set(f"当前：{label}画笔 · 在画布拖动标记区域")
+        self.smart_edit_status_var.set(
+            f"{label}画笔已启用；标记基于原图坐标，完成后点击应用边缘细化"
+        )
+        self.canvas.configure(cursor="crosshair")
+
+    def _clear_smart_alpha_strokes(self) -> None:
+        self._smart_alpha_current_points.clear()
+        self._smart_alpha_strokes.clear()
+        self.canvas.delete("smart-alpha-brush")
+        self.smart_alpha_refinement_var.set("边缘画笔：笔划已清除")
+        self._update_smart_edit_buttons()
+
+    def _apply_smart_alpha_refinement(self) -> None:
+        revision = self._smart_background_alpha_revision
+        if revision is None:
+            self.smart_edit_status_var.set("请先完成一次智能去背景")
+            return
+        if not self._smart_alpha_strokes:
+            self.smart_edit_status_var.set("请先使用保留或删除画笔标记边缘")
+            return
+        try:
+            strokes_payload = serialize_alpha_strokes(tuple(self._smart_alpha_strokes))
+        except ValueError as error:
+            self.smart_edit_status_var.set(str(error))
+            return
+        stroke_count = len(self._smart_alpha_strokes)
+        point_count = sum(len(stroke.points) for stroke in self._smart_alpha_strokes)
+        self._smart_alpha_brush_active = False
+        submitted = self._submit_smart_edit(
+            revision,
+            operation="refine_alpha",
+            prompt="细化去背景边缘",
+            parameters=(
+                ("operation", "refine_alpha"),
+                ("strokes", strokes_payload),
+                ("stroke_count", stroke_count),
+                ("point_count", point_count),
+            ),
+            result_summary=f"边缘细化：{stroke_count} 条笔划 · {point_count} 个采样点",
+        )
+        if not submitted:
+            self._smart_alpha_brush_active = True
+
+    def _start_smart_alpha_stroke(self, event: tk.Event) -> None:
+        if self.original is None:
+            return
+        self._smart_alpha_current_points = [self._canvas_to_normalized(event.x, event.y)]
+        self._draw_smart_alpha_strokes()
+
+    def _drag_smart_alpha_stroke(self, event: tk.Event) -> None:
+        if not self._smart_alpha_current_points:
+            return
+        point = self._canvas_to_normalized(event.x, event.y)
+        previous = self._smart_alpha_current_points[-1]
+        if (point[0] - previous[0]) ** 2 + (point[1] - previous[1]) ** 2 < 0.000004:
+            return
+        total_points = sum(len(stroke.points) for stroke in self._smart_alpha_strokes)
+        if total_points + len(self._smart_alpha_current_points) >= 10_000:
+            self.smart_edit_status_var.set("边缘细化采样点已达到 10,000 个上限")
+            return
+        self._smart_alpha_current_points.append(point)
+        self._draw_smart_alpha_strokes()
+
+    def _finish_smart_alpha_stroke(self, _event: tk.Event) -> None:
+        if not self._smart_alpha_current_points or self.original is None:
+            return
+        if len(self._smart_alpha_strokes) >= 100:
+            self.smart_edit_status_var.set("边缘细化笔划已达到 100 条上限")
+            self._smart_alpha_current_points.clear()
+            return
+        try:
+            brush_size = int(self.smart_alpha_brush_size_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            brush_size = 18
+        brush_size = max(2, min(256, brush_size))
+        radius = min(0.25, max(0.001, brush_size / min(self.original.size) / 2))
+        self._smart_alpha_strokes.append(
+            AlphaBrushStroke(
+                mode=self._smart_alpha_brush_mode,
+                radius=radius,
+                points=tuple(self._smart_alpha_current_points),
+            )
+        )
+        self._smart_alpha_current_points.clear()
+        self._draw_smart_alpha_strokes()
+        preserve_count = sum(stroke.mode == "preserve" for stroke in self._smart_alpha_strokes)
+        remove_count = len(self._smart_alpha_strokes) - preserve_count
+        self.smart_alpha_refinement_var.set(f"笔划：保留 {preserve_count} · 删除 {remove_count}")
+        self._update_smart_edit_buttons()
+
+    def _draw_smart_alpha_strokes(self) -> None:
+        self.canvas.delete("smart-alpha-brush")
+        image = self.base_preview_image
+        if image is None:
+            return
+        strokes: list[tuple[str, float, tuple[tuple[float, float], ...]]] = [
+            (stroke.mode, stroke.radius, stroke.points) for stroke in self._smart_alpha_strokes
+        ]
+        if self._smart_alpha_current_points:
+            try:
+                brush_size = int(self.smart_alpha_brush_size_var.get())
+            except (TypeError, ValueError, tk.TclError):
+                brush_size = 18
+            brush_size = max(2, min(256, brush_size))
+            radius = min(0.25, max(0.001, brush_size / min(image.size) / 2))
+            strokes.append(
+                (
+                    self._smart_alpha_brush_mode,
+                    radius,
+                    tuple(self._smart_alpha_current_points),
+                )
+            )
+        for mode, radius, points in strokes:
+            canvas_points = [self._normalized_to_canvas(x, y) for x, y in points]
+            color = "#2e7d32" if mode == "preserve" else "#c62828"
+            width = max(3, round(radius * min(image.size) * self.preview_scale * 2))
+            flattened = [coordinate for point in canvas_points for coordinate in point]
+            if len(canvas_points) > 1:
+                self.canvas.create_line(
+                    *flattened,
+                    fill=color,
+                    width=width,
+                    capstyle=tk.ROUND,
+                    joinstyle=tk.ROUND,
+                    stipple="gray50",
+                    tags="smart-alpha-brush",
+                )
+            else:
+                x, y = canvas_points[0]
+                radius_canvas = width / 2
+                self.canvas.create_oval(
+                    x - radius_canvas,
+                    y - radius_canvas,
+                    x + radius_canvas,
+                    y + radius_canvas,
+                    fill=color,
+                    outline=color,
+                    stipple="gray50",
+                    tags="smart-alpha-brush",
+                )
+
+    def _smart_edit_ready_source(self) -> AssetRevision | None:
+        if self.document is None or self.document.source_path is None:
+            self.smart_edit_status_var.set("请先打开一张图片")
+            return None
+        source_revision = self._current_asset_revision
+        if source_revision is None:
+            self.smart_edit_status_var.set("图片正在登记到资源库，请稍后再试")
+            return None
+        import_future = self._smart_edit_import_future
+        if import_future is not None and not import_future.done():
+            self.smart_edit_status_var.set("上一项智能结果正在安全入库，请稍候")
+            return None
+        background_future = self._smart_background_compose_future
+        if background_future is not None and not background_future.done():
+            self.smart_edit_status_var.set("背景替换正在后台合成，请稍候")
+            return None
+        if self._smart_edit_job_id is not None:
+            previous = self.ai_job_manager.get_job(self._smart_edit_job_id)
+            if not previous.status.terminal:
+                self.smart_edit_status_var.set("已有智能改图任务正在运行")
+                return None
+        return source_revision
+
+    def _submit_smart_edit(
+        self,
+        source_revision: AssetRevision,
+        *,
+        operation: str,
+        prompt: str,
+        parameters: tuple[tuple[str, Scalar], ...],
+        result_summary: str,
+    ) -> bool:
+        if self._smart_edit_after is not None:
+            self.after_cancel(self._smart_edit_after)
+            self._smart_edit_after = None
+        request = ContentEditRequest(
+            source_revision=source_revision,
+            prompt=prompt,
+            model=MOCK_MODEL_ID,
+            parameters=parameters,
+        )
+        label = self._smart_edit_label(operation)
+        try:
+            requirements = AIExecutionRequirements.for_request(
+                self.mock_provider.manifest,
+                request,
+                remote_image_upload=False,
+                estimated_cost_minor=0,
+            )
+            self.ai_authorization_gate.authorize_execution(requirements)
+            snapshot = self.ai_job_manager.submit_edit(request)
+        except Exception:
+            self.smart_edit_status_var.set(f"无法创建{label}任务，原图片未受影响")
+            self.smart_edit_result_var.set("任务未提交，也不会自动重试")
+            return False
+        self._smart_edit_job_id = snapshot.job_id
+        self._smart_edit_operation = operation
+        self._smart_edit_source_revision_id = source_revision.revision_id
+        self._smart_edit_presented_job_id = None
+        self._smart_edit_import_future = None
+        self._smart_edit_result_revision = None
+        if operation != "refine_alpha":
+            self._smart_background_alpha_revision = None
+        self.smart_edit_status_var.set(f"{label}正在后台提交，可随时取消")
+        self.smart_edit_result_var.set(result_summary)
+        self._sync_ai_task_to_tray(
+            snapshot,
+            title=label,
+            detail=f"正在后台提交 · {result_summary}",
+        )
+        self.mode_router.update_state(
+            {
+                "smart_job_id": snapshot.job_id,
+                "smart_operation": operation,
+                "smart_parameters": dict(parameters),
+                "smart_source_revision_id": source_revision.revision_id,
+            },
+            mode=ModeId.EDIT,
+        )
+        self._update_smart_edit_buttons()
+        self._smart_edit_after = self.after(40, self._finish_smart_edit)
+        return True
+
+    @staticmethod
+    def _smart_edit_label(operation: str | None) -> str:
+        labels = {
+            "remove_background": "智能去背景",
+            "refine_alpha": "边缘细化",
+            "replace_background": "背景替换",
+            "erase_region": "物体擦除",
+            "erase_mask": "主体蒙版擦除",
+            "replace_text": "文字替换",
+        }
+        return labels.get(operation, "本地高清")
+
+    @staticmethod
+    def _smart_edit_running_action(operation: str | None) -> str:
+        actions = {
+            "remove_background": "正在分离主体",
+            "refine_alpha": "正在应用保留与删除笔划",
+            "erase_region": "正在擦除物体并重建局部背景",
+            "erase_mask": "正在按像素蒙版擦除主体",
+            "replace_text": "正在修复背景并排版",
+        }
+        return actions.get(operation, "正在放大")
+
+    def _finish_smart_edit(self) -> None:
+        self._smart_edit_after = None
+        job_id = self._smart_edit_job_id
+        if job_id is None:
+            return
+        operation = self._smart_edit_operation
+        label = self._smart_edit_label(operation)
+        import_future = self._smart_edit_import_future
+        if import_future is not None:
+            if not import_future.done():
+                self._smart_edit_after = self.after(60, self._finish_smart_edit)
+                return
+            self._smart_edit_import_future = None
+            try:
+                imported = import_future.result()
+            except Exception:
+                self.smart_edit_status_var.set(f"{label}结果安全校验或入库失败")
+                self.smart_edit_result_var.set("未采用服务结果；原图片和编辑历史不受影响")
+                self._update_smart_edit_buttons()
+                return
+            if self._smart_edit_job_id != job_id:
+                return
+            snapshot = self.ai_job_manager.get_job(job_id)
+            self._sync_ai_task_to_tray(snapshot, title=label)
+            self._present_smart_edit_result(snapshot, imported)
+            return
+
+        snapshot = self.ai_job_manager.get_job(job_id)
+        self._sync_ai_task_to_tray(snapshot, title=label)
+        if snapshot.status in {JobStatus.SUBMITTING, JobStatus.QUEUED, JobStatus.RUNNING}:
+            if snapshot.status in {JobStatus.QUEUED, JobStatus.RUNNING}:
+                self.ai_job_manager.refresh(job_id)
+            status_labels = {
+                JobStatus.SUBMITTING: "正在安全提交",
+                JobStatus.QUEUED: "已排队",
+                JobStatus.RUNNING: self._smart_edit_running_action(operation),
+            }
+            self.smart_edit_status_var.set(f"{label} · {status_labels[snapshot.status]}")
+            self._smart_edit_after = self.after(80, self._finish_smart_edit)
+            return
+        if snapshot.status is JobStatus.CANCELLED:
+            self.smart_edit_status_var.set(f"{label}任务已取消")
+            self.smart_edit_result_var.set("未创建新修订")
+            self._update_smart_edit_buttons()
+            return
+        if snapshot.status in {JobStatus.FAILED, JobStatus.UNKNOWN}:
+            message = snapshot.error.message if snapshot.error is not None else "未知错误"
+            self.smart_edit_status_var.set(
+                f"{label}任务状态未知"
+                if snapshot.status is JobStatus.UNKNOWN
+                else f"{label}任务失败"
+            )
+            self.smart_edit_result_var.set(message)
+            self._update_smart_edit_buttons()
+            return
+        if snapshot.status is not JobStatus.SUCCEEDED:
+            self.smart_edit_status_var.set(f"任务状态：{snapshot.status.value}")
+            self._update_smart_edit_buttons()
+            return
+        if self._smart_edit_presented_job_id == job_id:
+            return
+        source_revision_id = self._smart_edit_source_revision_id
+        if source_revision_id is None:
+            self.smart_edit_status_var.set(f"{label}任务缺少源修订，已停止入库")
+            self._update_smart_edit_buttons()
+            return
+        self.smart_edit_status_var.set(f"{label}结果已生成，正在安全解码并写入修订树")
+        self._smart_edit_import_future = self._asset_executor.submit(
+            self._import_smart_edit_candidate,
+            snapshot,
+            source_revision_id,
+        )
+        self._smart_edit_after = self.after(30, self._finish_smart_edit)
+
+    def _import_smart_edit_candidate(
+        self,
+        snapshot: ManagedJobSnapshot,
+        source_revision_id: str,
+    ) -> AssetRevision:
+        if snapshot.request_kind is not JobRequestKind.EDIT:
+            raise ValueError("智能改图结果的任务类型无效")
+        if snapshot.status is not JobStatus.SUCCEEDED or len(snapshot.outputs) != 1:
+            raise ValueError("智能改图任务必须返回一个成功候选")
+        source_revision = self.asset_repository.get_revision(source_revision_id)
+        provider_revision = snapshot.outputs[0].current_revision
+        provenance = provider_revision.provenance
+        if provenance.origin != "content_edit":
+            raise ValueError("智能改图结果的来源类型无效")
+        if provenance.request_id != snapshot.request_id:
+            raise ValueError("智能改图结果的请求身份不匹配")
+        if provenance.provider_id != snapshot.provider_id:
+            raise ValueError("智能改图结果的服务身份不匹配")
+        if provenance.source_revision_ids != (source_revision.revision_id,):
+            raise ValueError("智能改图结果的源修订血缘不匹配")
+        source = _local_file_uri_path(provider_revision.content_uri)
+        asset = self.asset_repository.get_asset(source_revision.asset_id)
+        parameters = provenance.parameters
+        operation = parameters.get("operation")
+        if operation not in {
+            "upscale",
+            "remove_background",
+            "refine_alpha",
+            "erase_region",
+            "erase_mask",
+            "replace_text",
+        }:
+            raise ValueError("智能改图结果的操作类型无效")
+        if operation == "remove_background":
+            name = f"{Path(asset.name).stem}-去背景.png"
+        elif operation == "refine_alpha":
+            name = f"{Path(asset.name).stem}-边缘细化.png"
+        elif operation == "replace_text":
+            name = f"{Path(asset.name).stem}-改文字.png"
+        elif operation in {"erase_region", "erase_mask"}:
+            name = f"{Path(asset.name).stem}-物体擦除.png"
+        else:
+            scale = parameters.get("scale")
+            if scale not in {2, 4}:
+                raise ValueError("本地高清结果的倍率无效")
+            name = f"{Path(asset.name).stem}-高清{scale}x.png"
+        return self.asset_repository.import_managed(
+            source,
+            provenance=provenance,
+            asset_id=source_revision.asset_id,
+            parent_revision_id=source_revision.revision_id,
+            asset_name=name,
+            expected_media_type="image/png",
+        )
+
+    def _present_smart_edit_result(
+        self,
+        snapshot: ManagedJobSnapshot,
+        revision: AssetRevision,
+    ) -> None:
+        self._smart_edit_result_revision = revision
+        self._smart_edit_presented_job_id = snapshot.job_id
+        label = self._smart_edit_label(self._smart_edit_operation)
+        self.smart_edit_status_var.set(f"{label}完成 · 已保存为新的托管修订")
+        alpha_summary = (
+            " · 透明 PNG"
+            if self._smart_edit_operation in {"remove_background", "refine_alpha"}
+            else ""
+        )
+        self.smart_edit_result_var.set(
+            f"结果：{revision.width} × {revision.height}{alpha_summary} · 修订 {revision.sequence}"
+        )
+        self._sync_ai_task_to_tray(
+            snapshot,
+            title=label,
+            detail=f"已安全入库为修订 {revision.sequence} · {revision.width}×{revision.height}",
+        )
+        self.mode_router.update_state(
+            {
+                "smart_job_id": snapshot.job_id,
+                "smart_result_revision_id": revision.revision_id,
+                "smart_result_parent_revision_id": revision.parent_revision_id,
+                "smart_result_width": revision.width,
+                "smart_result_height": revision.height,
+                "smart_result_operation": self._smart_edit_operation,
+            },
+            mode=ModeId.EDIT,
+        )
+        if self._smart_edit_operation == "remove_background":
+            self._smart_background_alpha_revision = revision
+            self._smart_alpha_brush_active = False
+            self._smart_alpha_current_points.clear()
+            self._smart_alpha_strokes.clear()
+            self.canvas.delete("smart-alpha-brush")
+            self.canvas.configure(cursor="arrow")
+            self.smart_alpha_refinement_var.set("透明结果已就绪，可用保留/删除画笔继续细化")
+        elif self._smart_edit_operation == "refine_alpha":
+            self._smart_background_alpha_revision = revision
+            self._smart_alpha_brush_active = False
+            self._smart_alpha_current_points.clear()
+            self._smart_alpha_strokes.clear()
+            self.canvas.delete("smart-alpha-brush")
+            self.canvas.configure(cursor="arrow")
+            self.smart_alpha_refinement_var.set("边缘细化已应用；可继续添加笔划")
+        self._update_smart_edit_buttons()
+
+    def _cancel_smart_edit(self) -> None:
+        selection_future = self._smart_selection_future
+        if selection_future is not None and not selection_future.done():
+            self._smart_selection_generation += 1
+            cancelled = selection_future.cancel()
+            self._smart_selection_future = None
+            self._smart_selection_suggestions = ()
+            self._smart_selection_index = -1
+            self._update_smart_repair_region_label()
+            self.smart_edit_status_var.set(
+                "智能选区已取消"
+                if cancelled
+                else "已停止等待智能选区；后台只读取本地图片且不会改动修订"
+            )
+            self._update_smart_edit_buttons()
+            return
+        font_match_future = self._smart_font_match_future
+        if font_match_future is not None and not font_match_future.done():
+            self._smart_font_match_generation += 1
+            cancelled = font_match_future.cancel()
+            self._smart_font_match_future = None
+            self.smart_text_font_match_var.set("字体推荐：已取消")
+            self.smart_edit_status_var.set(
+                "字体推荐已取消"
+                if cancelled
+                else "已停止等待字体推荐；后台只读取本地图片且不会改动修订"
+            )
+            self._update_smart_edit_buttons()
+            return
+        background_future = self._smart_background_compose_future
+        if background_future is not None and not background_future.done():
+            self._smart_background_compose_generation += 1
+            cancelled = background_future.cancel()
+            if self._smart_background_compose_after is not None:
+                self.after_cancel(self._smart_background_compose_after)
+                self._smart_background_compose_after = None
+            self._smart_background_compose_future = None
+            self.smart_edit_status_var.set(
+                "背景替换已取消"
+                if cancelled
+                else "已停止等待背景替换；若已进入原子入库，修订仍会保留"
+            )
+            self.smart_edit_result_var.set("透明修订保持不变")
+            self._update_smart_edit_buttons()
+            return
+        if self._smart_edit_job_id is None:
+            if self._smart_selection_suggestions:
+                self._smart_selection_suggestions = ()
+                self._smart_selection_index = -1
+                self._smart_repair_region_box = None
+                self._smart_repair_selecting_region = False
+                self._clear_smart_selection_mask()
+                self._update_smart_repair_region_label()
+                self.smart_edit_status_var.set("智能主体选区已清除")
+                self._update_smart_edit_buttons()
+                return
+            self.smart_edit_status_var.set("当前没有可取消的智能任务")
+            return
+        import_future = self._smart_edit_import_future
+        if import_future is not None and not import_future.done():
+            self.smart_edit_status_var.set("结果正在原子入库，完成后可选择发送或放弃")
+            if self._smart_edit_after is None:
+                self._smart_edit_after = self.after(60, self._finish_smart_edit)
+            return
+        if self._smart_edit_after is not None:
+            self.after_cancel(self._smart_edit_after)
+            self._smart_edit_after = None
+        snapshot = self.ai_job_manager.cancel(self._smart_edit_job_id)
+        label = self._smart_edit_label(self._smart_edit_operation)
+        self.smart_edit_status_var.set(
+            f"{label}任务已取消"
+            if snapshot.status is JobStatus.CANCELLED
+            else f"任务已结束：{snapshot.status.value}"
+        )
+        self.smart_edit_result_var.set("未创建新修订")
+        self._sync_ai_task_to_tray(snapshot, title=label)
+        self._update_smart_edit_buttons()
+
+    def _update_smart_edit_buttons(self) -> None:
+        provider_active = False
+        if self._smart_edit_job_id is not None:
+            try:
+                provider_active = not self.ai_job_manager.get_job(
+                    self._smart_edit_job_id
+                ).status.terminal
+            except Exception:
+                provider_active = False
+        import_active = bool(
+            self._smart_edit_import_future is not None and not self._smart_edit_import_future.done()
+        )
+        detection_active = bool(
+            self._smart_text_detection_future is not None
+            and not self._smart_text_detection_future.done()
+        )
+        ocr_active = bool(
+            self._smart_text_ocr_future is not None and not self._smart_text_ocr_future.done()
+        )
+        font_match_active = bool(
+            self._smart_font_match_future is not None and not self._smart_font_match_future.done()
+        )
+        selection_active = bool(
+            self._smart_selection_future is not None and not self._smart_selection_future.done()
+        )
+        background_active = bool(
+            self._smart_background_compose_future is not None
+            and not self._smart_background_compose_future.done()
+        )
+        active = (
+            provider_active
+            or import_active
+            or detection_active
+            or ocr_active
+            or font_match_active
+            or selection_active
+            or background_active
+        )
+        state = ("disabled",) if active else ("!disabled",)
+        self.smart_upscale_2x_button.state(state)
+        self.smart_upscale_4x_button.state(state)
+        self.smart_remove_background_button.state(state)
+        self.smart_repair_detect_button.state(state)
+        self.smart_repair_select_button.state(state)
+        self.smart_repair_next_button.state(
+            ("!disabled",)
+            if len(self._smart_selection_suggestions) > 1 and not active
+            else ("disabled",)
+        )
+        self.smart_repair_feather_spinbox.state(state)
+        self.smart_repair_apply_button.state(
+            ("!disabled",)
+            if self._smart_repair_region_box is not None and not active
+            else ("disabled",)
+        )
+        mask_ready = self._effective_smart_selection_mask() is not None and not active
+        mask_input_state = ("!disabled",) if mask_ready else ("disabled",)
+        self.smart_mask_brush_size_spinbox.state(mask_input_state)
+        self.smart_mask_add_button.state(mask_input_state)
+        self.smart_mask_remove_button.state(mask_input_state)
+        mask_history_state = (
+            ("!disabled",) if mask_ready and bool(self._smart_mask_strokes) else ("disabled",)
+        )
+        self.smart_mask_undo_button.state(mask_history_state)
+        self.smart_mask_reset_button.state(mask_history_state)
+        self.smart_text_select_button.state(state)
+        self.smart_text_replace_button.state(state)
+        self.smart_text_detect_button.state(state)
+        self.smart_text_recognize_button.state(state)
+        self.smart_text_font_match_button.state(state)
+        self.smart_text_next_region_button.state(
+            ("!disabled",)
+            if len(self._smart_text_suggestions) > 1 and not active
+            else ("disabled",)
+        )
+        spinbox_state = ("disabled",) if active else ("!disabled",)
+        self.smart_background_tolerance_spinbox.state(spinbox_state)
+        self.smart_background_feather_spinbox.state(spinbox_state)
+        for widget in self._smart_text_input_widgets:
+            widget.state(spinbox_state)
+        self.smart_edit_cancel_button.state(
+            ("!disabled",)
+            if provider_active or background_active or font_match_active or selection_active
+            else ("disabled",)
+        )
+        result_state = (
+            ("!disabled",)
+            if self._smart_edit_result_revision is not None and not active
+            else ("disabled",)
+        )
+        self.smart_edit_compare_button.state(result_state)
+        self.smart_edit_send_button.state(result_state)
+        self.smart_edit_discard_button.state(result_state)
+        alpha_result_ready = bool(self._smart_background_alpha_revision is not None and not active)
+        alpha_input_state = ("!disabled",) if alpha_result_ready else ("disabled",)
+        self.smart_alpha_brush_size_spinbox.state(alpha_input_state)
+        self.smart_alpha_preserve_button.state(alpha_input_state)
+        self.smart_alpha_remove_button.state(alpha_input_state)
+        alpha_action_state = (
+            ("!disabled",)
+            if alpha_result_ready and bool(self._smart_alpha_strokes)
+            else ("disabled",)
+        )
+        self.smart_alpha_clear_button.state(alpha_action_state)
+        self.smart_alpha_apply_button.state(alpha_action_state)
+        background_input_state = ("!disabled",) if alpha_result_ready else ("disabled",)
+        for widget in self._smart_background_replace_controls:
+            widget.state(background_input_state)
+        background_spec_ready = bool(
+            self.smart_background_replace_mode_var.get() == "纯色背景"
+            or self.smart_background_replace_image_path is not None
+        )
+        self.smart_background_replace_button.state(
+            ("!disabled",) if alpha_result_ready and background_spec_ready else ("disabled",)
+        )
+        self.smart_text_undo_button.state(
+            ("!disabled",) if self.smart_text_history.can_undo and not active else ("disabled",)
+        )
+        self.smart_text_redo_button.state(
+            ("!disabled",) if self.smart_text_history.can_redo and not active else ("disabled",)
+        )
+
+    def _compare_smart_result(self) -> None:
+        revision = self._smart_edit_result_revision
+        if revision is None:
+            self.smart_edit_status_var.set("尚无可对比的智能改图结果")
+            return
+        try:
+            path = self.asset_repository.resolve_content(revision.revision_id)
+        except Exception as error:
+            self.smart_edit_status_var.set(f"无法读取智能改图结果：{error}")
+            return
+        if self._begin_file_comparison(path):
+            label = self._smart_edit_label(self._smart_edit_operation)
+            self.smart_edit_status_var.set(f"正在载入对比：左侧原图，右侧{label}结果")
+
+    def _discard_smart_result(self) -> None:
+        revision = self._smart_edit_result_revision
+        if revision is None:
+            self.smart_edit_status_var.set("当前没有可放弃的智能候选")
+            return
+        try:
+            path = self.asset_repository.resolve_content(revision.revision_id)
+        except Exception:
+            path = None
+        if (
+            path is not None
+            and self._comparison_path is not None
+            and self._same_path(path, self._comparison_path)
+        ):
+            self._disable_file_comparison(announce=False)
+        self._smart_edit_result_revision = None
+        self._smart_background_alpha_revision = None
+        self._smart_background_compose_generation += 1
+        self._smart_background_compose_source_revision_id = None
+        self._smart_alpha_brush_active = False
+        self._smart_alpha_current_points.clear()
+        self._smart_alpha_strokes.clear()
+        self.canvas.delete("smart-alpha-brush")
+        self.canvas.configure(cursor="arrow")
+        self.smart_alpha_refinement_var.set("边缘画笔：等待去背景结果")
+        self.smart_edit_status_var.set("已放弃当前候选")
+        self.smart_edit_result_var.set("托管修订仍保留在本地修订树中，可供恢复和审计")
+        self.mode_router.update_state(
+            {
+                "smart_result_revision_id": None,
+                "smart_result_discarded": True,
+            },
+            mode=ModeId.EDIT,
+        )
+        self._update_smart_edit_buttons()
+
+    def _send_smart_result_to_conversion(self) -> None:
+        revision = self._smart_edit_result_revision
+        if revision is None:
+            self.smart_edit_status_var.set("尚无可发送的智能改图结果")
+            return
+        try:
+            path = self.asset_repository.resolve_content(revision.revision_id)
+            asset = self.asset_repository.get_asset(revision.asset_id)
+        except Exception as error:
+            self.smart_edit_status_var.set(f"无法读取智能改图结果：{error}")
+            return
+        asset_handoff = AssetHandoff(
+            id=revision.asset_id,
+            uri=path.as_uri(),
+            media_type=revision.media_type,
+            display_name=asset.name,
+            metadata={"source": "smart_edit", "managed": True},
+        )
+        revision_handoff = RevisionHandoff(
+            id=revision.revision_id,
+            asset_id=revision.asset_id,
+            number=revision.sequence,
+            metadata={
+                "parent_revision_id": revision.parent_revision_id,
+                "operation": self._smart_edit_operation,
+            },
+        )
+        if self.file_compare_var.get():
+            self._disable_file_comparison(announce=False)
+        self._conversion_handoff_override = (path, asset_handoff, revision_handoff)
+        self.mode_router.switch(ModeId.CONVERT)
+        self.mode_router.set_handoff(asset_handoff, revision_handoff, mode=ModeId.CONVERT)
+        label = self._smart_edit_label(self._smart_edit_operation)
+        self.conversion_job_status_var.set(f"{label}修订已加入转换队列，可继续选择格式和尺寸")
+
+    def _choose_generation_reference(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="选择生成参考图",
+            filetypes=[
+                (
+                    "图片文件",
+                    "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.gif",
+                ),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if not selected:
+            return
+        self._begin_generation_reference_import(Path(selected))
+
+    def _use_current_generation_reference(self) -> None:
+        revision = self._current_asset_revision
+        if revision is None or self.document is None or self.document.source_path is None:
+            self.generate_reference_status_var.set("当前图片尚未完成安全登记")
+            return
+        self._set_generation_reference(revision)
+
+    def _begin_generation_reference_import(self, path: Path) -> None:
+        future = self._generation_reference_future
+        if future is not None and not future.done():
+            self.generate_reference_status_var.set("上一张参考图正在安全登记，请稍候")
+            return
+        self.generate_reference_status_var.set(f"正在安全登记参考图：{path.name}")
+        self._generation_reference_future = self._asset_executor.submit(
+            self.asset_repository.ensure_external,
+            path,
+        )
+        self._update_generation_buttons()
+        self.after(20, self._poll_generation_reference_import)
+
+    def _poll_generation_reference_import(self) -> None:
+        future = self._generation_reference_future
+        if future is None:
+            return
+        if not future.done():
+            self.after(30, self._poll_generation_reference_import)
+            return
+        self._generation_reference_future = None
+        try:
+            revision = future.result()
+        except Exception:
+            self.generate_reference_status_var.set("参考图解码或登记失败，未加入请求")
+            self._update_generation_buttons()
+            return
+        self._set_generation_reference(revision)
+
+    def _selected_generation_reference_index(self) -> int | None:
+        selection = self.generate_reference_listbox.curselection()
+        if selection:
+            index = int(selection[0])
+            if 0 <= index < len(self._generation_references):
+                return index
+        current = self._generation_reference_revision
+        if current is not None:
+            return next(
+                (
+                    index
+                    for index, reference in enumerate(self._generation_references)
+                    if reference.revision.revision_id == current.revision_id
+                ),
+                None,
+            )
+        return None
+
+    def _refresh_generation_reference_list(self, selected_index: int | None = None) -> None:
+        # An asynchronous import finishes while the list is temporarily disabled.
+        # Tk ignores selection changes on a disabled listbox, so unlock it before
+        # rebuilding and let _update_generation_buttons restore the correct state.
+        self.generate_reference_listbox.configure(state=tk.NORMAL)
+        self.generate_reference_listbox.delete(0, tk.END)
+        for index, reference in enumerate(self._generation_references, start=1):
+            try:
+                name = self.asset_repository.get_asset(reference.revision.asset_id).name
+            except Exception:
+                name = reference.revision.revision_id
+            role_label = GENERATION_REFERENCE_ROLE_LABELS[reference.role]
+            self.generate_reference_listbox.insert(
+                tk.END,
+                f"{index}. [{role_label} {round(reference.strength * 100)}%] {name}",
+            )
+        if not self._generation_references:
+            self._generation_reference_revision = None
+            self.generation_reference_revision_id = ""
+            self.generate_reference_status_var.set("未选择参考图 · 最多可添加 4 张")
+            self.mode_router.update_state(
+                {
+                    "reference_revision_id": None,
+                    "reference_revision_ids": (),
+                    "reference_count": 0,
+                },
+                mode=ModeId.GENERATE,
+            )
+            self._update_generation_buttons()
+            return
+        if selected_index is None:
+            selected_index = self._selected_generation_reference_index()
+        selected_index = max(
+            0,
+            min(
+                len(self._generation_references) - 1,
+                0 if selected_index is None else selected_index,
+            ),
+        )
+        self.generate_reference_listbox.selection_clear(0, tk.END)
+        self.generate_reference_listbox.selection_set(selected_index)
+        self.generate_reference_listbox.activate(selected_index)
+        self.generate_reference_listbox.see(selected_index)
+        self._generation_reference_selected()
+        primary = self._generation_references[0]
+        self.generation_reference_revision_id = primary.revision.revision_id
+        self.mode_router.update_state(
+            {
+                "reference_revision_id": primary.revision.revision_id,
+                "reference_revision_ids": tuple(
+                    reference.revision.revision_id for reference in self._generation_references
+                ),
+                "reference_count": len(self._generation_references),
+            },
+            mode=ModeId.GENERATE,
+        )
+        self._update_generation_buttons()
+
+    def _generation_reference_selected(
+        self,
+        _event: tk.Event[tk.Misc] | None = None,
+    ) -> None:
+        index = self._selected_generation_reference_index()
+        if index is None:
+            return
+        reference = self._generation_references[index]
+        self._generation_reference_revision = reference.revision
+        self.generate_reference_role_var.set(GENERATION_REFERENCE_ROLE_LABELS[reference.role])
+        self.generate_reference_strength_var.set(round(reference.strength * 100))
+        try:
+            asset = self.asset_repository.get_asset(reference.revision.asset_id)
+            name = asset.name
+        except Exception:
+            name = reference.revision.revision_id
+        dimensions = (
+            f" · {reference.revision.width}×{reference.revision.height}"
+            if reference.revision.width is not None and reference.revision.height is not None
+            else ""
+        )
+        self.generate_reference_status_var.set(
+            f"已选 {len(self._generation_references)}/4 · 当前：{name}{dimensions}"
+        )
+
+    def _set_generation_reference(
+        self,
+        revision: AssetRevision,
+        *,
+        role: str | None = None,
+        strength: float | None = None,
+    ) -> None:
+        try:
+            self.asset_repository.get_asset(revision.asset_id)
+            self.asset_repository.resolve_content(revision.revision_id, verify=False)
+        except Exception:
+            self.generate_reference_status_var.set("参考图修订不可用")
+            return
+        existing_index = next(
+            (
+                index
+                for index, reference in enumerate(self._generation_references)
+                if reference.revision.revision_id == revision.revision_id
+            ),
+            None,
+        )
+        if existing_index is not None:
+            self._refresh_generation_reference_list(existing_index)
+            self.generate_reference_status_var.set(
+                f"这张图片已经在参考图列表中 · {existing_index + 1}/"
+                f"{len(self._generation_references)}"
+            )
+            return
+        if len(self._generation_references) >= 4:
+            self.generate_reference_status_var.set("最多只能添加 4 张参考图，请先移除一张")
+            return
+        reference_role = role or GENERATION_REFERENCE_ROLES.get(
+            self.generate_reference_role_var.get(),
+            "content",
+        )
+        reference_strength = strength
+        if reference_strength is None:
+            try:
+                reference_strength = int(self.generate_reference_strength_var.get()) / 100
+            except (tk.TclError, TypeError, ValueError):
+                reference_strength = 0.5
+        self._generation_references.append(
+            GenerationReference(
+                revision=revision,
+                role=reference_role,
+                strength=reference_strength,
+            )
+        )
+        self._refresh_generation_reference_list(len(self._generation_references) - 1)
+        self._schedule_config_save()
+
+    def _update_selected_generation_reference_settings(
+        self,
+        _event: tk.Event[tk.Misc] | None = None,
+    ) -> bool:
+        index = self._selected_generation_reference_index()
+        if index is None:
+            return True
+        role = GENERATION_REFERENCE_ROLES.get(self.generate_reference_role_var.get())
+        try:
+            strength = int(self.generate_reference_strength_var.get())
+        except (tk.TclError, TypeError, ValueError):
+            self.generate_reference_status_var.set("参考图强度必须是 0 到 100 的整数")
+            return False
+        if role is None or not 0 <= strength <= 100:
+            self.generate_reference_status_var.set("参考图角色或强度无效")
+            return False
+        current = self._generation_references[index]
+        updated = GenerationReference(
+            revision=current.revision,
+            role=role,
+            strength=strength / 100,
+        )
+        if updated != current:
+            self._generation_references[index] = updated
+            self._refresh_generation_reference_list(index)
+            self._schedule_config_save()
+        return True
+
+    def _remove_selected_generation_reference(self) -> None:
+        index = self._selected_generation_reference_index()
+        if index is None:
+            self.generate_reference_status_var.set("请先选择要移除的参考图")
+            return
+        self._generation_references.pop(index)
+        self._refresh_generation_reference_list(
+            None
+            if not self._generation_references
+            else min(index, len(self._generation_references) - 1)
+        )
+        self._schedule_config_save()
+
+    def _clear_generation_reference(self) -> None:
+        future = self._generation_reference_future
+        if future is not None and not future.done():
+            future.cancel()
+        self._generation_reference_future = None
+        self._generation_reference_revision = None
+        self._generation_references.clear()
+        self.generation_reference_revision_id = ""
+        self._refresh_generation_reference_list()
+        self._schedule_config_save()
+
+    def _restore_generation_reference(self) -> None:
+        settings = tuple(self.generation_reference_settings)
+        if not settings and self.generation_reference_revision_id:
+            settings = (
+                (
+                    self.generation_reference_revision_id,
+                    GENERATION_REFERENCE_ROLES.get(
+                        self.generate_reference_role_var.get(),
+                        "content",
+                    ),
+                    self.generate_reference_strength_var.get() / 100,
+                ),
+            )
+        if not settings:
+            self._refresh_generation_reference_list()
+            return
+        restored: list[GenerationReference] = []
+        for revision_id, role, strength in settings[:4]:
+            try:
+                revision = self.asset_repository.get_revision(revision_id)
+                self.asset_repository.resolve_content(revision_id, verify=False)
+                restored.append(
+                    GenerationReference(
+                        revision=revision,
+                        role=role,
+                        strength=strength,
+                    )
+                )
+            except Exception:
+                continue
+        self._generation_references = restored
+        self._refresh_generation_reference_list(0 if restored else None)
+        if len(restored) != len(settings):
+            self.generate_reference_status_var.set(
+                f"已恢复 {len(restored)} 张参考图；失效项目已移除"
+            )
+            self._schedule_config_save()
+
+    def _update_generation_provider_capability_label(self) -> None:
+        try:
+            profile = self.generation_provider_catalog.by_display_name(
+                self.generate_provider_var.get()
+            )
+        except KeyError:
+            self.generate_provider_capability_var.set("服务配置无效")
+            self._update_generation_buttons()
+            return
+        manifest = profile.manifest
+        model_id = profile.model_id
+        capabilities = ["文生图"]
+        if manifest.supports(ProviderCapability.NEGATIVE_PROMPT, model_id):
+            capabilities.append("负面提示词")
+        if manifest.supports(ProviderCapability.REFERENCE_IMAGE, model_id):
+            capabilities.append("参考图")
+        if manifest.supports(ProviderCapability.SEED, model_id):
+            capabilities.append("固定种子")
+        if manifest.supports(ProviderCapability.STYLE_PRESET, model_id):
+            capabilities.append("风格预设")
+        if manifest.supports(ProviderCapability.VARIATION, model_id):
+            capabilities.append("候选变体")
+        location = "本地" if manifest.offline else "联网"
+        self.generate_provider_capability_var.set(
+            f"{profile.status_detail} · {' / '.join(capabilities)} · {location}"
+        )
+        self._update_generation_buttons()
+
+    def _generation_provider_selected(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        self._update_generation_provider_capability_label()
+        self._schedule_config_save()
+
+    def _authorize_generation_request(
+        self,
+        profile: GenerationProviderProfile,
+        request: GenerationRequest,
+        requirements: AIExecutionRequirements,
+    ) -> bool:
+        if requirements.is_directly_allowed:
+            self.ai_authorization_gate.authorize_execution(requirements)
+            return True
+
+        upload_authorized = False
+        paid_authorized = False
+        if requirements.remote_image_upload:
+            uploaded_revisions = (
+                (request.variation_revision,)
+                if request.variation_revision is not None
+                else tuple(reference.revision for reference in request.all_references)
+            )
+            reference_names: list[str] = []
+            for uploaded_revision in uploaded_revisions:
+                try:
+                    reference_names.append(
+                        self.asset_repository.get_asset(uploaded_revision.asset_id).name
+                    )
+                except Exception:
+                    reference_names.append(uploaded_revision.revision_id)
+            reference_summary = "、".join(reference_names[:3]) or "所选参考图"
+            if len(reference_names) > 3:
+                reference_summary += f" 等 {len(reference_names)} 张"
+            upload_authorized = messagebox.askyesno(
+                "确认上传参考图",
+                f"服务：{profile.display_name}\n"
+                f"图片：{len(uploaded_revisions)} 张（{reference_summary}）\n\n"
+                "本次任务需要将这些参考图上传到服务商。仅授权本次请求，是否继续？",
+            )
+            if not upload_authorized:
+                self.generate_status_var.set("已取消：未授权上传参考图")
+                self.generate_candidates_var.set("任务未提交，图片没有离开本机")
+                return False
+        if requirements.estimated_cost_minor > 0:
+            amount = requirements.estimated_cost_minor / 100
+            paid_authorized = messagebox.askyesno(
+                "确认生成费用",
+                f"服务：{profile.display_name}\n"
+                f"本次预计最高费用：{requirements.currency_code} {amount:.2f}\n\n"
+                "费用授权仅对本次不可变请求有效，是否继续？",
+            )
+            if not paid_authorized:
+                self.generate_status_var.set("已取消：未授权本次生成费用")
+                self.generate_candidates_var.set("任务未提交，也不会产生本次费用")
+                return False
+        authorization = self.ai_authorization_gate.issue_authorization(
+            requirements,
+            authorize_remote_image_upload=upload_authorized,
+            authorize_paid_execution=paid_authorized,
+        )
+        self.ai_authorization_gate.authorize_execution(requirements, authorization)
+        return True
+
+    def _submit_generation_request(
+        self,
+        profile: GenerationProviderProfile,
+        request: GenerationRequest,
+    ) -> ManagedJobSnapshot | None:
+        if not profile.selectable:
+            self.generate_status_var.set(f"当前服务不可用：{profile.status_detail}")
+            return None
+        if profile.provider_id != self.ai_job_manager.provider_id:
+            self.generate_status_var.set("当前服务尚未配置执行器，任务未提交")
+            return None
+        requirements = AIExecutionRequirements.for_request(
+            profile.manifest,
+            request,
+            remote_image_upload=(
+                (bool(request.all_references) or request.variation_revision is not None)
+                and not profile.manifest.offline
+            ),
+            estimated_cost_minor=profile.estimated_cost_minor(request.count),
+            currency_code=profile.currency_code,
+        )
+        try:
+            if not self._authorize_generation_request(profile, request, requirements):
+                return None
+            snapshot = self.ai_job_manager.submit_generation(request)
+        except Exception:
+            self.generate_status_var.set("无法创建生成任务，基础看图与转图功能不受影响")
+            self.generate_candidates_var.set("任务未提交，也不会自动重试或重复计费")
+            return None
+        self._last_generation_request = request
+        self._last_generation_profile = profile
+        return snapshot
+
+    def _begin_generation_tracking(
+        self,
+        snapshot: ManagedJobSnapshot,
+        request: GenerationRequest,
+        profile: GenerationProviderProfile,
+        *,
+        retry: bool = False,
+    ) -> None:
+        self._mock_generation_job_id = snapshot.job_id
+        self._mock_generation_presented_job_id = None
+        self._mock_generation_import_future = None
+        action = "重试任务" if retry else "任务"
+        self.generate_status_var.set(f"{profile.display_name} · {action}正在后台提交")
+        self.generate_candidates_var.set("正在等待服务生成候选，可随时取消…")
+        self._sync_ai_task_to_tray(
+            snapshot,
+            title="候选变体" if request.variation_revision is not None else "图片生成",
+            detail=f"{profile.display_name} · {action}正在后台提交",
+        )
+        self._remember_generation_prompt(request.prompt)
+        self.mode_router.update_state(
+            {
+                "prompt": request.prompt,
+                "size": f"{request.width}x{request.height}",
+                "count": request.count,
+                "seed": request.seed,
+                "style_preset": request.style_preset,
+                "negative_prompt": request.negative_prompt,
+                "reference_revision_id": (
+                    None
+                    if request.reference_revision is None
+                    else request.reference_revision.revision_id
+                ),
+                "reference_revision_ids": tuple(
+                    reference.revision.revision_id for reference in request.all_references
+                ),
+                "reference_count": len(request.all_references),
+                "reference_roles": tuple(reference.role for reference in request.all_references),
+                "reference_strengths": tuple(
+                    reference.strength for reference in request.all_references
+                ),
+                "reference_role": request.reference_role,
+                "reference_strength": request.reference_strength,
+                "variation_of_revision_id": (
+                    None
+                    if request.variation_revision is None
+                    else request.variation_revision.revision_id
+                ),
+                "variation_strength": request.variation_strength,
+                "provider_id": profile.provider_id,
+                "model_id": profile.model_id,
+                "job_id": snapshot.job_id,
+            },
+            mode=ModeId.GENERATE,
+        )
+        self._schedule_config_save()
+        self._update_generation_buttons()
+        self._mock_generation_after = self.after(40, self._finish_mock_generation)
+
+    def _start_mock_generation(self) -> None:
+        prompt = self.generate_prompt_var.get().strip()
+        if not prompt:
+            self.generate_status_var.set("请先输入提示词")
+            return
+        import_future = self._mock_generation_import_future
+        if import_future is not None and not import_future.done():
+            self.generate_status_var.set("上一批候选正在安全入库，请稍候")
+            return
+        reference_future = self._generation_reference_future
+        if reference_future is not None and not reference_future.done():
+            self.generate_status_var.set("参考图正在安全登记，请稍候")
+            return
+        negative_prompt = self.generate_negative_prompt_var.get().strip()
+        if len(negative_prompt) > 10_000:
+            self.generate_status_var.set("负面提示词不能超过 10,000 个字符")
+            return
+        if not self._update_selected_generation_reference_settings():
+            self.generate_status_var.set("请先修正当前参考图的角色或强度")
+            return
+        references = tuple(self._generation_references)
+        primary_reference = references[0] if references else None
+        reference_revision = None if primary_reference is None else primary_reference.revision
+        try:
+            width_text, height_text = self.generate_size_var.get().split("×", 1)
+            width, height = int(width_text.strip()), int(height_text.strip())
+            count = max(1, min(4, int(self.generate_count_var.get())))
+        except (tk.TclError, TypeError, ValueError):
+            self.generate_status_var.set("尺寸或数量设置无效")
+            return
+        style_label = self.generate_style_preset_var.get()
+        style_preset = GENERATION_STYLE_PRESETS.get(style_label)
+        if style_preset is None:
+            self.generate_status_var.set("风格预设设置无效")
+            return
+        seed: int | None = None
+        if self.generate_seed_enabled_var.get():
+            try:
+                seed = int(self.generate_seed_var.get().strip())
+            except ValueError:
+                self.generate_status_var.set("固定种子必须是 0 到 4,294,967,295 的整数")
+                return
+            if not 0 <= seed <= 4_294_967_295:
+                self.generate_status_var.set("固定种子必须是 0 到 4,294,967,295 的整数")
+                return
+        try:
+            profile = self.generation_provider_catalog.by_display_name(
+                self.generate_provider_var.get()
+            )
+        except KeyError:
+            self.generate_status_var.set("请选择有效的生图服务")
+            return
+        manifest = profile.manifest
+        model_id = profile.model_id
+        if negative_prompt and not manifest.supports(
+            ProviderCapability.NEGATIVE_PROMPT,
+            model_id,
+        ):
+            self.generate_status_var.set("当前服务不支持负面提示词")
+            return
+        if references and not manifest.supports(
+            ProviderCapability.REFERENCE_IMAGE,
+            model_id,
+        ):
+            self.generate_status_var.set("当前服务不支持参考图生成")
+            return
+        if seed is not None and not manifest.supports(
+            ProviderCapability.SEED,
+            model_id,
+        ):
+            self.generate_status_var.set("当前服务不支持固定种子")
+            return
+        if style_preset and not manifest.supports(
+            ProviderCapability.STYLE_PRESET,
+            model_id,
+        ):
+            self.generate_status_var.set("当前服务不支持风格预设")
+            return
+
+        if self._mock_generation_after is not None:
+            self.after_cancel(self._mock_generation_after)
+            self._mock_generation_after = None
+        request = GenerationRequest(
+            prompt=prompt,
+            model=model_id,
+            width=width,
+            height=height,
+            count=count,
+            seed=seed,
+            style_preset=style_preset,
+            negative_prompt=negative_prompt,
+            reference_revision=reference_revision,
+            reference_role=("content" if primary_reference is None else primary_reference.role),
+            reference_strength=(0.5 if primary_reference is None else primary_reference.strength),
+            additional_references=references[1:],
+        )
+        snapshot = self._submit_generation_request(profile, request)
+        if snapshot is None:
+            return
+        self._begin_generation_tracking(snapshot, request, profile)
+
+    def _retry_failed_generation(self) -> None:
+        request = self._last_generation_request
+        profile = self._last_generation_profile
+        if request is None or profile is None:
+            self.generate_status_var.set("没有可重试的失败任务")
+            return
+        job_id = self._mock_generation_job_id
+        if job_id is None:
+            self.generate_status_var.set("没有可重试的失败任务")
+            return
+        try:
+            current = self.ai_job_manager.get_job(job_id)
+        except Exception:
+            self.generate_status_var.set("失败任务记录不可用")
+            return
+        if current.status not in {JobStatus.FAILED, JobStatus.UNKNOWN}:
+            self.generate_status_var.set("只有失败或状态未知的任务可以显式重试")
+            return
+        retry_request = replace(
+            request,
+            request_id=f"req_{uuid.uuid4().hex}",
+            idempotency_key=None,
+        )
+        snapshot = self._submit_generation_request(profile, retry_request)
+        if snapshot is None:
+            return
+        self._begin_generation_tracking(snapshot, retry_request, profile, retry=True)
+
+    def _finish_mock_generation(self) -> None:
+        self._mock_generation_after = None
+        job_id = self._mock_generation_job_id
+        if job_id is None:
+            return
+        provider_label = (
+            self._last_generation_profile.display_name
+            if self._last_generation_profile is not None
+            else "生成服务"
+        )
+        import_future = self._mock_generation_import_future
+        if import_future is not None:
+            if not import_future.done():
+                self._mock_generation_after = self.after(60, self._finish_mock_generation)
+                return
+            self._mock_generation_import_future = None
+            try:
+                imported = import_future.result()
+            except Exception:
+                self.generate_status_var.set("候选安全校验或入库失败")
+                self.generate_candidates_var.set("未采用服务结果；原图片和基础功能不受影响")
+                self._update_generation_buttons()
+                return
+            if self._mock_generation_job_id != job_id or not imported:
+                self._update_generation_buttons()
+                return
+            snapshot = self.ai_job_manager.get_job(job_id)
+            self._sync_ai_task_to_tray(snapshot)
+            self._present_generated_candidates(snapshot, imported)
+            return
+
+        snapshot = self.ai_job_manager.get_job(job_id)
+        self._sync_ai_task_to_tray(snapshot)
+        if snapshot.status in {JobStatus.SUBMITTING, JobStatus.QUEUED, JobStatus.RUNNING}:
+            if snapshot.status in {JobStatus.QUEUED, JobStatus.RUNNING}:
+                self.ai_job_manager.refresh(job_id)
+            status_labels = {
+                JobStatus.SUBMITTING: "正在安全提交",
+                JobStatus.QUEUED: "已排队",
+                JobStatus.RUNNING: "正在生成",
+            }
+            self.generate_status_var.set(f"{provider_label} · {status_labels[snapshot.status]}")
+            self._mock_generation_after = self.after(80, self._finish_mock_generation)
+            return
+        if snapshot.status is JobStatus.CANCELLED:
+            self.generate_status_var.set(f"{provider_label} · 任务已取消")
+            self.generate_candidates_var.set("未生成候选结果")
+            self._update_generation_buttons()
+            return
+        if snapshot.status in {JobStatus.FAILED, JobStatus.UNKNOWN}:
+            message = snapshot.error.message if snapshot.error is not None else "未知错误"
+            self.generate_status_var.set(
+                "任务状态未知" if snapshot.status is JobStatus.UNKNOWN else "生成任务失败"
+            )
+            self.generate_candidates_var.set(message)
+            self._update_generation_buttons()
+            return
+        if snapshot.status is not JobStatus.SUCCEEDED:
+            self.generate_status_var.set(f"任务状态：{snapshot.status.value}")
+            self._update_generation_buttons()
+            return
+        if self._mock_generation_presented_job_id == job_id:
+            return
+        self.generate_status_var.set("候选已生成，正在安全解码并导入资源库")
+        self._mock_generation_import_future = self._asset_executor.submit(
+            self._import_generated_candidates,
+            snapshot,
+        )
+        self._mock_generation_after = self.after(30, self._finish_mock_generation)
+
+    def _import_generated_candidates(
+        self,
+        snapshot: ManagedJobSnapshot,
+    ) -> tuple[AssetRevision, ...]:
+        imported: list[AssetRevision] = []
+        for asset in snapshot.outputs:
+            provider_revision = asset.current_revision
+            source = _local_file_uri_path(provider_revision.content_uri)
+            imported.append(
+                self.asset_repository.import_managed(
+                    source,
+                    provenance=provider_revision.provenance,
+                    asset_id=asset.asset_id,
+                    asset_name=asset.name,
+                    expected_media_type=provider_revision.media_type,
+                )
+            )
+        return tuple(imported)
+
+    def _remember_generation_prompt(self, prompt: str) -> None:
+        normalized = prompt.strip()
+        if not normalized:
+            return
+        self.generation_prompt_history = [
+            item for item in self.generation_prompt_history if item != normalized
+        ]
+        self.generation_prompt_history.insert(0, normalized)
+        del self.generation_prompt_history[20:]
+        self.generate_prompt_box.configure(values=tuple(self.generation_prompt_history))
+        self._schedule_config_save()
+
+    def _generation_candidate_item(
+        self,
+        revision_id: str,
+    ) -> GenerationCandidateItem | None:
+        try:
+            revision = self.asset_repository.get_revision(revision_id)
+            asset = self.asset_repository.get_asset(revision.asset_id)
+            path = self.asset_repository.resolve_content(revision_id, verify=False)
+        except Exception:
+            return None
+        prompt_value = revision.provenance.parameters.get("prompt", "")
+        prompt = prompt_value if isinstance(prompt_value, str) else ""
+        dimensions = (
+            f" · {revision.width}×{revision.height}"
+            if revision.width is not None and revision.height is not None
+            else ""
+        )
+        return GenerationCandidateItem(
+            revision_id=revision.revision_id,
+            asset_id=revision.asset_id,
+            path=path,
+            label=f"{asset.name}{dimensions}",
+            prompt=prompt,
+            favorite=revision_id in self.generation_favorite_revision_ids,
+        )
+
+    def _restore_generation_candidate_history(
+        self,
+        *,
+        selected_revision_id: str | None = None,
+    ) -> None:
+        requested_recent = tuple(self.generation_candidate_revision_ids)
+        requested_favorites = tuple(self.generation_favorite_revision_ids)
+        requested = tuple(dict.fromkeys(requested_favorites + requested_recent))
+        all_items = tuple(
+            item
+            for revision_id in requested
+            if (item := self._generation_candidate_item(revision_id)) is not None
+        )
+        available = {item.revision_id for item in all_items}
+        self.generation_candidate_revision_ids = [
+            revision_id for revision_id in requested_recent if revision_id in available
+        ]
+        self.generation_favorite_revision_ids = [
+            revision_id for revision_id in requested_favorites if revision_id in available
+        ]
+        favorite_ids = set(self.generation_favorite_revision_ids)
+        all_items = tuple(
+            replace(item, favorite=item.revision_id in favorite_ids) for item in all_items
+        )
+        items = (
+            tuple(item for item in all_items if item.favorite)
+            if self.generate_favorites_only_var.get()
+            else all_items
+        )
+        self._generated_candidates_by_revision = {item.revision_id: item for item in items}
+        preferred = selected_revision_id or self._selected_generated_revision_id
+        self.generation_candidate_grid.set_candidates(
+            items,
+            selected_revision_id=preferred,
+        )
+        if items:
+            self.mode_router.update_state(
+                {
+                    "candidate_revision_ids": tuple(item.revision_id for item in items),
+                    "candidate_count": len(items),
+                    "favorite_candidate_revision_ids": tuple(self.generation_favorite_revision_ids),
+                },
+                mode=ModeId.GENERATE,
+            )
+            selected = self.generation_candidate_grid.selected_revision_id
+            assert selected is not None
+            self._select_generated_candidate(selected)
+            favorite_count = len(self.generation_favorite_revision_ids)
+            filter_label = "收藏" if self.generate_favorites_only_var.get() else "历史"
+            self.generate_candidates_var.set(
+                f"已显示 {len(items)} 个{filter_label}候选 · 共收藏 {favorite_count} 个。"
+            )
+        else:
+            self._selected_generated_revision_id = None
+            self.mode_router.set_handoff(None, None, mode=ModeId.GENERATE)
+            self.mode_router.update_state(
+                {
+                    "selected_candidate_revision_id": None,
+                    "candidate_revision_ids": (),
+                    "candidate_count": 0,
+                    "favorite_candidate_revision_ids": tuple(self.generation_favorite_revision_ids),
+                },
+                mode=ModeId.GENERATE,
+            )
+            self.generate_candidates_var.set(
+                "尚无收藏候选；可关闭“仅看收藏”查看历史。"
+                if self.generate_favorites_only_var.get()
+                else "尚无候选结果。"
+            )
+            self._update_generation_buttons()
+        if (
+            tuple(self.generation_candidate_revision_ids) != requested_recent
+            or tuple(self.generation_favorite_revision_ids) != requested_favorites
+        ):
+            self._schedule_config_save()
+
+    def _remember_generated_candidates(
+        self,
+        imported: tuple[AssetRevision, ...],
+    ) -> None:
+        newest = [revision.revision_id for revision in imported]
+        merged = newest + [
+            revision_id
+            for revision_id in self.generation_candidate_revision_ids
+            if revision_id not in newest
+        ]
+        self.generation_candidate_revision_ids = merged[:12]
+        self.generate_favorites_only_var.set(False)
+        self._restore_generation_candidate_history()
+        self._schedule_config_save()
+
+    def _toggle_generated_candidate_favorite(self) -> None:
+        revision_id = self._selected_generated_revision_id
+        if revision_id is None or revision_id not in self._generated_candidates_by_revision:
+            self.generate_status_var.set("请先选择一个生成候选")
+            return
+        if revision_id in self.generation_favorite_revision_ids:
+            self.generation_favorite_revision_ids = [
+                item for item in self.generation_favorite_revision_ids if item != revision_id
+            ]
+            action = "已取消收藏"
+        else:
+            self.generation_favorite_revision_ids.insert(0, revision_id)
+            del self.generation_favorite_revision_ids[128:]
+            action = "已收藏"
+        self._restore_generation_candidate_history(selected_revision_id=revision_id)
+        self.generate_status_var.set(f"{action}；收藏状态已保存在本机")
+        self._schedule_config_save()
+
+    def _remove_generated_candidate(self) -> None:
+        revision_id = self._selected_generated_revision_id
+        item = (
+            None if revision_id is None else self._generated_candidates_by_revision.get(revision_id)
+        )
+        if revision_id is None or item is None:
+            self.generate_status_var.set("请先选择一个生成候选")
+            return
+        self.generation_candidate_revision_ids = [
+            value for value in self.generation_candidate_revision_ids if value != revision_id
+        ]
+        self.generation_favorite_revision_ids = [
+            value for value in self.generation_favorite_revision_ids if value != revision_id
+        ]
+        self._selected_generated_revision_id = None
+        self._restore_generation_candidate_history()
+        self.generate_status_var.set(f"已从候选工作区删除：{item.label}")
+        self.generate_candidates_var.set("素材修订仍安全保留，用于任务来源与跨模式追溯。")
+        self._schedule_config_save()
+
+    def _generation_favorites_filter_changed(self) -> None:
+        self._restore_generation_candidate_history()
+        state = "已仅显示收藏候选" if self.generate_favorites_only_var.get() else "已显示全部候选"
+        self.generate_status_var.set(state)
+        self._schedule_config_save()
+
+    def _toggle_generation_favorites_filter(self) -> None:
+        self.generate_favorites_only_var.set(not self.generate_favorites_only_var.get())
+        self._generation_favorites_filter_changed()
+
+    def _select_generated_candidate(self, revision_id: str) -> None:
+        item = self._generated_candidates_by_revision.get(revision_id)
+        if item is None:
+            return
+        try:
+            revision = self.asset_repository.get_revision(revision_id)
+            asset = self.asset_repository.get_asset(revision.asset_id)
+        except Exception:
+            return
+        self._selected_generated_revision_id = revision_id
+        self.generation_candidate_grid.select(revision_id, notify=False)
+        self.mode_router.set_handoff(
+            AssetHandoff(
+                id=revision.asset_id,
+                uri=item.path.as_uri(),
+                media_type=revision.media_type,
+                display_name=asset.name,
+                metadata={"source": "generation", "managed": True},
+            ),
+            RevisionHandoff(
+                id=revision.revision_id,
+                asset_id=revision.asset_id,
+                number=revision.sequence,
+                metadata={
+                    "provider": revision.provenance.provider_id,
+                    "request_id": revision.provenance.request_id,
+                    "cost_minor": 0,
+                    "currency": "CNY",
+                },
+            ),
+            mode=ModeId.GENERATE,
+        )
+        self.mode_router.update_state(
+            {"selected_candidate_revision_id": revision_id},
+            mode=ModeId.GENERATE,
+        )
+        self.generate_candidates_var.set(f"已选择：{item.label}")
+        self._update_generation_buttons()
+
+    def _generate_selected_candidate_variation(self) -> None:
+        revision_id = self._selected_generated_revision_id
+        if revision_id is None:
+            self.generate_status_var.set("请先选择一个生成候选")
+            return
+        try:
+            source = self.asset_repository.get_revision(revision_id)
+            profile = self.generation_provider_catalog.by_display_name(
+                self.generate_provider_var.get()
+            )
+        except (KeyError, ValueError):
+            self.generate_status_var.set("所选候选或生成服务不可用")
+            return
+        if not profile.manifest.supports(
+            ProviderCapability.VARIATION,
+            profile.model_id,
+        ):
+            self.generate_status_var.set("当前服务不支持候选变体")
+            return
+        parameters = source.provenance.parameters
+        prompt_value = parameters.get("prompt", "")
+        prompt = prompt_value if isinstance(prompt_value, str) else ""
+        if not prompt.strip():
+            prompt = "基于所选候选生成视觉变体"
+        negative_value = parameters.get("negative_prompt", "")
+        negative_prompt = negative_value if isinstance(negative_value, str) else ""
+        style_value = parameters.get("style_preset", "")
+        style_preset = style_value if isinstance(style_value, str) else ""
+        seed_value = parameters.get("seed")
+        seed = (
+            (seed_value + 1) % 4_294_967_296
+            if isinstance(seed_value, int) and not isinstance(seed_value, bool)
+            else None
+        )
+        try:
+            count = max(1, min(4, int(self.generate_count_var.get())))
+        except (tk.TclError, TypeError, ValueError):
+            count = 1
+        request = GenerationRequest(
+            prompt=prompt,
+            model=profile.model_id,
+            width=source.width or 1024,
+            height=source.height or 1024,
+            count=count,
+            seed=seed,
+            style_preset=style_preset,
+            negative_prompt=negative_prompt,
+            variation_revision=source,
+            variation_strength=0.35,
+        )
+        snapshot = self._submit_generation_request(profile, request)
+        if snapshot is None:
+            return
+        self._begin_generation_tracking(snapshot, request, profile)
+        self.generate_status_var.set("正在基于所选候选生成变体")
+        self.generate_candidates_var.set(f"来源修订：{source.revision_id} · 变化强度 35%")
+
+    def _send_generated_candidate_to_mode(self, mode: ModeId) -> None:
+        revision_id = self._selected_generated_revision_id
+        item = (
+            None if revision_id is None else self._generated_candidates_by_revision.get(revision_id)
+        )
+        if revision_id is None or item is None:
+            self.generate_status_var.set("请先选择一个生成候选")
+            return
+        try:
+            revision = self.asset_repository.get_revision(revision_id)
+            asset = self.asset_repository.get_asset(revision.asset_id)
+        except Exception as error:
+            self.generate_status_var.set(f"无法读取生成候选：{error}")
+            return
+        asset_handoff = AssetHandoff(
+            id=revision.asset_id,
+            uri=item.path.as_uri(),
+            media_type=revision.media_type,
+            display_name=asset.name,
+            metadata={"source": "generation", "managed": True},
+        )
+        revision_handoff = RevisionHandoff(
+            id=revision.revision_id,
+            asset_id=revision.asset_id,
+            number=revision.sequence,
+            metadata={
+                "provider": revision.provenance.provider_id,
+                "request_id": revision.provenance.request_id,
+            },
+        )
+        if mode is ModeId.CONVERT:
+            self._conversion_handoff_override = (
+                item.path,
+                asset_handoff,
+                revision_handoff,
+            )
+            self.mode_router.switch(ModeId.CONVERT)
+            self.mode_router.set_handoff(
+                asset_handoff,
+                revision_handoff,
+                mode=ModeId.CONVERT,
+            )
+            self.conversion_job_status_var.set("生成候选已加入转换队列，可继续选择格式和尺寸")
+            return
+        if not self._confirm_discard_changes():
+            return
+        self.mode_router.switch(mode)
+        self._asset_identity_open_hint = (item.path, revision)
+        self.open_paths([item.path], confirm=False)
+        self.mode_router.set_handoff(asset_handoff, revision_handoff, mode=mode)
+        self.status_var.set(
+            "正在打开生成候选并进入改图模式" if mode is ModeId.EDIT else "正在打开生成候选"
+        )
+
+    def _update_generation_buttons(self) -> None:
+        provider_active = False
+        if self._mock_generation_job_id is not None:
+            try:
+                provider_active = not self.ai_job_manager.get_job(
+                    self._mock_generation_job_id
+                ).status.terminal
+            except Exception:
+                provider_active = False
+        import_active = bool(
+            self._mock_generation_import_future is not None
+            and not self._mock_generation_import_future.done()
+        )
+        reference_import_active = bool(
+            self._generation_reference_future is not None
+            and not self._generation_reference_future.done()
+        )
+        active = provider_active or import_active or reference_import_active
+        try:
+            selected_profile = self.generation_provider_catalog.by_display_name(
+                self.generate_provider_var.get()
+            )
+            provider_ready = (
+                selected_profile.selectable
+                and selected_profile.provider_id == self.ai_job_manager.provider_id
+            )
+        except KeyError:
+            provider_ready = False
+        self.mock_generate_button.state(
+            ("!disabled",) if not active and provider_ready else ("disabled",)
+        )
+        self.mock_cancel_button.state(("!disabled",) if provider_active else ("disabled",))
+        retryable = False
+        if self._mock_generation_job_id is not None and not active:
+            try:
+                retryable = self.ai_job_manager.get_job(self._mock_generation_job_id).status in {
+                    JobStatus.FAILED,
+                    JobStatus.UNKNOWN,
+                }
+            except Exception:
+                retryable = False
+        self.mock_retry_button.state(("!disabled",) if retryable else ("disabled",))
+        candidate_state = (
+            ("!disabled",)
+            if self._selected_generated_revision_id is not None and not active
+            else ("disabled",)
+        )
+        self.generated_open_button.state(candidate_state)
+        self.generated_edit_button.state(candidate_state)
+        self.generated_convert_button.state(candidate_state)
+        self.generated_variation_button.state(candidate_state)
+        self.generated_favorite_button.state(candidate_state)
+        self.generated_remove_button.state(candidate_state)
+        selected_is_favorite = (
+            self._selected_generated_revision_id in self.generation_favorite_revision_ids
+            if self._selected_generated_revision_id is not None
+            else False
+        )
+        self.generated_favorite_button.configure(
+            text="取消收藏" if selected_is_favorite else "收藏候选"
+        )
+        self.generated_favorites_only_checkbutton.state(("disabled",) if active else ("!disabled",))
+
+        reference_control_state = ("disabled",) if active else ("!disabled",)
+        can_add_reference = not active and len(self._generation_references) < 4
+        self.generate_reference_choose_button.state(
+            ("!disabled",) if can_add_reference else ("disabled",)
+        )
+        current_reference_state = (
+            ("!disabled",)
+            if can_add_reference and self._current_asset_revision is not None
+            else ("disabled",)
+        )
+        self.generate_reference_current_button.state(current_reference_state)
+        has_reference = bool(self._generation_references)
+        self.generate_reference_remove_button.state(
+            ("!disabled",) if not active and has_reference else ("disabled",)
+        )
+        clear_reference_state = ("!disabled",) if not active and has_reference else ("disabled",)
+        self.generate_reference_clear_button.state(clear_reference_state)
+        self.generate_reference_listbox.configure(state=tk.DISABLED if active else tk.NORMAL)
+        self.generate_negative_prompt_entry.state(reference_control_state)
+        reference_setting_state = ("!disabled",) if not active and has_reference else ("disabled",)
+        self.generate_reference_strength_spinbox.state(reference_setting_state)
+        self.generate_reference_role_box.state(
+            ("!disabled", "readonly") if not active and has_reference else ("disabled",)
+        )
+        self.generate_size_box.state(("disabled",) if active else ("!disabled", "readonly"))
+        self.generate_count_spinbox.state(reference_control_state)
+        self.generate_style_box.state(("disabled",) if active else ("!disabled", "readonly"))
+        self.generate_seed_checkbutton.state(reference_control_state)
+        self.generate_seed_entry.state(reference_control_state)
+        self.generate_provider_box.state(("disabled",) if active else ("!disabled", "readonly"))
+
+    def _present_generated_candidates(
+        self,
+        snapshot: ManagedJobSnapshot,
+        imported: tuple[AssetRevision, ...],
+    ) -> None:
+        if not imported:
+            return
+        names = "、".join(asset.name for asset in snapshot.outputs)
+        provider_label = (
+            self._last_generation_profile.display_name
+            if self._last_generation_profile is not None
+            else "生成服务"
+        )
+        self.generate_status_var.set(f"{provider_label} · {len(imported)} 个候选已安全入库")
+        self.generate_candidates_var.set(f"本批候选：{names}\n结果已安全解码并保存为本地资源修订。")
+        self._remember_generated_candidates(imported)
+        revision = imported[0]
+        self._select_generated_candidate(revision.revision_id)
+        self.mode_router.update_state(
+            {
+                "job_id": snapshot.job_id,
+                "candidate_revision_ids": tuple(item.revision_id for item in imported),
+                "candidate_count": len(imported),
+            },
+            mode=ModeId.GENERATE,
+        )
+        self._mock_generation_presented_job_id = snapshot.job_id
+        self._sync_ai_task_to_tray(
+            snapshot,
+            detail=f"{len(imported)} 个候选已安全入库",
+        )
+        self._update_generation_buttons()
+
+    def _cancel_mock_generation(self) -> None:
+        if self._mock_generation_job_id is None:
+            self.generate_status_var.set("当前没有可取消的任务")
+            return
+        if self._mock_generation_after is not None:
+            self.after_cancel(self._mock_generation_after)
+            self._mock_generation_after = None
+        snapshot = self.ai_job_manager.cancel(self._mock_generation_job_id)
+        self.generate_status_var.set(
+            "生成任务已取消"
+            if snapshot.status is JobStatus.CANCELLED
+            else f"任务已结束：{snapshot.status.value}"
+        )
+        self.generate_candidates_var.set("未生成候选结果")
+        self._sync_ai_task_to_tray(snapshot)
+        self._update_generation_buttons()
+
+    def _sync_mode_handoff(self) -> None:
+        revision = self._current_asset_revision
+        path = self._resolved_current_asset_path()
+        if self.document is None or revision is None or path is None:
+            self.mode_router.set_handoff(None)
+            return
+        self.mode_router.set_handoff(
+            AssetHandoff(
+                id=revision.asset_id,
+                uri=path.as_uri(),
+                media_type=revision.media_type,
+                display_name=path.name,
+                metadata={
+                    "width": revision.width,
+                    "height": revision.height,
+                    "storage_kind": revision.storage_kind.value,
+                },
+            ),
+            RevisionHandoff(
+                id=revision.revision_id,
+                asset_id=revision.asset_id,
+                number=revision.sequence,
+                dirty=self.document.dirty,
+                project_uri=(
+                    self.document.project_path.as_uri()
+                    if self.document.project_path is not None
+                    else None
+                ),
+            ),
+        )
+
+    def _resolved_current_asset_path(self) -> Path | None:
+        document = self.document
+        revision = self._current_asset_revision
+        if document is None or document.source_path is None or revision is None:
+            return None
+        fingerprint = document.source_fingerprint
+        if fingerprint is None or not fingerprint.matches(document.source_path):
+            return None
+        try:
+            resolved = self.asset_repository.resolve_content(
+                revision.revision_id,
+                verify=False,
+            )
+        except Exception:
+            return None
+        if not self._same_path(resolved, document.source_path):
+            return None
+        return resolved
+
+    def _invalidate_asset_registration(self, *, clear_relocation_hint: bool = True) -> None:
+        self._asset_registration_generation += 1
+        future = self._asset_registration_future
+        if future is not None:
+            future.cancel()
+        self._asset_registration_future = None
+        self._asset_registration_path = None
+        self._current_asset_revision = None
+        self._last_asset_registration_error = None
+        if clear_relocation_hint:
+            self._asset_relocation_hint = None
+            self._asset_identity_open_hint = None
+        self.mode_router.set_handoff(None)
+
+    def _schedule_asset_registration(
+        self,
+        path: Path,
+        *,
+        parent_revision: AssetRevision | None = None,
+    ) -> None:
+        if self._services_shutdown or self.document is None:
+            return
+        try:
+            source = path.resolve(strict=False)
+        except OSError:
+            source = path.absolute()
+
+        identity_hint = self._asset_identity_open_hint
+        self._asset_identity_open_hint = None
+        if identity_hint is not None and self._same_path(identity_hint[0], source):
+            try:
+                managed_path = self.asset_repository.resolve_content(
+                    identity_hint[1].revision_id,
+                    verify=False,
+                )
+            except Exception:
+                managed_path = None
+            if managed_path is not None and self._same_path(managed_path, source):
+                self._asset_registration_generation += 1
+                future = self._asset_registration_future
+                if future is not None:
+                    future.cancel()
+                self._asset_registration_future = None
+                self._asset_registration_path = None
+                self._current_asset_revision = identity_hint[1]
+                self._last_asset_registration_error = None
+                self._sync_mode_handoff()
+                if self.mode_router.active_mode is ModeId.CONVERT:
+                    self._enqueue_current_conversion_handoff()
+                return
+
+        hint = self._asset_relocation_hint
+        if parent_revision is None and hint is not None and self._same_path(hint[0], source):
+            parent_revision = hint[1]
+        self._asset_relocation_hint = None
+
+        self._asset_registration_generation += 1
+        generation = self._asset_registration_generation
+        expected_document = self.document
+        self._current_asset_revision = None
+        self._last_asset_registration_error = None
+        self.mode_router.set_handoff(None)
+
+        provenance = None
+        if parent_revision is not None:
+            provenance = Provenance(
+                origin="relocate",
+                actor="user",
+                source_revision_ids=(parent_revision.revision_id,),
+                parameters={"path": str(source)},
+            )
+        future = self._asset_executor.submit(
+            self.asset_repository.ensure_external,
+            source,
+            provenance=provenance,
+            asset_id=(None if parent_revision is None else parent_revision.asset_id),
+            parent_revision_id=(None if parent_revision is None else parent_revision.revision_id),
+            asset_name=source.name,
+        )
+        self._asset_registration_future = future
+        self._asset_registration_path = source
+        self.after(
+            10,
+            self._poll_asset_registration,
+            generation,
+            source,
+            expected_document,
+            future,
+        )
+
+    def _poll_asset_registration(
+        self,
+        generation: int,
+        path: Path,
+        expected_document: Document,
+        future: Future[AssetRevision],
+    ) -> None:
+        if self._services_shutdown or generation != self._asset_registration_generation:
+            return
+        if not future.done():
+            self.after(
+                10,
+                self._poll_asset_registration,
+                generation,
+                path,
+                expected_document,
+                future,
+            )
+            return
+        self._asset_registration_future = None
+        self._asset_registration_path = None
+        try:
+            revision = future.result()
+        except Exception as error:
+            # Asset indexing is supplementary to opening the image.  Keep the
+            # preview usable and avoid surfacing a worker failure as a Tk popup.
+            self._last_asset_registration_error = error
+            self._current_asset_revision = None
+            self.mode_router.set_handoff(None)
+            if self.mode_router.active_mode is ModeId.CONVERT:
+                self._enqueue_current_conversion_handoff()
+            return
+
+        document = self.document
+        if (
+            document is not expected_document
+            or document.source_path is None
+            or not self._same_path(document.source_path, path)
+        ):
+            return
+        self._current_asset_revision = revision
+        if self._resolved_current_asset_path() is None:
+            self._current_asset_revision = None
+        self._sync_mode_handoff()
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            self._enqueue_current_conversion_handoff()
+
+    def _choose_conversion_files(self) -> tuple[str, ...]:
+        return filedialog.askopenfilenames(
+            title="添加要转换的图片",
+            filetypes=[
+                (
+                    "图片文件",
+                    "*.jpg *.jpeg *.png *.apng *.webp *.avif *.heic *.heif "
+                    "*.bmp *.tif *.tiff *.gif",
+                ),
+                ("所有文件", "*.*"),
+            ],
+        )
+
+    def _choose_conversion_folder(self) -> str | None:
+        folder = filedialog.askdirectory(title="添加图片文件夹")
+        return folder or None
+
+    def _choose_conversion_output_directory(self) -> str | None:
+        initial = self.conversion_output_dir_var.get().strip()
+        if not initial and self.recent_export_directories:
+            initial = self.recent_export_directories[0]
+        folder = filedialog.askdirectory(
+            title="选择转换输出文件夹",
+            initialdir=initial or None,
+        )
+        if not folder:
+            return None
+        self.conversion_output_dir_var.set(folder)
+        return folder
+
+    def _choose_conversion_transparency_background(self) -> None:
+        current = self._conversion_transparency_background() or "#ffffff"
+        _rgb, selected = colorchooser.askcolor(
+            color=current,
+            title="选择透明区域填充颜色",
+        )
+        if not selected:
+            return
+        self.conversion_background_var.set(selected.lower())
+
+    def _conversion_transparency_background(self) -> str | None:
+        value = self.conversion_background_var.get().strip()
+        if value in TRANSPARENCY_BACKGROUND_LABELS:
+            return TRANSPARENCY_BACKGROUND_LABELS[value]
+        return value or None
+
+    def _activate_conversion_input(self, path: Path) -> bool:
+        if self.image_path is not None:
+            try:
+                if self.image_path.resolve() == path.resolve():
+                    return True
+            except OSError:
+                pass
+        self.open_path(path)
+        return self.image_path == path
+
+    def _enqueue_current_conversion_handoff(self) -> None:
+        if self._restoring_conversion_session:
+            return
+        override = self._conversion_handoff_override
+        if override is not None:
+            self._conversion_handoff_override = None
+            path, asset, revision = override
+            try:
+                self.conversion_workspace.add_handoff(path, asset, revision)
+            except (OSError, ValueError) as error:
+                self.conversion_job_status_var.set(f"无法加入智能改图结果：{error}")
+            return
+        if self.document is None or self.document.source_path is None:
+            return
+        path = self.document.source_path
+        if not path.exists():
+            return
+        context = self.mode_router.context_for(ModeId.CONVERT)
+        try:
+            revision = self._current_asset_revision
+            resolved = self._resolved_current_asset_path()
+            identity_matches = bool(
+                revision is not None
+                and resolved is not None
+                and context.asset is not None
+                and context.revision is not None
+                and context.asset.id == revision.asset_id
+                and context.revision.id == revision.revision_id
+                and self._same_path(resolved, path)
+            )
+            if identity_matches:
+                assert context.asset is not None
+                self.conversion_workspace.add_handoff(
+                    path,
+                    context.asset,
+                    context.revision,
+                )
+            else:
+                self.conversion_workspace.add_files((path,))
+                if context.asset is not None:
+                    self.conversion_job_status_var.set(
+                        "已忽略与当前文件不一致的资源身份，按真实文件加入队列"
+                    )
+        except (OSError, ValueError) as error:
+            self.conversion_job_status_var.set(f"无法加入当前图片：{error}")
+
+    def _conversion_queue_changed(self, items: tuple[object, ...]) -> None:
+        self._invalidate_conversion_session()
+        enabled = len(self.conversion_workspace.queue.enabled_items)
+        self.mode_router.update_state(
+            {"queue_count": len(items), "enabled_count": enabled},
+            mode=ModeId.CONVERT,
+        )
+        if self._conversion_thread is None:
+            self.conversion_job_status_var.set(
+                "尚未添加转换任务" if not items else f"队列已准备 · {enabled} / {len(items)} 项启用"
+            )
+        self._update_conversion_buttons()
+
+    def _conversion_control_state(self) -> ConversionControlState:
+        current = ConversionControlState.from_draft(self.conversion_draft_history.current)
+        return ConversionControlState(
+            width_text=self.width_var.get(),
+            height_text=self.height_var.get(),
+            max_side_text=self.max_side_var.get(),
+            allow_upscale=current.allow_upscale,
+            watermark_text=self.watermark_text_var.get(),
+            watermark_position=self.watermark_position_var.get(),
+            watermark_opacity=int(self.watermark_opacity_var.get()),
+            watermark_size_percent=int(self.watermark_size_var.get()),
+            output_format=self.format_var.get(),
+            quality=int(self.quality_var.get()),
+            target_size_text=self.target_size_var.get(),
+            preserve_metadata=(
+                self.preserve_metadata_var.get() and not self.batch_strip_metadata_var.get()
+            ),
+            rename_template=self.batch_rename_template_var.get(),
+            conflict_policy=self.batch_conflict_var.get(),
+            preserve_animation=self.batch_preserve_animation_var.get(),
+            backup_on_overwrite=self.backup_on_overwrite_var.get(),
+            transparency_background=self._conversion_transparency_background(),
+            transparency_background_explicit=True,
+        )
+
+    def _apply_conversion_draft_to_controls(self) -> None:
+        draft = self.conversion_draft_history.current
+        state = ConversionControlState.from_draft(draft)
+        self._syncing_document = True
+        try:
+            self.rotation = draft.rotation
+            self.flip_h = draft.flip_horizontal
+            self.flip_v = draft.flip_vertical
+            self.width_var.set(state.width_text)
+            self.height_var.set(state.height_text)
+            self.max_side_var.set(state.max_side_text)
+            self.watermark_text_var.set(state.watermark_text)
+            self.watermark_position_var.set(state.watermark_position)
+            self.watermark_opacity_var.set(state.watermark_opacity)
+            self.watermark_size_var.set(state.watermark_size_percent)
+            self.format_var.set(state.output_format)
+            self.quality_var.set(state.quality)
+            self.target_size_var.set(state.target_size_text)
+            self.preserve_metadata_var.set(state.preserve_metadata)
+            self.batch_strip_metadata_var.set(not state.preserve_metadata)
+            self.batch_rename_template_var.set(state.rename_template)
+            self.batch_conflict_var.set(state.conflict_policy)
+            self.batch_preserve_animation_var.set(state.preserve_animation)
+            self.backup_on_overwrite_var.set(state.backup_on_overwrite)
+            background = state.transparency_background
+            background_label = next(
+                (
+                    label
+                    for label, value in TRANSPARENCY_BACKGROUND_LABELS.items()
+                    if value == background
+                ),
+                background or "不自动处理",
+            )
+            self.conversion_background_var.set(background_label)
+            self.export_preset_var.set("自定义")
+            self.crop_box = None
+        finally:
+            self._syncing_document = False
+        self.crop_var.set("配方中已有裁切" if draft.crop_box is not None else "未设置裁剪")
+
+    def _update_conversion_draft_from_controls(self) -> None:
+        if self._syncing_document or self.mode_router.active_mode is not ModeId.CONVERT:
+            return
+        try:
+            updated = self._conversion_control_state().apply_to(
+                self.conversion_draft_history.current
+            )
+        except (tk.TclError, TypeError, ValueError):
+            self.size_var.set("预计输出大小：等待有效的转换设置")
+            return
+        if self.conversion_draft_history.push(updated):
+            self._conversion_recipe_override = None
+            self.conversion_recipe_status_var.set(f"当前草稿：{updated.name}（已修改）")
+            self._invalidate_conversion_session()
+            self._schedule_preview()
+        self._update_estimate()
+
+    def _push_conversion_draft(
+        self,
+        draft: ConversionDraft,
+        *,
+        status: str,
+        apply_controls: bool = False,
+    ) -> bool:
+        if not self.conversion_draft_history.push(draft):
+            return False
+        self._conversion_recipe_override = None
+        if apply_controls:
+            self._apply_conversion_draft_to_controls()
+        self._invalidate_conversion_session()
+        self.conversion_recipe_status_var.set(
+            f"当前草稿：{self.conversion_draft_history.current.name}"
+        )
+        self.status_var.set(status)
+        self._refresh_preview()
+        self._update_estimate()
+        return True
+
+    def _invalidate_conversion_session(self) -> None:
+        if self._restoring_conversion_session:
+            return
+        thread = self._conversion_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._conversion_session = None
+        self._conversion_run_base_session = None
+        try:
+            self.conversion_checkpoint_writer.clear()
+        except RuntimeError:
+            pass
+
+    @staticmethod
+    def _positive_conversion_value(value: str, label: str) -> int | None:
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = int(text)
+        except ValueError as error:
+            raise ValueError(f"{label}必须是正整数") from error
+        if number <= 0:
+            raise ValueError(f"{label}必须大于 0")
+        return number
+
+    def _build_current_conversion_recipe(self) -> TransformRecipe:
+        updated = self._conversion_control_state().apply_to(self.conversion_draft_history.current)
+        self.conversion_draft_history.push(updated)
+        return updated.to_recipe()
+
+    def _active_conversion_recipe(self) -> TransformRecipe:
+        return self._build_current_conversion_recipe()
+
+    def _use_current_conversion_settings(self) -> None:
+        self._conversion_recipe_override = None
+        current = self.conversion_draft_history.current.with_name("当前转换设置")
+        self.conversion_draft_history.push(current)
+        self.conversion_recipe_status_var.set("使用当前面板设置")
+        self.conversion_job_status_var.set("已切换到当前裁切、尺寸与格式设置")
+        self._invalidate_conversion_session()
+
+    def _import_conversion_recipe(self) -> None:
+        path = filedialog.askopenfilename(
+            title="导入转换配方",
+            filetypes=[("转换配方", "*.lierecipe"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            recipe = self.recipe_store.load(path)
+        except (OSError, RecipeFileError, ValueError) as error:
+            self.conversion_job_status_var.set(f"配方导入失败：{error}")
+            return
+        self.conversion_draft_history.reset(ConversionDraft.from_recipe(recipe))
+        self._conversion_recipe_override = recipe
+        self._apply_conversion_draft_to_controls()
+        self._invalidate_conversion_session()
+        self.conversion_recipe_status_var.set(
+            f"已导入：{recipe.name} · {len(recipe.steps)} 个步骤 · "
+            f"{recipe.export_profile.output_format}"
+        )
+        self.conversion_job_status_var.set("配方已载入，尚未执行")
+        self.mode_router.update_state(
+            {"recipe_path": str(Path(path)), "recipe_name": recipe.name},
+            mode=ModeId.CONVERT,
+        )
+        self._refresh_preview()
+        self._update_estimate()
+
+    def _export_conversion_recipe(self) -> None:
+        try:
+            recipe = self._active_conversion_recipe()
+        except ValueError as error:
+            self.conversion_job_status_var.set(f"当前设置无效：{error}")
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出转换配方",
+            defaultextension=".lierecipe",
+            initialfile=f"{recipe.name}.lierecipe",
+            filetypes=[("转换配方", "*.lierecipe")],
+        )
+        if not path:
+            return
+        try:
+            saved = self.recipe_store.save(recipe, path)
+        except (OSError, RecipeFileError, ValueError) as error:
+            self.conversion_job_status_var.set(f"配方导出失败：{error}")
+            return
+        self.conversion_job_status_var.set(f"配方已导出：{saved.name}")
+
+    def _start_conversion_queue(self) -> None:
+        if self._conversion_thread is not None and self._conversion_thread.is_alive():
+            self.conversion_job_status_var.set("转换任务正在运行")
+            return
+        if not self.conversion_workspace.queue.enabled_items:
+            self.conversion_job_status_var.set("请先添加并启用至少一张图片")
+            return
+        output_text = self.conversion_output_dir_var.get().strip()
+        if not output_text:
+            output_text = self._choose_conversion_output_directory() or ""
+        if not output_text:
+            self.conversion_job_status_var.set("请选择输出文件夹")
+            return
+        output_directory = Path(output_text)
+        try:
+            output_directory.mkdir(parents=True, exist_ok=True)
+            recipe = self._active_conversion_recipe()
+            workers = max(1, min(16, int(self.batch_concurrency_var.get())))
+            session = self._conversion_session
+            if session is not None and self._conversion_session_matches_current(
+                session,
+                recipe,
+                output_directory,
+            ):
+                resumable = tuple(
+                    task
+                    for task in session.tasks
+                    if task.status
+                    in {
+                        ConversionTaskStatus.PENDING,
+                        ConversionTaskStatus.FAILED,
+                        ConversionTaskStatus.CANCELLED,
+                    }
+                )
+                if not resumable:
+                    self.conversion_job_status_var.set(
+                        "当前转换会话已全部成功；修改队列或配方后可创建新任务"
+                    )
+                    return
+                runner = session.resume_runner(max_workers=workers)
+                base_session = session
+                operation_label = f"继续转换 {len(resumable)} 项"
+            else:
+                queue_snapshot = ConversionQueue.from_ordered(self.conversion_workspace.queue.items)
+                runner = ConversionRunner(
+                    queue_snapshot,
+                    recipe,
+                    output_directory,
+                    max_workers=workers,
+                )
+                base_session = ConversionSession.capture(queue_snapshot, runner)
+                operation_label = f"正在转换 {len(runner.tasks)} 项"
+        except (OSError, tk.TclError, TypeError, ValueError) as error:
+            self.conversion_job_status_var.set(f"无法开始转换：{error}")
+            return
+
+        self._begin_conversion_operation(
+            runner,
+            base_session,
+            status=f"{operation_label} · 并发 {workers}",
+        )
+
+    def _conversion_session_matches_current(
+        self,
+        session: ConversionSession,
+        recipe: TransformRecipe,
+        output_directory: Path,
+    ) -> bool:
+        def queue_signature(items: Sequence[object]) -> tuple[tuple[str, bool], ...]:
+            signature: list[tuple[str, bool]] = []
+            for item in items:
+                path = Path(getattr(item, "path")).resolve(strict=False)
+                signature.append((os.path.normcase(str(path)), bool(getattr(item, "enabled"))))
+            return tuple(signature)
+
+        return (
+            queue_signature(session.queue_items)
+            == queue_signature(self.conversion_workspace.queue.items)
+            and session.recipe.to_json() == recipe.to_json()
+            and session.output_directory == output_directory.resolve(strict=False)
+        )
+
+    def _begin_conversion_operation(
+        self,
+        runner: ConversionRunner,
+        base_session: ConversionSession,
+        *,
+        status: str,
+    ) -> None:
+        while True:
+            try:
+                self._conversion_ui_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._conversion_generation += 1
+        generation = self._conversion_generation
+        self._active_conversion_generation = generation
+        self._conversion_tray_task_id = f"conversion:{generation}"
+        self._conversion_runner = runner
+        self._conversion_run_base_session = base_session
+        self._conversion_run_queue = base_session.create_queue()
+        self._conversion_session = base_session
+        self.conversion_workspace.set_task_records(base_session.tasks)
+        self.conversion_workspace.set_running(True)
+        self.conversion_job_status_var.set(status)
+        self._sync_conversion_task_to_tray(base_session, active=True, detail=status)
+        self._checkpoint_conversion_session(base_session, force=True)
+        self._conversion_thread = threading.Thread(
+            target=self._run_conversion_worker,
+            args=(runner, generation),
+            name="conversion-coordinator",
+            daemon=True,
+        )
+        self._conversion_thread.start()
+        self._update_conversion_buttons()
+        self._schedule_conversion_poll()
+
+    def _run_conversion_worker(
+        self,
+        runner: ConversionRunner,
+        generation: int,
+    ) -> None:
+        try:
+            result = runner.run()
+        except BaseException as error:
+            self._conversion_ui_queue.put((generation, "error", error))
+        else:
+            self._conversion_ui_queue.put((generation, "result", result))
+
+    def _schedule_conversion_poll(self) -> None:
+        if self._conversion_poll_job is not None:
+            try:
+                self.after_cancel(self._conversion_poll_job)
+            except tk.TclError:
+                pass
+        self._conversion_poll_job = self.after(80, self._poll_conversion_worker)
+
+    def _poll_conversion_worker(self) -> None:
+        self._conversion_poll_job = None
+        runner = self._conversion_runner
+        snapshot: ConversionSession | None = None
+        if runner is not None and self._conversion_run_base_session is not None:
+            try:
+                snapshot = self._conversion_run_base_session.merge_tasks(list(runner.tasks))
+            except ConversionSessionError as error:
+                self.conversion_job_status_var.set(f"转换状态合并失败：{error}")
+            else:
+                self._conversion_session = snapshot
+                self.conversion_workspace.set_task_records(snapshot.tasks)
+                self._checkpoint_conversion_session(snapshot)
+                self._sync_conversion_task_to_tray(snapshot, active=True)
+        terminal: tuple[str, object] | None = None
+        while True:
+            try:
+                generation, kind, payload = self._conversion_ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            if generation == self._active_conversion_generation:
+                terminal = (kind, payload)
+        thread = self._conversion_thread
+        if terminal is None and thread is not None and thread.is_alive():
+            self._schedule_conversion_poll()
+            return
+        if terminal is None:
+            terminal = ("error", RuntimeError("转换线程提前结束，未返回结果"))
+        kind, payload = terminal
+        self._conversion_thread = None
+        base_session = self._conversion_run_base_session
+        if (
+            kind == "result"
+            and isinstance(payload, ConversionRunResult)
+            and base_session is not None
+        ):
+            try:
+                final_session = base_session.merge_tasks(list(payload.tasks))
+            except ConversionSessionError as error:
+                self.conversion_job_status_var.set(f"转换结果合并失败：{error}")
+            else:
+                self._finish_conversion_run(payload, final_session)
+        else:
+            self.conversion_job_status_var.set(f"转换任务失败：{payload}")
+            failed_session = snapshot or base_session
+            if failed_session is not None:
+                self._conversion_session = failed_session
+                self._checkpoint_conversion_session(failed_session, force=True)
+                self._sync_conversion_task_to_tray(
+                    failed_session,
+                    active=False,
+                    detail=f"转换任务失败：{payload}",
+                    status_override=UnifiedTaskStatus.FAILED,
+                )
+        self._active_conversion_generation = None
+        self._conversion_run_base_session = None
+        self._conversion_run_queue = None
+        self.conversion_workspace.set_running(False)
+        self._update_conversion_buttons()
+
+    def _checkpoint_conversion_session(
+        self,
+        session: ConversionSession,
+        *,
+        force: bool = False,
+    ) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_conversion_checkpoint < 0.5:
+            return
+        self._last_conversion_checkpoint = now
+        try:
+            self.conversion_checkpoint_writer.submit(session)
+        except RuntimeError:
+            return
+        failure = self.conversion_checkpoint_writer.last_failure
+        if (
+            failure is not None
+            and self.conversion_checkpoint_writer.persisted_generation < failure.generation
+        ):
+            self.conversion_job_status_var.set(f"转换检查点写入失败：{failure.error}")
+
+    def _finish_conversion_run(
+        self,
+        result: ConversionRunResult,
+        session: ConversionSession,
+    ) -> None:
+        del result
+        self._conversion_session = session
+        self.conversion_workspace.set_task_records(session.tasks)
+        succeeded = sum(task.status is ConversionTaskStatus.SUCCEEDED for task in session.tasks)
+        failed = sum(task.status is ConversionTaskStatus.FAILED for task in session.tasks)
+        cancelled = sum(task.status is ConversionTaskStatus.CANCELLED for task in session.tasks)
+        self.conversion_job_status_var.set(
+            f"转换完成 · 成功 {succeeded} · 失败 {failed} · 取消 {cancelled}"
+        )
+        self._sync_conversion_task_to_tray(session, active=False)
+        successful_outputs = tuple(
+            task.output
+            for task in session.tasks
+            if task.status is ConversionTaskStatus.SUCCEEDED and task.output is not None
+        )
+        if successful_outputs:
+            self._remember_export_directory(successful_outputs[0].parent)
+        if failed or cancelled:
+            self._checkpoint_conversion_session(session, force=True)
+        else:
+            try:
+                self.conversion_checkpoint_writer.clear()
+            except RuntimeError:
+                pass
+        self.mode_router.update_state(
+            {
+                "last_succeeded": succeeded,
+                "last_failed": failed,
+                "last_cancelled": cancelled,
+            },
+            mode=ModeId.CONVERT,
+        )
+
+    def _cancel_conversion_queue(self) -> None:
+        runner = self._conversion_runner
+        thread = self._conversion_thread
+        if runner is None or thread is None or not thread.is_alive():
+            self.conversion_job_status_var.set("当前没有正在运行的转换任务")
+            self._update_conversion_buttons()
+            return
+        runner.cancel()
+        base_session = self._conversion_run_base_session
+        if base_session is not None:
+            try:
+                snapshot = base_session.merge_tasks(list(runner.tasks))
+            except ConversionSessionError:
+                self.conversion_workspace.set_task_records(runner.tasks)
+            else:
+                self._conversion_session = snapshot
+                self.conversion_workspace.set_task_records(snapshot.tasks)
+                self._checkpoint_conversion_session(snapshot, force=True)
+        self.conversion_job_status_var.set("正在取消；已停止派发新任务…")
+        current_session = self._conversion_session
+        if current_session is not None:
+            self._sync_conversion_task_to_tray(
+                current_session,
+                active=True,
+                detail="正在取消；已停止派发新任务",
+            )
+
+    def _retry_conversion_tasks(self, records: tuple[object, ...]) -> None:
+        thread = self._conversion_thread
+        if thread is not None and thread.is_alive():
+            self.conversion_job_status_var.set("转换任务运行中，暂不能重试")
+            return
+        session = self._conversion_session
+        selected = tuple(
+            record
+            for record in records
+            if isinstance(record, ConversionTaskRecord)
+            and record.status in {ConversionTaskStatus.FAILED, ConversionTaskStatus.CANCELLED}
+        )
+        if session is None or not selected:
+            self.conversion_job_status_var.set("当前任务已失效，无法安全重试")
+            return
+        if any(
+            task.status in {ConversionTaskStatus.PENDING, ConversionTaskStatus.RUNNING}
+            for task in session.tasks
+        ):
+            self.conversion_job_status_var.set("会话仍有未完成任务，请先继续整个会话")
+            return
+        if not self._quarantine_recovered_outputs(selected):
+            return
+        try:
+            workers = max(1, min(16, int(self.batch_concurrency_var.get())))
+            runner = ConversionRunner.retry_tasks(
+                selected,
+                session.recipe,
+                session.output_directory,
+                max_workers=workers,
+            )
+        except (OSError, tk.TclError, TypeError, ValueError) as error:
+            self.conversion_job_status_var.set(f"无法重试任务：{error}")
+            return
+        self._begin_conversion_operation(
+            runner,
+            session,
+            status=f"正在重试 {len(selected)} 项 · 并发 {workers}",
+        )
+
+    def _quarantine_recovered_outputs(
+        self,
+        records: Sequence[ConversionTaskRecord],
+    ) -> bool:
+        for record in records:
+            error = record.error or ""
+            target = record.planned_output
+            if not error.startswith("恢复验证失败") or not target.exists():
+                continue
+            backup = self._unique_export_path(
+                target.parent,
+                f"{target.name}.corrupt",
+                ".bak",
+            )
+            try:
+                target.replace(backup)
+            except OSError as move_error:
+                self.conversion_job_status_var.set(f"无法隔离损坏输出 {target.name}：{move_error}")
+                return False
+            self.conversion_job_status_var.set(f"已将损坏输出保留为 {backup.name}，准备重试")
+        return True
+
+    def _open_conversion_result(self, path: Path) -> None:
+        if not path.is_file():
+            self.conversion_job_status_var.set(f"结果文件不存在：{path}")
+            return
+        self.mode_router.switch(ModeId.VIEWER)
+        self.open_path(path)
+
+    def _offer_conversion_recovery(self) -> None:
+        if (
+            not self.conversion_session_path.is_file()
+            or self._conversion_recovery_thread is not None
+        ):
+            return
+        while True:
+            try:
+                self._conversion_recovery_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._conversion_recovery_thread = threading.Thread(
+            target=self._load_conversion_recovery_worker,
+            name="conversion-recovery-loader",
+            daemon=True,
+        )
+        self._conversion_recovery_thread.start()
+        self._conversion_recovery_poll_job = self.after(
+            40,
+            self._poll_conversion_recovery,
+        )
+
+    def _load_conversion_recovery_worker(self) -> None:
+        try:
+            session = self.conversion_session_store.load(self.conversion_session_path)
+        except (OSError, ConversionSessionError) as error:
+            self._conversion_recovery_queue.put(("error", error))
+        else:
+            self._conversion_recovery_queue.put(("session", session))
+
+    def _poll_conversion_recovery(self) -> None:
+        self._conversion_recovery_poll_job = None
+        try:
+            kind, payload = self._conversion_recovery_queue.get_nowait()
+        except queue.Empty:
+            thread = self._conversion_recovery_thread
+            if thread is not None and thread.is_alive():
+                self._conversion_recovery_poll_job = self.after(
+                    40,
+                    self._poll_conversion_recovery,
+                )
+                return
+            kind, payload = (
+                "error",
+                RuntimeError("转换恢复线程提前结束，未返回结果"),
+            )
+        self._conversion_recovery_thread = None
+        if kind != "session" or not isinstance(payload, ConversionSession):
+            self.conversion_job_status_var.set(f"转换会话恢复失败：{payload}")
+            return
+        session = payload
+        succeeded = sum(task.status is ConversionTaskStatus.SUCCEEDED for task in session.tasks)
+        unfinished = len(session.tasks) - succeeded
+        restore = messagebox.askyesno(
+            APP_NAME,
+            "检测到上次的转图任务。\n\n"
+            f"队列 {len(session.queue_items)} 项，已成功 {succeeded} 项，"
+            f"可继续 {unfinished} 项。\n\n是否恢复队列、配方和任务状态？",
+        )
+        if not restore:
+            try:
+                self.conversion_checkpoint_writer.clear()
+            except RuntimeError:
+                pass
+            self.conversion_job_status_var.set("已放弃上次转图会话")
+            return
+        self._restore_conversion_session(session)
+
+    def _restore_conversion_session(self, session: ConversionSession) -> None:
+        self._restoring_conversion_session = True
+        try:
+            self.conversion_workspace.set_queue(session.create_queue(), notify=False)
+            self.conversion_draft_history.reset(ConversionDraft.from_recipe(session.recipe))
+            self._conversion_recipe_override = session.recipe
+            self._conversion_session = session
+            self._conversion_tray_task_id = "conversion:recovered"
+            self._conversion_run_base_session = None
+            self._conversion_run_queue = None
+            self._apply_conversion_draft_to_controls()
+            self.conversion_output_dir_var.set(str(session.output_directory))
+            self.batch_concurrency_var.set(session.max_workers)
+            self.conversion_workspace.set_task_records(session.tasks)
+            self._sync_conversion_task_to_tray(
+                session,
+                active=False,
+                detail="已从上次退出时的转换检查点恢复",
+            )
+            self._conversion_queue_changed(session.queue_items)
+            self.conversion_recipe_status_var.set(
+                f"已恢复：{session.recipe.name} · {len(session.recipe.steps)} 个步骤"
+            )
+            self.mode_router.switch(ModeId.CONVERT)
+        finally:
+            self._restoring_conversion_session = False
+        self.conversion_job_status_var.set("转图会话已恢复；点击“开始转换”只继续未完成或失败任务")
+        self._refresh_preview()
+        self._update_estimate()
+
+    def _update_conversion_buttons(self) -> None:
+        if not hasattr(self, "conversion_start_button"):
+            return
+        running = self._conversion_thread is not None and self._conversion_thread.is_alive()
+        can_start = bool(self.conversion_workspace.queue.enabled_items) and not running
+        self.conversion_start_button.state(("!disabled",) if can_start else ("disabled",))
+        self.conversion_cancel_button.state(("!disabled",) if running else ("disabled",))
+
+    def _show_inspector_tab(self, section: str, *, sync_mode: bool = True) -> None:
+        groups = getattr(self, "inspector_groups", {})
+        if section not in groups:
+            return
+        if sync_mode:
+            target_mode = ModeId.CONVERT if section == "convert" else ModeId.EDIT
+            if target_mode is ModeId.EDIT:
+                self.mode_router.update_state({"inspector_tab": section}, mode=ModeId.EDIT)
+            if self.mode_router.active_mode is not target_mode:
+                self.mode_router.switch(target_mode)
+        self.active_inspector_tab = section
+        for name, widgets in groups.items():
+            for widget in widgets:
+                if name == section:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+        if section == "adjust" and not self.detail_expanded_var.get():
+            for widget in self.detail_advanced_widgets:
+                widget.grid_remove()
+        self.inspector_tabs.select(section)
+        self.panel_canvas.yview_moveto(0.0)
+
+    def _apply_material_look(self, look: str) -> None:
+        presets = {
+            "original": (0, 0, 0, 0, False),
+            "vivid": (6, 14, 22, 2, False),
+            "warm": (4, 6, 12, 18, False),
+            "mono": (0, 12, 0, 0, True),
+        }
+        brightness, contrast, saturation, temperature, grayscale = presets.get(
+            look, presets["original"]
+        )
+        self.brightness_var.set(brightness)
+        self.contrast_var.set(contrast)
+        self.saturation_var.set(saturation)
+        self.temperature_var.set(temperature)
+        self.grayscale_var.set(grayscale)
+        self._live_adjust()
+
+    def _toggle_auto_adjust(self) -> None:
+        self.auto_contrast_var.set(not self.auto_contrast_var.get())
+        self.auto_adjust_button.set_selected(self.auto_contrast_var.get())
+        self._live_adjust()
+
+    def _reset_color_controls(self) -> None:
+        self.temperature_var.set(0)
+        self.saturation_var.set(0)
+        self.tint_var.set(0)
+        if self.document is None:
+            self._live_adjust()
+            return
+        self._advanced_color_changed("temperature", 0)
+        self._set_document_edit_field("saturation", 0)
+        self._advanced_color_changed("tint", 0)
+        self.status_var.set("颜色参数已重置")
+
+    def _toggle_detail_section(self) -> None:
+        expanded = not self.detail_expanded_var.get()
+        self.detail_expanded_var.set(expanded)
+        self.detail_toggle_button.configure(text="细节  ⌃" if expanded else "细节  ⌄")
+        if expanded:
+            self.detail_body.grid()
+            for widget in self.detail_advanced_widgets:
+                widget.grid()
+        else:
+            self.detail_body.grid_remove()
+            for widget in self.detail_advanced_widgets:
+                widget.grid_remove()
+        self.panel_canvas.configure(scrollregion=self.panel_canvas.bbox("all"))
+
+    def _place_command_dock(self) -> None:
+        self.command_dock.place(
+            in_=self,
+            relx=0.5,
+            rely=1.0,
+            y=-12,
+            anchor="s",
+            width=690,
+            height=64,
+        )
+
+    def _place_canvas_status(self) -> None:
+        self.status_label.place(relx=0.0, rely=1.0, x=16, y=-16, anchor="sw")
+        self.canvas_metadata.place(relx=1.0, rely=1.0, x=-16, y=-16, anchor="se")
+
+    def _show_app_menu(self) -> None:
+        anchor = (
+            self.dock_menu_button if self.dock_menu_button.winfo_ismapped() else self.menu_button
+        )
+        x = anchor.winfo_rootx() + anchor.winfo_width()
+        y = anchor.winfo_rooty() + anchor.winfo_height()
+        try:
+            self.menu_bar.tk_popup(x, y)
+        finally:
+            self.menu_bar.grab_release()
+
+    def _show_feature_palette(self) -> None:
+        window = self._feature_palette_window
+        if window is not None:
+            try:
+                if window.winfo_exists():
+                    window.deiconify()
+                    window.lift()
+                    window.focus_search()
+                    return
+            except tk.TclError:
+                pass
+        self._feature_palette_window = FeatureCommandPalette(
+            self,
+            self.feature_registry,
+            active_mode=self.mode_router.active_mode,
+            on_invoke=self.invoke_feature,
+            on_closed=self._feature_palette_closed,
+        )
+        self._fit_dialog(self._feature_palette_window, 860, 650)
+        tokens = self.theme_manager.apply(self.theme_mode_var.get())
+        self._feature_palette_window.apply_tokens(tokens)
+        self._name_interactive_widgets(self._feature_palette_window)
+
+    def _feature_palette_closed(self) -> None:
+        self._feature_palette_window = None
+
+    def _show_pan_hint(self) -> None:
+        self.canvas.focus_set()
+        self.status_var.set("按住鼠标中键或右键拖动画布")
+
+    def _toggle_dock_compare(self) -> None:
+        self.compare_original.set(not self.compare_original.get())
+        self.dock_compare_button.set_selected(self.compare_original.get())
+        self._toggle_compare_original()
+
+    def _toggle_dock_split_compare(self) -> None:
+        self.split_compare_var.set(not self.split_compare_var.get())
+        self.dock_split_button.set_selected(self.split_compare_var.get())
+        self._toggle_split_compare()
 
     def _build_menu(self) -> None:
         self.menu_bar = tk.Menu(self)
         file_menu = tk.Menu(self.menu_bar, tearoff=False)
         file_menu.add_command(label="打开...", accelerator="Ctrl+O", command=self.open_file)
+        file_menu.add_command(
+            label="打开文件夹...",
+            accelerator="Ctrl+Shift+O",
+            command=self.open_directory,
+        )
         file_menu.add_command(label="打开编辑项目...", command=self.open_project_dialog)
         file_menu.add_command(
             label="从剪贴板粘贴", accelerator="Ctrl+V", command=self.paste_from_clipboard
@@ -1335,6 +8773,10 @@ class ImageEditorApp(tk.Tk):
 
         info_menu = tk.Menu(self.menu_bar, tearoff=False)
         info_menu.add_command(
+            label="全部功能...", accelerator="Ctrl+K", command=self._show_feature_palette
+        )
+        info_menu.add_separator()
+        info_menu.add_command(
             label="图片属性", accelerator="Alt+Enter", command=self.show_properties
         )
         info_menu.add_command(label="导出问题报告...", command=self.export_diagnostic_report)
@@ -1401,22 +8843,23 @@ class ImageEditorApp(tk.Tk):
     def _slider(
         self, parent: tk.Misc, label: str, var: tk.IntVar, start: int, end: int, row: int, command
     ) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=5)
+        ttk.Label(parent, text=label, style="LibraryMeta.TLabel").grid(
+            row=row, column=0, sticky="w", pady=1
+        )
         frame = ttk.Frame(parent)
-        frame.grid(row=row, column=1, sticky="ew", pady=5)
+        frame.grid(row=row, column=1, sticky="ew", pady=1)
         frame.columnconfigure(0, weight=1)
-        scale = ttk.Scale(
+        scale = MaterialSlider(
             frame,
             from_=start,
             to=end,
-            orient="horizontal",
             variable=var,
-            command=lambda _v: command(),
+            command=command,
         )
         scale.grid(row=0, column=0, sticky="ew")
-        scale.bind("<ButtonPress-1>", self._begin_slider_command)
-        scale.bind("<ButtonRelease-1>", self._end_slider_command)
-        ttk.Label(frame, textvariable=var, width=4).grid(row=0, column=1, sticky="e")
+        scale.bind("<<MaterialSliderStart>>", self._begin_slider_command)
+        scale.bind("<<MaterialSliderEnd>>", self._end_slider_command)
+        ttk.Label(frame, textvariable=var, width=4, anchor="e").grid(row=0, column=1, sticky="e")
 
     def _begin_slider_command(self, _event: tk.Event) -> None:
         self._active_slider_merge_key = uuid.uuid4().hex
@@ -1425,43 +8868,56 @@ class ImageEditorApp(tk.Tk):
         self._active_slider_merge_key = None
 
     def _action_callback(self, action: str):
-        actions = {
-            "open": self.open_file,
-            "save": self.save_as,
-            "save_project": self.save_project_dialog,
-            "undo": self.undo,
-            "redo": self.redo,
-            "rotate_right": lambda: self.rotate(90),
-            "select": lambda: self._set_annotation_tool("select"),
-            "crop": lambda: self._set_annotation_tool("crop"),
-            "text": lambda: self._set_annotation_tool("text"),
-            "arrow": lambda: self._set_annotation_tool("arrow"),
-            "rectangle": lambda: self._set_annotation_tool("rectangle"),
-            "mosaic": lambda: self._set_annotation_tool("mosaic"),
-            "blur": lambda: self._set_annotation_tool("blur"),
+        feature_ids = {
+            "open": "viewer.open",
+            "save": "convert.save_as",
+            "save_project": "global.save_project",
+            "undo": "edit.undo",
+            "redo": "edit.redo",
+            "rotate_right": "convert.rotate",
+            "select": "edit.annotation.select",
+            "crop": "convert.crop",
+            "text": "edit.annotation.text",
+            "arrow": "edit.annotation.arrow",
+            "rectangle": "edit.annotation.rectangle",
+            "mosaic": "edit.annotation.mosaic",
+            "blur": "edit.annotation.blur",
         }
-        return actions[action]
+        return partial(self.invoke_feature, feature_ids[action])
 
     def _refresh_favorite_toolbar(self) -> None:
         if not hasattr(self, "favorite_toolbar"):
             return
         for child in self.favorite_toolbar.winfo_children():
             child.destroy()
-        ttk.Label(self.favorite_toolbar, text="收藏：").grid(row=0, column=0, padx=(0, 5))
+        ttk.Label(
+            self.favorite_toolbar,
+            text="收藏工具",
+            style="Eyebrow.TLabel",
+        ).grid(row=0, column=0, padx=(0, 7))
         labels = {key: label for key, label, _shortcut in ACTION_CATALOG}
         for column, action in enumerate(self.favorite_actions, start=1):
             if action not in labels:
                 continue
-            ttk.Button(
+            button = MaterialButton(
                 self.favorite_toolbar,
                 text=labels[action],
                 command=self._action_callback(action),
-            ).grid(row=0, column=column, padx=(0, 4))
-        ttk.Button(
+                width=max(52, len(labels[action]) * 14 + 20),
+                height=28,
+            )
+            button.grid(row=0, column=column, padx=1)
+            set_accessible_name(button, f"收藏工具：{labels[action]}")
+        configure_button = MaterialButton(
             self.favorite_toolbar,
             text="配置…",
             command=self.configure_workflow,
-        ).grid(row=0, column=len(self.favorite_actions) + 1, padx=(8, 0))
+            width=58,
+            height=28,
+            variant="text",
+        )
+        configure_button.grid(row=0, column=len(self.favorite_actions) + 1, padx=(7, 0))
+        set_accessible_name(configure_button, "配置收藏工具与快捷键")
 
     def _apply_custom_shortcuts(self) -> None:
         for sequence in self._custom_bound_sequences:
@@ -1567,13 +9023,7 @@ class ImageEditorApp(tk.Tk):
             "dark": self.localizer.gettext("theme_dark"),
         }
         theme_by_label = {label: key for key, label in theme_labels.items()}
-        locale_labels = {
-            locale: str(self.localizer.catalogs[locale].get("display_name", locale))
-            for locale in SUPPORTED_LOCALES
-        }
-        locale_by_label = {label: key for key, label in locale_labels.items()}
         selected_theme = tk.StringVar(value=theme_labels[self.theme_mode_var.get()])
-        selected_locale = tk.StringVar(value=locale_labels[self.locale_var.get()])
         selected_workers = tk.IntVar(value=self.decode_workers_var.get())
         selected_cache = tk.IntVar(value=self.preview_cache_var.get())
 
@@ -1604,17 +9054,6 @@ class ImageEditorApp(tk.Tk):
             values=tuple(theme_labels.values()),
         )
         theme_box.grid(row=0, column=1, sticky="ew", pady=8)
-        ttk.Label(general, text=self.localizer.gettext("language")).grid(
-            row=1, column=0, sticky="w", padx=(0, 18), pady=8
-        )
-        language_box = ttk.Combobox(
-            general,
-            state="readonly",
-            textvariable=selected_locale,
-            values=tuple(locale_labels.values()),
-        )
-        language_box.grid(row=1, column=1, sticky="ew", pady=8)
-
         performance.columnconfigure(1, weight=1)
         ttk.Label(performance, text=self.localizer.gettext("decode_workers")).grid(
             row=0, column=0, sticky="w", padx=(0, 18), pady=8
@@ -1664,7 +9103,7 @@ class ImageEditorApp(tk.Tk):
 
         ttk.Label(
             privacy,
-            text=privacy_summary(self.locale_var.get()),
+            text=privacy_summary(),
             wraplength=600,
             justify="left",
         ).pack(anchor="w")
@@ -1734,18 +9173,15 @@ class ImageEditorApp(tk.Tk):
 
         def apply_settings() -> None:
             theme_mode = theme_by_label.get(selected_theme.get(), "system")
-            locale = locale_by_label.get(selected_locale.get(), "zh-CN")
             self.theme_mode_var.set(theme_mode)
-            self.locale_var.set(locale)
             self.decode_workers_var.set(
                 bounded_int(selected_workers, self.decode_workers_var.get(), 1, 8)
             )
             self.preview_cache_var.set(
                 bounded_int(selected_cache, self.preview_cache_var.get(), 1, 20)
             )
-            self.localizer.set_locale(locale, self)
-            self.thumbnail_sidebar.set_title(self.localizer.gettext("thumbnail_directory"))
-            self.title(self.localizer.translate_text(APP_NAME))
+            self.thumbnail_sidebar.set_title("资源库")
+            self._set_window_title(self.localizer.translate_text(APP_NAME))
             tokens = self.theme_manager.apply(theme_mode)
             self._last_theme_name = tokens.name
             self._apply_thumbnail_palette(tokens)
@@ -1932,6 +9368,7 @@ class ImageEditorApp(tk.Tk):
         fixed_actions = (
             ("设置", "Ctrl+,"),
             ("快捷键帮助", "F1"),
+            ("全部功能", "Ctrl+K"),
             ("切换焦点区域", "F6 / Shift+F6"),
             ("上一张 / 下一张", "← / →"),
             ("第一页 / 最后一页", "Home / End"),
@@ -2035,6 +9472,7 @@ class ImageEditorApp(tk.Tk):
 
     def _bind_shortcuts(self) -> None:
         self.bind("<Control-o>", lambda _event: self.open_file())
+        self.bind("<Control-Shift-o>", lambda _event: self.open_directory())
         self.bind(
             "<Control-v>",
             lambda _event: self._guarded_text_key_action(self.paste_from_clipboard),
@@ -2073,6 +9511,7 @@ class ImageEditorApp(tk.Tk):
         self.bind("<Control-Shift-E>", lambda _event: self.reveal_current())
         self.bind("<Alt-Return>", lambda _event: self.show_properties())
         self.bind("<Control-comma>", lambda _event: self.open_settings())
+        self.bind("<Control-k>", lambda _event: self._show_feature_palette())
         self.bind("<F1>", lambda _event: self.show_shortcut_help())
         self.bind("<F6>", lambda _event: self.focus_navigator.move())
         self.bind("<Shift-F6>", lambda _event: self.focus_navigator.move(reverse=True))
@@ -2156,6 +9595,21 @@ class ImageEditorApp(tk.Tk):
                     name, bool(current.get())
                 ),
             )
+        for variable in (
+            self.batch_rename_template_var,
+            self.batch_conflict_var,
+            self.batch_strip_metadata_var,
+            self.batch_preserve_animation_var,
+            self.conversion_background_var,
+        ):
+            variable.trace_add(
+                "write",
+                lambda *_args: self._update_conversion_draft_from_controls(),
+            )
+        self.conversion_output_dir_var.trace_add(
+            "write",
+            lambda *_args: self._conversion_output_directory_changed(),
+        )
         edit_fields = (
             (self.brightness_var, "brightness"),
             (self.contrast_var, "contrast"),
@@ -2173,7 +9627,12 @@ class ImageEditorApp(tk.Tk):
             )
 
     def _set_document_field(self, field: str, value: object) -> None:
-        if self._syncing_document or self.document is None:
+        if self._syncing_document:
+            return
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            self._update_conversion_draft_from_controls()
+            return
+        if self.document is None:
             return
         self.document.update_state(f"set_{field}", **{field: value})
         if field in {"width_text", "height_text", "max_side_text"}:
@@ -2200,6 +9659,15 @@ class ImageEditorApp(tk.Tk):
                 merge=True,
                 refresh=True,
             )
+
+    def _conversion_output_directory_changed(self) -> None:
+        if (
+            self._syncing_document
+            or self._restoring_conversion_session
+            or self.mode_router.active_mode is not ModeId.CONVERT
+        ):
+            return
+        self._invalidate_conversion_session()
 
     def _commit_resize_from_state(self) -> None:
         if self.document is None:
@@ -2561,6 +10029,7 @@ class ImageEditorApp(tk.Tk):
         if tree.exists(iid):
             tree.selection_set(iid)
             tree.see(iid)
+        self._sync_mode_handoff()
 
     def _history_selected(self, _event: tk.Event) -> None:
         if self.document is None:
@@ -2583,8 +10052,10 @@ class ImageEditorApp(tk.Tk):
     def _draw_histogram(self, image: Image.Image) -> None:
         if not hasattr(self, "histogram_canvas"):
             return
-        values = histogram(image)
         canvas = self.histogram_canvas
+        if not canvas.winfo_ismapped():
+            return
+        values = histogram(image, max_pixels=262_144)
         canvas.delete("all")
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
@@ -2616,11 +10087,6 @@ class ImageEditorApp(tk.Tk):
 
     def _load_config(self) -> None:
         data = self.settings_store.load_migrated()
-        locale = str(data.get("locale", "zh-CN"))
-        if locale not in SUPPORTED_LOCALES:
-            locale = "zh-CN"
-        self.locale_var.set(locale)
-        self.localizer.set_locale(locale)
         theme_mode = str(data.get("theme_mode", "system"))
         self.theme_mode_var.set(
             theme_mode if theme_mode in {"system", "light", "dark"} else "system"
@@ -2651,6 +10117,122 @@ class ImageEditorApp(tk.Tk):
         self.recent_export_directories = _string_list_setting(
             data.get("recent_export_directories", [])
         )
+        self.generation_prompt_history = list(
+            dict.fromkeys(
+                prompt.strip()
+                for prompt in _string_list_setting(data.get("generation_prompt_history", []))
+                if prompt.strip()
+            )
+        )[:20]
+        self.generation_candidate_revision_ids = list(
+            dict.fromkeys(
+                revision_id.strip()
+                for revision_id in _string_list_setting(
+                    data.get("generation_candidate_revision_ids", [])
+                )
+                if revision_id.strip()
+            )
+        )[:12]
+        self.generation_favorite_revision_ids = list(
+            dict.fromkeys(
+                revision_id.strip()
+                for revision_id in _string_list_setting(
+                    data.get("generation_favorite_revision_ids", [])
+                )
+                if revision_id.strip()
+            )
+        )[:128]
+        raw_favorites_only = data.get("generation_favorites_only", False)
+        self.generate_favorites_only_var.set(
+            raw_favorites_only if isinstance(raw_favorites_only, bool) else False
+        )
+        raw_task_tray_items = data.get("task_tray_items", [])
+        self.task_tray_settings = (
+            [dict(item) for item in raw_task_tray_items if isinstance(item, dict)][:50]
+            if isinstance(raw_task_tray_items, list)
+            else []
+        )
+        self.generation_reference_revision_id = str(
+            data.get("generation_reference_revision_id", "") or ""
+        ).strip()
+        self.generate_negative_prompt_var.set(
+            str(data.get("generation_negative_prompt", "") or "")[:10_000]
+        )
+        provider_display_name = str(
+            data.get(
+                "generation_provider_display_name",
+                self.generation_provider_catalog.default().display_name,
+            )
+        )
+        try:
+            self.generation_provider_catalog.by_display_name(provider_display_name)
+        except KeyError:
+            provider_display_name = self.generation_provider_catalog.default().display_name
+        self.generate_provider_var.set(provider_display_name)
+        reference_role = str(data.get("generation_reference_role", "内容"))
+        self.generate_reference_role_var.set(
+            reference_role if reference_role in GENERATION_REFERENCE_ROLES else "内容"
+        )
+        self.generate_reference_strength_var.set(
+            _bounded_setting_int(
+                data.get("generation_reference_strength", 50),
+                50,
+                0,
+                100,
+            )
+        )
+        raw_generation_references = data.get("generation_references", [])
+        generation_reference_settings: list[tuple[str, str, float]] = []
+        seen_reference_revision_ids: set[str] = set()
+        if isinstance(raw_generation_references, list):
+            for item in raw_generation_references:
+                if not isinstance(item, dict):
+                    continue
+                revision_id = str(item.get("revision_id", "") or "").strip()
+                role = str(item.get("role", "content") or "content")
+                raw_strength = item.get("strength", 0.5)
+                if (
+                    not revision_id
+                    or revision_id in seen_reference_revision_ids
+                    or role not in GENERATION_REFERENCE_ROLE_LABELS
+                    or isinstance(raw_strength, bool)
+                    or not isinstance(raw_strength, (int, float))
+                ):
+                    continue
+                strength = float(raw_strength)
+                if strength != strength or not 0 <= strength <= 1:
+                    continue
+                generation_reference_settings.append((revision_id, role, strength))
+                seen_reference_revision_ids.add(revision_id)
+                if len(generation_reference_settings) == 4:
+                    break
+        if not generation_reference_settings and self.generation_reference_revision_id:
+            generation_reference_settings.append(
+                (
+                    self.generation_reference_revision_id,
+                    GENERATION_REFERENCE_ROLES.get(
+                        self.generate_reference_role_var.get(),
+                        "content",
+                    ),
+                    self.generate_reference_strength_var.get() / 100,
+                )
+            )
+        self.generation_reference_settings = generation_reference_settings
+        style_preset = str(data.get("generation_style_preset", "无"))
+        self.generate_style_preset_var.set(
+            style_preset if style_preset in GENERATION_STYLE_PRESETS else "无"
+        )
+        self.generate_seed_enabled_var.set(bool(data.get("generation_seed_enabled", False)))
+        self.generate_seed_var.set(
+            str(
+                _bounded_setting_int(
+                    data.get("generation_seed", 0),
+                    0,
+                    0,
+                    4_294_967_295,
+                )
+            )
+        )
         known_actions = {key for key, _label, _shortcut in ACTION_CATALOG}
         favorites = data.get("favorite_actions", self.favorite_actions)
         if isinstance(favorites, list):
@@ -2671,7 +10253,7 @@ class ImageEditorApp(tk.Tk):
         if saved_tool in ANNOTATION_TOOL_LABELS:
             self.annotation_tool_var.set(saved_tool)
             self.current_tool_label_var.set(f"当前：{ANNOTATION_TOOL_LABELS[saved_tool]}")
-        self.edit_panel_visible_var.set(bool(data.get("edit_panel_visible", False)))
+        self.edit_panel_visible_var.set(bool(data.get("edit_panel_visible", True)))
         self.thumbnail_sidebar_visible_var.set(bool(data.get("thumbnail_sidebar_visible", True)))
         self.slideshow_interval_var.set(
             _bounded_setting_float(data.get("slideshow_interval", 3.0), 3.0, 0.5, 3600.0)
@@ -2696,12 +10278,35 @@ class ImageEditorApp(tk.Tk):
         geometry = data.get("window_geometry", "")
         self._saved_geometry = str(geometry) if isinstance(geometry, str) else ""
 
+    def _schedule_config_save(self, delay_ms: int = 400) -> None:
+        """Coalesce high-frequency settings changes onto one idle disk write."""
+
+        if self._services_shutdown:
+            return
+        self._cancel_scheduled_config_save()
+        self._config_save_job = self.after(delay_ms, self._flush_scheduled_config_save)
+
+    def _flush_scheduled_config_save(self) -> None:
+        self._config_save_job = None
+        self._save_config()
+
+    def _cancel_scheduled_config_save(self) -> None:
+        job = self._config_save_job
+        self._config_save_job = None
+        if job is None:
+            return
+        try:
+            self.after_cancel(job)
+        except tk.TclError:
+            pass
+
     def _save_config(self) -> None:
+        self._cancel_scheduled_config_save()
         data = self.settings_store.load_migrated()
+        data.pop("locale", None)
         data.update(
             {
                 "schema_version": SETTINGS_SCHEMA_VERSION,
-                "locale": self.locale_var.get(),
                 "theme_mode": self.theme_mode_var.get(),
                 "decode_workers": self.decode_workers_var.get(),
                 "preview_cache": self.preview_cache_var.get(),
@@ -2722,6 +10327,31 @@ class ImageEditorApp(tk.Tk):
                 "recent_directories": self.recent_directories[:8],
                 "recent_projects": self.recent_projects[:8],
                 "recent_export_directories": self.recent_export_directories[:8],
+                "generation_prompt_history": self.generation_prompt_history[:20],
+                "generation_candidate_revision_ids": self.generation_candidate_revision_ids[:12],
+                "generation_favorite_revision_ids": self.generation_favorite_revision_ids[:128],
+                "generation_favorites_only": self.generate_favorites_only_var.get(),
+                "task_tray_items": (
+                    [item.to_json() for item in self.task_tray.items]
+                    if hasattr(self, "task_tray")
+                    else list(self.task_tray_settings)
+                ),
+                "generation_reference_revision_id": self.generation_reference_revision_id,
+                "generation_references": [
+                    {
+                        "revision_id": reference.revision.revision_id,
+                        "role": reference.role,
+                        "strength": reference.strength,
+                    }
+                    for reference in self._generation_references
+                ],
+                "generation_negative_prompt": self.generate_negative_prompt_var.get()[:10_000],
+                "generation_provider_display_name": self.generate_provider_var.get(),
+                "generation_reference_role": self.generate_reference_role_var.get(),
+                "generation_reference_strength": self.generate_reference_strength_var.get(),
+                "generation_style_preset": self.generate_style_preset_var.get(),
+                "generation_seed_enabled": self.generate_seed_enabled_var.get(),
+                "generation_seed": self.generate_seed_var.get().strip(),
                 "favorite_actions": self.favorite_actions,
                 "custom_shortcuts": self.custom_shortcuts,
                 "restore_workspace": self.restore_workspace_var.get(),
@@ -2745,12 +10375,25 @@ class ImageEditorApp(tk.Tk):
         )
         self.settings_store.save(data)
 
-    def _on_configure(self, _event: tk.Event) -> None:
-        if not self._is_fullscreen and not self._is_immersive:
+    def _on_configure(self, event: tk.Event) -> None:
+        # Child widgets also carry the toplevel bind tag.  Re-rendering the image
+        # for every inspector/thumbnail configure event creates a preview queue
+        # behind the user's next navigation click.
+        canvas = getattr(self, "canvas", None)
+        if event.widget is not self and event.widget is not canvas:
+            return
+        custom_maximized = bool(self.window_controller and self.window_controller.maximized)
+        if (
+            event.widget is self
+            and not self._is_fullscreen
+            and not self._is_immersive
+            and not custom_maximized
+        ):
             self._saved_geometry = self.geometry()
         dpi_changed = self.dpi_manager.refresh()
         if dpi_changed:
             self._update_monitor_constraints()
+            self.dpi_manager.constrain_to_current_work_area()
             self.theme_manager.apply(self.theme_mode_var.get())
         if self.original is None:
             self.after_idle(self._show_empty_state)
@@ -2775,6 +10418,52 @@ class ImageEditorApp(tk.Tk):
             return
         self.open_paths(paths, confirm=False)
 
+    def open_directory(self) -> None:
+        if not self._confirm_discard_changes():
+            return
+        selected = filedialog.askdirectory(
+            title="选择图片文件夹",
+            initialdir=(
+                str(self.image_path.parent)
+                if self.image_path is not None
+                else self.recent_directories[0]
+                if self.recent_directories
+                else None
+            ),
+        )
+        if selected:
+            self.open_directory_path(selected, confirm=False)
+
+    def open_directory_path(
+        self,
+        path: str | Path,
+        *,
+        confirm: bool = True,
+    ) -> bool:
+        directory = Path(path)
+        if confirm and not self._confirm_discard_changes():
+            return False
+        files = iter_image_files([directory]) if directory.is_dir() else []
+        if not files:
+            self.status_var.set("所选文件夹中没有可打开的图片")
+            messagebox.showwarning(APP_NAME, "所选文件夹中没有可打开的受支持图片。")
+            return False
+        self._disable_file_comparison(
+            announce=False,
+            refresh=False,
+            resume_animation=False,
+        )
+        self.stop_slideshow()
+        self.navigation = NavigationSession(
+            [file.resolve() for file in files],
+            source_label=str(directory.resolve()),
+        )
+        self.thumbnail_sidebar.set_paths(self.navigation.files, self.navigation.current)
+        self._failed_navigation_paths.clear()
+        assert self.navigation.current is not None
+        self._begin_image_load(self.navigation.current, notify_error=True)
+        return True
+
     def open_project_dialog(self) -> None:
         path = filedialog.askopenfilename(
             title="打开编辑项目",
@@ -2786,6 +10475,11 @@ class ImageEditorApp(tk.Tk):
     def open_project_path(self, path: str | Path, *, confirm: bool = True) -> None:
         if confirm and not self._confirm_discard_changes():
             return
+        self._disable_file_comparison(
+            announce=False,
+            refresh=False,
+            resume_animation=False,
+        )
         project_path = Path(path)
         try:
             loaded = load_project(project_path)
@@ -2829,6 +10523,7 @@ class ImageEditorApp(tk.Tk):
             return
         self.stop_slideshow()
         self.document = loaded.document
+        self._reset_smart_edit_for_new_document()
         self.original = loaded.document.image
         self.image_path = loaded.document.source_path
         self.navigation = NavigationSession.from_activation([self.image_path])
@@ -2905,6 +10600,11 @@ class ImageEditorApp(tk.Tk):
             return
         if confirm and not self._confirm_discard_changes():
             return
+        self._disable_file_comparison(
+            announce=False,
+            refresh=False,
+            resume_animation=False,
+        )
         session = NavigationSession.from_activation(paths)
         if session.current is None:
             self.status_var.set("没有找到可打开的受支持图片")
@@ -2943,7 +10643,7 @@ class ImageEditorApp(tk.Tk):
         self._load_generation += 1
         generation = self._load_generation
         self.status_var.set(f"正在后台解码：{path.name}")
-        future = self.image_loader.load(path)
+        future = self.image_loader.load(path, take_cached=True)
         self.after(
             10,
             lambda: self._poll_image_load(
@@ -2989,13 +10689,26 @@ class ImageEditorApp(tk.Tk):
             return
 
         self.document = Document.from_decoded(image, path, self._new_document_state(image))
+        self._reset_smart_edit_for_new_document()
         self._last_failed_path = None
         self._last_source_status = "unchanged"
         self.original = self.document.image
         self.image_path = self.document.source_path
+        exited_duplicate_comparison = bool(
+            self.file_compare_var.get()
+            and self._comparison_path is not None
+            and self._same_path(path, self._comparison_path)
+        )
+        if exited_duplicate_comparison:
+            self._disable_file_comparison(
+                announce=False,
+                refresh=False,
+                resume_animation=False,
+            )
         self._load_current_image(path.name)
         self._remember_file(path)
-        self.status_var.set(f"图片已载入 · {self.navigation.source_label or path.parent}")
+        suffix = " · 已退出重复的双图对比" if exited_duplicate_comparison else ""
+        self.status_var.set(f"图片已载入 · {path.name}{suffix}")
         self.image_loader.prefetch(self.navigation.neighbors())
         if self.document.metadata.is_animated:
             self._begin_animation_playback(path)
@@ -3083,7 +10796,8 @@ class ImageEditorApp(tk.Tk):
         self.selected_annotation_id = None
         self.clean_signature = None
         self.info_var.set(f"未载入 · {failed_path.name}")
-        self.title(f"{failed_path.name} — {APP_NAME}")
+        self._set_window_title(f"{failed_path.name} — {APP_NAME}")
+        self._invalidate_asset_registration()
 
     def _image_info_text(self) -> str:
         if self.original is None:
@@ -3100,6 +10814,7 @@ class ImageEditorApp(tk.Tk):
         self._animation_generation += 1
         generation = self._animation_generation
         future = self.image_loader.load_animation(path)
+        self._animation_pending_future = future
         self.after(20, self._poll_animation_load, generation, future)
 
     def _poll_animation_load(
@@ -3115,16 +10830,163 @@ class ImageEditorApp(tk.Tk):
         try:
             self._animation_sequence = future.result()
         except Exception as error:
+            self._animation_pending_future = None
             self.status_var.set(f"动画首帧可查看，但多帧播放不可用：{error}")
+            self._update_animation_controls()
             return
+        self._animation_pending_future = None
         self._animation_index = 0
+        self._animation_displayed_index = 0
+        self._animation_playing = (
+            self.mode_router.active_mode is ModeId.VIEWER and not self.file_compare_var.get()
+        )
+        self._animation_resume_on_viewer = self.mode_router.active_mode is not ModeId.VIEWER
+        self._animation_resume_after_file_compare = self.file_compare_var.get()
+        self._update_animation_controls()
+        if self._animation_playing:
+            self._show_animation_frame()
+
+    def _update_animation_controls(self) -> None:
+        sequence = self._animation_sequence
+        should_show = (
+            sequence is not None
+            and self.mode_router.active_mode is ModeId.VIEWER
+            and not self.file_compare_var.get()
+            and not self._is_immersive
+        )
+        if should_show:
+            self.animation_controls.place(relx=0.5, y=14, anchor="n")
+        else:
+            self.animation_controls.place_forget()
+        if sequence is None:
+            self.animation_position_var.set("动画未载入")
+            self.animation_frame_slider.minimum = 1.0
+            self.animation_frame_slider.maximum = 1.0
+            self.animation_frame_var.set(1)
+            return
+        self.animation_frame_slider.minimum = 1.0
+        self.animation_frame_slider.maximum = float(max(1, sequence.frame_count))
+        self.animation_frame_var.set(self._animation_displayed_index + 1)
+        self.animation_position_var.set(
+            f"第 {self._animation_displayed_index + 1} / {sequence.frame_count} 帧"
+        )
+        if self._animation_playing:
+            self.animation_play_button.set_text("暂停")
+            set_accessible_name(self.animation_play_button, "暂停动画")
+        else:
+            self.animation_play_button.set_text("播放")
+            set_accessible_name(self.animation_play_button, "播放动画")
+
+    def _cancel_animation_timer(self) -> None:
+        if self._animation_job is None:
+            return
+        try:
+            self.after_cancel(self._animation_job)
+        except tk.TclError:
+            pass
+        self._animation_job = None
+
+    def _animation_speed_factor(self) -> float:
+        return ANIMATION_SPEED_FACTORS.get(self.animation_speed_var.get(), 1.0)
+
+    def _animation_delay_ms(self, duration_ms: int) -> int:
+        """Scale one source-frame duration without mutating animation metadata."""
+
+        return max(10, round(max(1, duration_ms) / self._animation_speed_factor()))
+
+    def _animation_speed_changed(self, _event: tk.Event | None = None) -> None:
+        label = self.animation_speed_var.get()
+        if label not in ANIMATION_SPEED_FACTORS:
+            label = "1×"
+            self.animation_speed_var.set(label)
+        sequence = self._animation_sequence
+        if (
+            sequence is not None
+            and self._animation_playing
+            and self.mode_router.active_mode is ModeId.VIEWER
+            and not self.file_compare_var.get()
+        ):
+            self._cancel_animation_timer()
+            duration = sequence.durations[self._animation_displayed_index]
+            self._animation_job = self.after(
+                self._animation_delay_ms(duration),
+                self._show_animation_frame,
+            )
+        self.status_var.set(f"动画播放速度：{label}")
+
+    def _seek_animation_from_slider(self) -> None:
+        sequence = self._animation_sequence
+        if sequence is None:
+            self.animation_frame_var.set(1)
+            return
+        if self.file_compare_var.get() or self.mode_router.active_mode is not ModeId.VIEWER:
+            self.animation_frame_var.set(self._animation_displayed_index + 1)
+            self.status_var.set("请先退出双图对比并返回看图模式，再定位动画帧")
+            return
+        try:
+            requested = int(self.animation_frame_var.get())
+        except (tk.TclError, TypeError, ValueError):
+            requested = self._animation_displayed_index + 1
+        target = max(0, min(sequence.frame_count - 1, requested - 1))
+        self._animation_playing = False
+        self._animation_resume_on_viewer = False
+        self._animation_resume_after_file_compare = False
+        self._cancel_animation_timer()
+        self._animation_index = target
+        self._show_animation_frame()
+        self.status_var.set(f"已定位到第 {target + 1} 帧，动画已暂停")
+
+    def _toggle_animation_playback(self) -> None:
+        sequence = self._animation_sequence
+        if sequence is None:
+            return
+        if self.file_compare_var.get():
+            self.status_var.set("请先退出双图对比，再控制动画播放")
+            return
+        if self._animation_playing:
+            self._animation_playing = False
+            self._animation_resume_on_viewer = False
+            self._animation_resume_after_file_compare = False
+            self._cancel_animation_timer()
+            self._animation_index = self._animation_displayed_index
+            self._update_animation_controls()
+            return
+        self._animation_playing = True
+        self._animation_resume_on_viewer = False
+        self._animation_resume_after_file_compare = False
+        self._animation_index = (self._animation_displayed_index + 1) % sequence.frame_count
+        self._update_animation_controls()
+        self._show_animation_frame()
+
+    def _step_animation(self, direction: int) -> None:
+        sequence = self._animation_sequence
+        if sequence is None:
+            return
+        if self.file_compare_var.get():
+            self.status_var.set("请先退出双图对比，再逐帧查看动画")
+            return
+        self._animation_playing = False
+        self._animation_resume_on_viewer = False
+        self._animation_resume_after_file_compare = False
+        self._cancel_animation_timer()
+        self._animation_index = (
+            self._animation_displayed_index + (1 if direction >= 0 else -1)
+        ) % sequence.frame_count
         self._show_animation_frame()
 
     def _show_animation_frame(self) -> None:
+        self._animation_job = None
         sequence = self._animation_sequence
-        if sequence is None or self.document is None or self.document.timeline.cursor:
+        if self.file_compare_var.get() or self.mode_router.active_mode is not ModeId.VIEWER:
+            self._animation_playing = False
+            self._update_animation_controls()
             return
-        frame = sequence.frames[self._animation_index]
+        if sequence is None or self.document is None or self.document.timeline.cursor:
+            self._animation_playing = False
+            self._update_animation_controls()
+            return
+        index = self._animation_index % sequence.frame_count
+        frame = sequence.frames[index]
         canvas_w = max(100, self.canvas.winfo_width())
         canvas_h = max(100, self.canvas.winfo_height())
         zoom = self.zoom_mode.get()
@@ -3146,23 +11008,46 @@ class ImageEditorApp(tk.Tk):
             canvas_w,
             canvas_h,
         )
-        duration = sequence.durations[self._animation_index]
-        self._animation_index = (self._animation_index + 1) % sequence.frame_count
-        self._animation_job = self.after(duration, self._show_animation_frame)
+        self._animation_displayed_index = index
+        self._update_animation_controls()
+        if self._animation_playing:
+            duration = sequence.durations[index]
+            self._animation_index = (index + 1) % sequence.frame_count
+            self._animation_job = self.after(
+                self._animation_delay_ms(duration),
+                self._show_animation_frame,
+            )
 
     def _stop_animation_playback(self) -> None:
         self._animation_generation += 1
-        if self._animation_job is not None:
-            try:
-                self.after_cancel(self._animation_job)
-            except tk.TclError:
-                pass
-            self._animation_job = None
+        self._cancel_animation_timer()
+        pending = self._animation_pending_future
+        self._animation_pending_future = None
+        if pending is not None:
+            self._discard_animation_when_ready(pending)
         if self._animation_sequence is not None:
             for frame in self._animation_sequence.frames:
                 frame.close()
         self._animation_sequence = None
         self._animation_index = 0
+        self._animation_displayed_index = 0
+        self._animation_playing = False
+        self._animation_resume_on_viewer = False
+        self._animation_resume_after_file_compare = False
+        self._update_animation_controls()
+
+    @staticmethod
+    def _discard_animation_when_ready(future: Future[AnimationSequence]) -> None:
+        def discard(completed: Future[AnimationSequence]) -> None:
+            if completed.cancelled() or completed.exception() is not None:
+                return
+            for frame in completed.result().frames:
+                frame.close()
+
+        if future.done():
+            discard(future)
+        else:
+            future.add_done_callback(discard)
 
     def export_current_animation(self) -> None:
         if (
@@ -3250,6 +11135,11 @@ class ImageEditorApp(tk.Tk):
     def paste_from_clipboard(self) -> None:
         if not self._confirm_discard_changes():
             return
+        self._disable_file_comparison(
+            announce=False,
+            refresh=False,
+            resume_animation=False,
+        )
         try:
             clipboard = ImageGrab.grabclipboard()
         except Exception as exc:
@@ -3259,6 +11149,7 @@ class ImageEditorApp(tk.Tk):
         if isinstance(clipboard, Image.Image):
             copied = clipboard.copy()
             self.document = Document.from_decoded(copied, None, self._new_document_state(copied))
+            self._reset_smart_edit_for_new_document()
             self.document.base_revision = 1
             self.document.mark_recovered_dirty()
             self.original = self.document.image
@@ -3283,9 +11174,11 @@ class ImageEditorApp(tk.Tk):
             return
         self._clear_annotation_drag(redraw=False)
         self.selected_annotation_id = None
-        self.title(f"{display_name} — {APP_NAME}")
+        self._set_window_title(f"{display_name} — {APP_NAME}")
         self._apply_document_state(self.document.state)
         self._sync_controls_from_timeline()
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            self._apply_conversion_draft_to_controls()
         self.info_var.set(
             self._image_info_text()
             if self.image_path is not None
@@ -3294,8 +11187,21 @@ class ImageEditorApp(tk.Tk):
         self.crop_var.set("未设置裁剪")
         self.pan_offset = (0, 0)
         self.zoom_mode.set("适应")
+        # Synchronizing the many inspector variables can schedule a redundant
+        # preview through widget callbacks.  The direct render below is the only
+        # request needed for a newly loaded document.
+        if self._preview_job is not None:
+            try:
+                self.after_cancel(self._preview_job)
+            except tk.TclError:
+                pass
+            self._preview_job = None
         self._refresh_preview()
         self._refresh_history_panel()
+        if self.document.source_path is None:
+            self._invalidate_asset_registration()
+        else:
+            self._schedule_asset_registration(self.document.source_path)
         if not recovered:
             self._mark_clean()
 
@@ -3310,7 +11216,10 @@ class ImageEditorApp(tk.Tk):
         self.recent_directories = self.recent_directories[:8]
         self._refresh_recent_menu()
         self._refresh_recent_directory_menu()
-        self._save_config()
+        # Rapid next/previous navigation used to synchronously read and rewrite
+        # the complete settings file for every image.  Keep menus current while
+        # moving the disk write off the latency-critical navigation path.
+        self._schedule_config_save()
 
     def _remember_project(self, path: Path) -> None:
         value = str(path.resolve())
@@ -3333,13 +11242,17 @@ class ImageEditorApp(tk.Tk):
 
     def toggle_edit_panel(self) -> None:
         if self.edit_panel_visible_var.get():
-            self.edit_toolbar.grid()
-            self.panel_shell.grid()
-            self.status_var.set("编辑工具已展开")
+            if self.mode_router.active_mode is not ModeId.EDIT:
+                self.mode_router.switch(ModeId.EDIT)
+            else:
+                self.panel_shell.grid()
+            self.status_var.set("编辑器已展开")
         else:
-            self.edit_toolbar.grid_remove()
-            self.panel_shell.grid_remove()
-            self.status_var.set("已切换到简洁查看模式")
+            if self.mode_router.active_mode in {ModeId.CONVERT, ModeId.EDIT}:
+                self.mode_router.switch(ModeId.VIEWER)
+            else:
+                self.panel_shell.grid_remove()
+            self.status_var.set("编辑器已收起，画布空间已扩大")
         self._save_config()
         self._schedule_preview()
 
@@ -3350,12 +11263,19 @@ class ImageEditorApp(tk.Tk):
 
     def toggle_thumbnail_sidebar(self) -> None:
         if self.thumbnail_sidebar_visible_var.get() and not self._is_immersive:
-            self.thumbnail_sidebar.grid()
-            self.thumbnail_sidebar.select(self.navigation.current)
-            self.status_var.set("已显示当前目录缩略图")
+            if self.mode_router.active_mode is ModeId.CONVERT:
+                self.thumbnail_sidebar.grid_remove()
+                self.conversion_workspace.grid()
+                self.status_var.set("已显示转换任务队列")
+            else:
+                self.conversion_workspace.grid_remove()
+                self.thumbnail_sidebar.grid()
+                self.thumbnail_sidebar.select(self.navigation.current)
+                self.status_var.set("已显示当前目录缩略图")
         else:
             self.thumbnail_sidebar.grid_remove()
-            self.status_var.set("已隐藏缩略图侧栏")
+            self.conversion_workspace.grid_remove()
+            self.status_var.set("已隐藏左侧栏")
         self._save_config()
         self._schedule_preview()
 
@@ -3380,20 +11300,24 @@ class ImageEditorApp(tk.Tk):
             self._is_fullscreen = True
             self.config(menu="")
             self.toolbar.grid_remove()
-            self.edit_toolbar.grid_remove()
+            self.mode_bar.grid_remove()
             self.panel_shell.grid_remove()
             self.thumbnail_sidebar.grid_remove()
-            self.status_label.grid_remove()
+            self.conversion_workspace.grid_remove()
+            self.command_dock.place_forget()
+            self.status_label.place_forget()
+            self.canvas_metadata.place_forget()
         else:
             self._is_fullscreen = False
-            self.config(menu=self.menu_bar)
-            self.toolbar.grid()
-            self.status_label.grid()
+            self.config(menu="")
+            self.toolbar.grid_remove()
+            self.mode_bar.grid()
+            self._place_command_dock()
+            self._place_canvas_status()
             if self.thumbnail_sidebar_visible_var.get():
                 self.thumbnail_sidebar.grid()
-            if self.edit_panel_visible_var.get():
-                self.edit_toolbar.grid()
-                self.panel_shell.grid()
+            self._apply_mode_layout(self.mode_router.active_mode, announce=False)
+        self._update_animation_controls()
         self._schedule_preview()
 
     def _set_fullscreen_state(self, enabled: bool) -> bool:
@@ -3405,6 +11329,22 @@ class ImageEditorApp(tk.Tk):
                 max(16_384, self.winfo_screenwidth() * 4),
                 max(16_384, self.winfo_screenheight() * 4),
             )
+        if self.window_controller is not None:
+            if not self.window_controller.set_fullscreen(enabled):
+                self.dpi_manager.refresh()
+                self._update_monitor_constraints()
+                self.status_var.set("无法切换全屏：窗口控制器未响应")
+                return False
+            if self.window_titlebar is not None:
+                if enabled:
+                    self.window_titlebar.grid_remove()
+                else:
+                    self.window_titlebar.grid()
+            self.rounded_window_effect.schedule()
+            if not enabled:
+                self.dpi_manager.refresh()
+                self._update_monitor_constraints()
+            return True
         try:
             self.attributes("-fullscreen", enabled)
         except tk.TclError as error:
@@ -3430,6 +11370,8 @@ class ImageEditorApp(tk.Tk):
             self.selected_annotation_id = None
             self.selected_annotation_var.set("未选择标注")
             self._draw_annotation_overlay()
+        elif self.annotation_tool_var.get() == "crop" and self._crop_confirmation_available():
+            self._cancel_crop_interaction()
         else:
             self.reset_crop()
 
@@ -3514,6 +11456,7 @@ class ImageEditorApp(tk.Tk):
         except (OSError, ValueError) as error:
             messagebox.showerror(APP_NAME, f"重命名失败：{error}")
             return
+        parent_revision = self._current_asset_revision
         self.image_loader.invalidate(path)
         self.thumbnail_sidebar.invalidate(path)
         self.navigation.files[self.navigation.index] = target
@@ -3521,6 +11464,7 @@ class ImageEditorApp(tk.Tk):
         self.image_path = target
         if self.document is not None:
             self.document.rebind_source(target)
+        self._schedule_asset_registration(target, parent_revision=parent_revision)
         self.info_var.set(self._image_info_text())
         self._remember_file(target)
         self.status_var.set(f"已重命名为：{target.name}")
@@ -3551,9 +11495,12 @@ class ImageEditorApp(tk.Tk):
         except OSError as error:
             messagebox.showerror(APP_NAME, f"移动失败：{error}")
             return
+        parent_revision = self._current_asset_revision
         self.image_loader.invalidate(path)
         self.thumbnail_sidebar.invalidate(path)
         self.status_var.set(f"已移动到：{target}")
+        if parent_revision is not None:
+            self._asset_relocation_hint = (target.resolve(strict=False), parent_revision)
         self.open_paths([target], confirm=False)
 
     def delete_current_to_recycle_bin(self) -> None:
@@ -3581,6 +11528,7 @@ class ImageEditorApp(tk.Tk):
         self.session_store.clear()
         self.preview = None
         self.canvas.delete("all")
+        self._invalidate_asset_registration()
         if target is not None:
             self._begin_image_load(target, skip_direction=1)
         else:
@@ -3654,7 +11602,11 @@ class ImageEditorApp(tk.Tk):
         if not target:
             return
         try:
-            saved = self._save_document_image(Path(target), options)
+            saved = (
+                self._save_conversion_image(Path(target), options)
+                if self.mode_router.active_mode is ModeId.CONVERT
+                else self._save_document_image(Path(target), options)
+            )
             if saved is None:
                 return
             self._save_config()
@@ -3663,8 +11615,9 @@ class ImageEditorApp(tk.Tk):
             return
         self.status_var.set(f"已保存：{saved}")
         self._remember_export_directory(saved.parent)
-        self._mark_clean(saved)
-        self.session_store.clear()
+        if self.mode_router.active_mode is not ModeId.CONVERT:
+            self._mark_clean(saved)
+            self.session_store.clear()
         if self.reveal_after_save_var.get():
             self._reveal_file(saved)
 
@@ -3694,7 +11647,11 @@ class ImageEditorApp(tk.Tk):
             extension_for_format(options.output_format),
         )
         try:
-            saved = self._save_document_image(target, options)
+            saved = (
+                self._save_conversion_image(target, options)
+                if self.mode_router.active_mode is ModeId.CONVERT
+                else self._save_document_image(target, options)
+            )
             if saved is None:
                 return
             self._save_config()
@@ -3762,6 +11719,70 @@ class ImageEditorApp(tk.Tk):
                 )
                 return None
 
+    def _save_conversion_image(
+        self,
+        target: Path,
+        options: ExportOptions,
+    ) -> Path | None:
+        if self.original is None:
+            return None
+        recipe = self._active_conversion_recipe()
+        profile = recipe.export_profile
+        result = execute_transform_recipe(self.original, recipe)
+        allow_animation_flatten = False
+        allow_transparency_flatten = profile.transparency_background is not None
+        conflict_policy = ConflictPolicy.ERROR
+        try:
+            while True:
+                try:
+                    return save_image(
+                        result,
+                        target,
+                        options,
+                        metadata=(self.document.metadata if self.document is not None else None),
+                        source_path=(
+                            self.document.source_path if self.document is not None else None
+                        ),
+                        source_fingerprint=(
+                            self.document.source_fingerprint if self.document is not None else None
+                        ),
+                        conflict_policy=conflict_policy,
+                        backup_on_overwrite=profile.backup_on_overwrite,
+                        source_passthrough=False,
+                        allow_animation_flatten=allow_animation_flatten,
+                        allow_transparency_flatten=allow_transparency_flatten,
+                    )
+                except AnimationFlatteningRequired:
+                    if not messagebox.askyesno(
+                        APP_NAME,
+                        "这是动画图片。当前转换配方会输出单帧图片，是否继续？",
+                    ):
+                        return None
+                    allow_animation_flatten = True
+                except TransparencyFlatteningRequired:
+                    if not messagebox.askyesno(
+                        APP_NAME,
+                        "目标格式不支持透明通道，透明区域将使用白色背景。是否继续？",
+                    ):
+                        return None
+                    allow_transparency_flatten = True
+                except FileExistsError:
+                    if not messagebox.askyesno(
+                        APP_NAME,
+                        f"目标文件已存在：\n{target}\n\n是否覆盖？"
+                        + ("覆盖前会创建 .bak 备份。" if profile.backup_on_overwrite else ""),
+                    ):
+                        return None
+                    conflict_policy = ConflictPolicy.OVERWRITE
+                except SourceChangedError as error:
+                    messagebox.showerror(
+                        APP_NAME,
+                        f"{error}\n\n请另存为新文件，或重新打开源文件确认外部更改。",
+                    )
+                    return None
+        finally:
+            result.close()
+
     def copy_result(self) -> None:
         if self.original is None:
             messagebox.showinfo(APP_NAME, "请先打开一张图片。")
@@ -3771,11 +11792,17 @@ class ImageEditorApp(tk.Tk):
             return
         result: Image.Image | None = None
         try:
-            result = (
-                render_image(self.original, self.document.timeline)
-                if self.document
-                else prepare_image(self.original, options)
-            )
+            if self.mode_router.active_mode is ModeId.CONVERT:
+                result = execute_transform_recipe(
+                    self.original,
+                    self._active_conversion_recipe(),
+                )
+            else:
+                result = (
+                    render_image(self.original, self.document.timeline)
+                    if self.document
+                    else prepare_image(self.original, options)
+                )
             copy_image_to_clipboard(result)
             result_size = result.size
         except Exception as exc:
@@ -3794,10 +11821,24 @@ class ImageEditorApp(tk.Tk):
         state = self.document.state if self.document is not None else None
         try:
             prefix = validate_filename_affix(
-                "文件前缀", state.filename_prefix if state is not None else ""
+                "文件前缀",
+                (
+                    self.filename_prefix_var.get()
+                    if self.mode_router.active_mode is ModeId.CONVERT
+                    else state.filename_prefix
+                    if state is not None
+                    else ""
+                ),
             )
             suffix = validate_filename_affix(
-                "文件后缀", state.filename_suffix if state is not None else ""
+                "文件后缀",
+                (
+                    self.filename_suffix_var.get()
+                    if self.mode_router.active_mode is ModeId.CONVERT
+                    else state.filename_suffix
+                    if state is not None
+                    else ""
+                ),
             )
         except ValueError as exc:
             messagebox.showerror(APP_NAME, str(exc))
@@ -4299,6 +12340,14 @@ class ImageEditorApp(tk.Tk):
         self.batch_cancel_requested = True
         if self.batch_runner is not None:
             self.batch_runner.cancel()
+        if self._conversion_runner is not None:
+            self._conversion_runner.cancel()
+        if self._conversion_poll_job is not None:
+            try:
+                self.after_cancel(self._conversion_poll_job)
+            except tk.TclError:
+                pass
+            self._conversion_poll_job = None
         if hasattr(self, "batch_progress_text"):
             self.batch_progress_text.set("正在取消剩余任务...")
 
@@ -4393,11 +12442,63 @@ class ImageEditorApp(tk.Tk):
         if self._services_shutdown:
             return
         self._services_shutdown = True
+        if self._mode_unsubscribe is not None:
+            self._mode_unsubscribe()
+            self._mode_unsubscribe = None
+        if self._mock_generation_after is not None:
+            try:
+                self.after_cancel(self._mock_generation_after)
+            except tk.TclError:
+                pass
+            self._mock_generation_after = None
+        if self._mock_generation_job_id is not None:
+            self.ai_job_manager.cancel(self._mock_generation_job_id)
+        if self._smart_edit_after is not None:
+            try:
+                self.after_cancel(self._smart_edit_after)
+            except tk.TclError:
+                pass
+            self._smart_edit_after = None
+        if self._smart_background_compose_after is not None:
+            try:
+                self.after_cancel(self._smart_background_compose_after)
+            except tk.TclError:
+                pass
+            self._smart_background_compose_after = None
+        self._smart_background_compose_generation += 1
+        background_future = self._smart_background_compose_future
+        if background_future is not None and not background_future.done():
+            background_future.cancel()
+        self._smart_background_compose_future = None
+        self._smart_font_match_generation += 1
+        font_match_future = self._smart_font_match_future
+        if font_match_future is not None and not font_match_future.done():
+            font_match_future.cancel()
+        self._smart_font_match_future = None
+        self._smart_selection_generation += 1
+        selection_future = self._smart_selection_future
+        if selection_future is not None and not selection_future.done():
+            selection_future.cancel()
+        self._smart_selection_future = None
+        if self._smart_edit_job_id is not None:
+            self.ai_job_manager.cancel(self._smart_edit_job_id)
         self.stop_slideshow()
         self._stop_animation_playback()
         self._cancel_pending_preview_updates()
         if self.batch_runner is not None:
             self.batch_runner.cancel()
+        conversion_runner = self._conversion_runner
+        if conversion_runner is not None:
+            conversion_runner.cancel()
+            base_session = self._conversion_run_base_session
+            if base_session is not None:
+                try:
+                    snapshot = base_session.merge_tasks(list(conversion_runner.tasks))
+                except ConversionSessionError:
+                    pass
+                else:
+                    self._conversion_session = snapshot
+                    self._checkpoint_conversion_session(snapshot, force=True)
         if self._autosave_job is not None:
             self.after_cancel(self._autosave_job)
             self._autosave_job = None
@@ -4413,11 +12514,18 @@ class ImageEditorApp(tk.Tk):
             except tk.TclError:
                 pass
         self._startup_jobs.clear()
+        self._cancel_scheduled_config_save()
         self._save_config()
         self._drop_target.disable()
+        self.ai_job_manager.shutdown(wait=True)
+        self._invalidate_asset_registration()
+        self._asset_executor.shutdown(wait=True, cancel_futures=True)
+        self._analysis_executor.shutdown(wait=True, cancel_futures=True)
         self.thumbnail_sidebar.shutdown()
         self.image_loader.shutdown()
         self.preview_renderer.shutdown()
+        self.conversion_checkpoint_writer.close(timeout=1.5)
+        self._close_comparison_images()
         self._release_base_preview()
         self._cancel_all_tk_jobs()
 
@@ -4499,6 +12607,17 @@ class ImageEditorApp(tk.Tk):
         self._source_monitor_job = self.after(2000, self._monitor_source_file)
 
     def undo(self) -> None:
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            draft = self.conversion_draft_history.undo()
+            if draft is None:
+                self.status_var.set("转图草稿没有可撤销的操作")
+                return
+            self._apply_conversion_draft_to_controls()
+            self._invalidate_conversion_session()
+            self._refresh_preview()
+            self._update_estimate()
+            self.status_var.set("已撤销一步转图设置")
+            return
         if self.document is None or self.document.undo_command() is None:
             self.status_var.set("没有可撤销的操作")
             return
@@ -4508,6 +12627,17 @@ class ImageEditorApp(tk.Tk):
         self.status_var.set("已撤销一步")
 
     def redo(self) -> None:
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            draft = self.conversion_draft_history.redo()
+            if draft is None:
+                self.status_var.set("转图草稿没有可重做的操作")
+                return
+            self._apply_conversion_draft_to_controls()
+            self._invalidate_conversion_session()
+            self._refresh_preview()
+            self._update_estimate()
+            self.status_var.set("已重做一步转图设置")
+            return
         if self.document is None or self.document.redo_command() is None:
             self.status_var.set("没有可重做的操作")
             return
@@ -4550,15 +12680,28 @@ class ImageEditorApp(tk.Tk):
             self._refresh_preview()
 
     def reset_crop(self) -> None:
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            self.crop_box = None
+            changed = self._push_conversion_draft(
+                self.conversion_draft_history.current.with_crop(None),
+                status="已重置转图裁切",
+            )
+            self.crop_var.set("未设置裁剪")
+            if not changed:
+                self._refresh_preview()
+            self._update_crop_action_bar()
+            return
         self.crop_box = None
         self._commit_command(EditCommand.create("crop", {"box": None}, "重置裁剪"))
         self.crop_var.set("未设置裁剪")
+        self._update_crop_action_bar()
 
     def apply_crop(self) -> None:
-        if self.original is None or self.document is None:
+        if self.original is None:
             return
         if self.crop_box is None:
             self.status_var.set("没有可应用的裁剪区域")
+            self._update_crop_action_bar()
             return
         reference = self.base_preview_image
         if reference is None:
@@ -4570,7 +12713,14 @@ class ImageEditorApp(tk.Tk):
             right / reference.width,
             bottom / reference.height,
         )
-        existing = reduce_timeline(self.document.timeline).crop_box
+        conversion_mode = self.mode_router.active_mode is ModeId.CONVERT
+        if not conversion_mode and self.document is None:
+            return
+        existing = (
+            self.conversion_draft_history.current.crop_box
+            if conversion_mode
+            else reduce_timeline(self.document.timeline).crop_box
+        )
         if existing is not None:
             existing_width = existing[2] - existing[0]
             existing_height = existing[3] - existing[1]
@@ -4580,6 +12730,15 @@ class ImageEditorApp(tk.Tk):
                 existing[0] + normalized[2] * existing_width,
                 existing[1] + normalized[3] * existing_height,
             )
+        if conversion_mode:
+            self.crop_box = None
+            self._push_conversion_draft(
+                self.conversion_draft_history.current.with_crop(normalized),
+                status="已应用转图裁切，可单独撤销",
+            )
+            self.crop_var.set("配方中已有裁切")
+            self._update_crop_action_bar()
+            return
         self._commit_command(
             EditCommand.create("crop", {"box": list(normalized)}, "应用裁剪"),
             refresh=False,
@@ -4589,6 +12748,7 @@ class ImageEditorApp(tk.Tk):
         self.crop_var.set("未设置裁剪")
         self.status_var.set("已非破坏应用裁剪，可从历史面板恢复")
         self._refresh_preview()
+        self._update_crop_action_bar()
 
     def center_crop(self) -> None:
         image = self.base_preview_image or self._current_working_image()
@@ -4605,7 +12765,7 @@ class ImageEditorApp(tk.Tk):
         left = max(0, (image.width - width) // 2)
         top = max(0, (image.height - height) // 2)
         self.crop_box = (left, top, left + width, top + height)
-        if self.document is not None:
+        if self.document is not None and self.mode_router.active_mode is not ModeId.CONVERT:
             self.document.update_state("center_crop", crop_box=self.crop_box)
         self._update_crop_label()
         self._refresh_preview()
@@ -4629,13 +12789,24 @@ class ImageEditorApp(tk.Tk):
             width = image.width - left
             height = round(width / ratio)
         self.crop_box = (left, top, min(image.width, left + width), min(image.height, top + height))
-        if self.document is not None:
+        if self.document is not None and self.mode_router.active_mode is not ModeId.CONVERT:
             self.document.update_state("crop_ratio", crop_box=self.crop_box)
         self._update_crop_label()
         self._refresh_preview()
 
     def rotate(self, degrees: int) -> None:
-        if self.original is None or self.document is None:
+        if self.original is None:
+            return
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            self.crop_box = None
+            current = self.conversion_draft_history.current
+            updated = current.with_rotation(current.rotation + degrees)
+            self._push_conversion_draft(
+                updated,
+                status=f"转图旋转已设为 {updated.rotation}°",
+            )
+            return
+        if self.document is None:
             return
         self.crop_box = None
         self._commit_command(
@@ -4649,6 +12820,14 @@ class ImageEditorApp(tk.Tk):
     def flip_horizontal(self) -> None:
         if self.original is None:
             return
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            self.crop_box = None
+            current = self.conversion_draft_history.current
+            self._push_conversion_draft(
+                current.with_flip("horizontal", not current.flip_horizontal),
+                status="已切换转图水平翻转",
+            )
+            return
         self.crop_box = None
         self._commit_command(EditCommand.create("flip_horizontal", {}, "水平翻转"), refresh=False)
         self._sync_controls_from_timeline()
@@ -4657,6 +12836,14 @@ class ImageEditorApp(tk.Tk):
 
     def flip_vertical(self) -> None:
         if self.original is None:
+            return
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            self.crop_box = None
+            current = self.conversion_draft_history.current
+            self._push_conversion_draft(
+                current.with_flip("vertical", not current.flip_vertical),
+                status="已切换转图垂直翻转",
+            )
             return
         self.crop_box = None
         self._commit_command(EditCommand.create("flip_vertical", {}, "垂直翻转"), refresh=False)
@@ -4673,6 +12860,10 @@ class ImageEditorApp(tk.Tk):
         except ValueError as error:
             messagebox.showerror(APP_NAME, str(error))
             return
+        conversion_mode = self.mode_router.active_mode is ModeId.CONVERT
+        previous_sync = self._syncing_document
+        if conversion_mode:
+            self._syncing_document = True
         self._ratio_lock = True
         try:
             self.width_var.set("" if width is None else str(width))
@@ -4680,6 +12871,9 @@ class ImageEditorApp(tk.Tk):
             self.max_side_var.set("" if max_side is None else str(max_side))
         finally:
             self._ratio_lock = False
+            self._syncing_document = previous_sync
+        if conversion_mode:
+            self._update_conversion_draft_from_controls()
         self.status_var.set("已按当前内容的缩放前尺寸应用常用比例")
         self._update_estimate()
 
@@ -4688,6 +12882,17 @@ class ImageEditorApp(tk.Tk):
 
         if self.original is None:
             raise ValueError("请先打开一张图片。")
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            recipe = self.conversion_draft_history.current.to_recipe()
+            without_resize = replace(
+                recipe,
+                steps=tuple(step for step in recipe.steps if step.kind != "resize"),
+            )
+            reference = execute_transform_recipe(self.original, without_resize)
+            try:
+                return reference.size
+            finally:
+                reference.close()
         if self.document is None:
             return self.original.size
         plan = replace(reduce_timeline(self.document.timeline), size=SizeSpec())
@@ -4700,10 +12905,25 @@ class ImageEditorApp(tk.Tk):
     def _read_options(
         self, allow_without_image: bool = False, quiet: bool = False
     ) -> ExportOptions | None:
-        if self.document is None and not allow_without_image:
+        conversion_mode = self.mode_router.active_mode is ModeId.CONVERT
+        has_source = self.original is not None if conversion_mode else self.document is not None
+        if not has_source and not allow_without_image:
             if not quiet:
                 messagebox.showinfo(APP_NAME, "请先打开一张图片。")
             return None
+        if conversion_mode:
+            try:
+                profile = self._active_conversion_recipe().export_profile
+                return ExportOptions(
+                    output_format=profile.output_format,
+                    quality=profile.quality,
+                    target_size_kb=profile.target_size_kb,
+                    preserve_metadata=profile.preserve_metadata,
+                )
+            except (tk.TclError, TypeError, ValueError) as error:
+                if not quiet:
+                    messagebox.showerror(APP_NAME, str(error))
+                return None
         state = (
             self.document.state
             if self.document is not None
@@ -4738,6 +12958,11 @@ class ImageEditorApp(tk.Tk):
     def _current_working_image(self) -> Image.Image | None:
         if self.original is None:
             return None
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            return execute_transform_recipe(
+                self.original,
+                self.conversion_draft_history.current.to_recipe(),
+            )
         if self.document is not None:
             return render_image(self.original, self.document.timeline)
         return apply_edits(self.original, self.edit_state())
@@ -4798,6 +13023,47 @@ class ImageEditorApp(tk.Tk):
         self._update_estimate()
 
     def _apply_export_preset(self) -> None:
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            source_format = (
+                self.document.metadata.original_format if self.document is not None else None
+            )
+            state = DocumentState(
+                width_text=self.width_var.get(),
+                height_text=self.height_var.get(),
+                max_side_text=self.max_side_var.get(),
+                output_format=self.format_var.get(),
+                quality=self.quality_var.get(),
+                target_size_text=self.target_size_var.get(),
+                preserve_metadata=self.preserve_metadata_var.get(),
+                backup_on_overwrite=self.backup_on_overwrite_var.get(),
+                export_preset=self.export_preset_var.get(),
+            )
+            try:
+                state = apply_export_preset(
+                    state,
+                    self.export_preset_var.get(),
+                    source_format,
+                )
+            except ValueError as error:
+                messagebox.showerror(APP_NAME, str(error))
+                return
+            self._syncing_document = True
+            try:
+                self.width_var.set(state.width_text)
+                self.height_var.set(state.height_text)
+                self.max_side_var.set(state.max_side_text)
+                self.format_var.set(state.output_format)
+                self.quality_var.set(state.quality)
+                self.target_size_var.set(state.target_size_text)
+                self.preserve_metadata_var.set(state.preserve_metadata)
+                self.batch_strip_metadata_var.set(not state.preserve_metadata)
+                self.export_preset_var.set(state.export_preset)
+            finally:
+                self._syncing_document = False
+            self._update_conversion_draft_from_controls()
+            self._save_config()
+            self.status_var.set(f"已应用转图导出预设：{state.export_preset}")
+            return
         if self.document is None:
             return
         try:
@@ -4816,6 +13082,17 @@ class ImageEditorApp(tk.Tk):
         self.status_var.set(f"已应用导出预设：{state.export_preset}")
 
     def _custom_export_changed(self) -> None:
+        if self.mode_router.active_mode is ModeId.CONVERT:
+            if not self._syncing_document:
+                self._syncing_document = True
+                try:
+                    self.export_preset_var.set("自定义")
+                finally:
+                    self._syncing_document = False
+                self._update_conversion_draft_from_controls()
+            self._save_config()
+            self._update_estimate()
+            return
         if not self._syncing_document and self.document is not None:
             self.document.update_state("custom_export", export_preset="自定义")
             self._syncing_document = True
@@ -4829,44 +13106,348 @@ class ImageEditorApp(tk.Tk):
     def _set_compare(self, enabled: bool) -> None:
         if self.original is None:
             return
+        if enabled:
+            self._disable_file_comparison(
+                announce=False,
+                refresh=False,
+                resume_animation=False,
+            )
         self.compare_original.set(enabled)
         self._refresh_preview()
 
     def _toggle_compare_original(self) -> None:
         if self.compare_original.get():
+            self._disable_file_comparison(
+                announce=False,
+                refresh=False,
+                resume_animation=False,
+            )
             self.split_compare_var.set(False)
         self._refresh_preview()
 
     def _toggle_split_compare(self) -> None:
         if self.split_compare_var.get():
+            self._disable_file_comparison(
+                announce=False,
+                refresh=False,
+                resume_animation=False,
+            )
             self.compare_original.set(False)
             self.status_var.set("分屏对比：左侧编辑前，右侧编辑后")
         self._refresh_preview()
 
-    def _zoom_with_wheel(self, event: tk.Event) -> None:
-        self.step_zoom(1 if event.delta > 0 else -1)
+    def _toggle_file_comparison(self) -> None:
+        if self.file_compare_var.get():
+            self._disable_file_comparison()
+            return
+        self.choose_file_comparison()
 
-    def step_zoom(self, direction: int) -> None:
-        current = self.zoom_mode.get()
-        index = ZOOM_LEVELS.index(current) if current in ZOOM_LEVELS else 0
-        index = max(0, min(len(ZOOM_LEVELS) - 1, index + direction))
-        self.zoom_mode.set(ZOOM_LEVELS[index])
-        self._zoom_changed()
+    def _side_by_side_comparison_active(self) -> bool:
+        return self.split_compare_var.get() or self.file_compare_var.get()
 
-    def _zoom_changed(self) -> None:
-        if self.zoom_mode.get() == "适应":
-            self.pan_offset = (0, 0)
+    def choose_file_comparison(self) -> None:
+        if self.original is None:
+            self.status_var.set("请先打开一张图片，再选择并排比较对象")
+            return
+        path = filedialog.askopenfilename(
+            title="选择要并排比较的图片",
+            initialdir=str(self.image_path.parent) if self.image_path is not None else None,
+            filetypes=[
+                (
+                    "图片文件",
+                    "*.jpg *.jpeg *.png *.apng *.webp *.avif *.heic *.heif "
+                    "*.bmp *.tif *.tiff *.gif",
+                ),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if path:
+            self._begin_file_comparison(Path(path))
+
+    @staticmethod
+    def _same_path(first: Path, second: Path) -> bool:
+        try:
+            return first.resolve() == second.resolve()
+        except OSError:
+            return first.absolute() == second.absolute()
+
+    def _begin_file_comparison(self, path: Path) -> bool:
+        if self.original is None:
+            self.status_var.set("请先打开一张图片，再选择并排比较对象")
+            return False
+        if self.image_path is not None and self._same_path(self.image_path, path):
+            self.status_var.set("请选择另一张不同的图片进行并排比较")
+            return False
+        if path.suffix.casefold() not in SUPPORTED_INPUTS:
+            self.status_var.set("所选文件不是受支持的图片格式")
+            return False
+        self._comparison_load_generation += 1
+        generation = self._comparison_load_generation
+        self.status_var.set(f"正在后台载入对比图片：{path.name}")
+        future = self.image_loader.load(path)
+        self.after(10, self._poll_file_comparison_load, generation, path, future)
+        return True
+
+    def _poll_file_comparison_load(
+        self,
+        generation: int,
+        path: Path,
+        future: Future[Image.Image],
+    ) -> None:
+        if generation != self._comparison_load_generation:
+            return
+        if not future.done():
+            self.after(10, self._poll_file_comparison_load, generation, path, future)
+            return
+        try:
+            comparison = future.result().copy()
+        except ImageLoadFailure as failure:
+            self.status_var.set(f"无法载入对比图片：{failure.user_message}")
+            messagebox.showwarning(APP_NAME, f"{path.name}\n\n{failure.user_message}")
+            return
+        except Exception as error:
+            self.status_var.set(f"无法载入对比图片：{error}")
+            messagebox.showwarning(APP_NAME, f"{path.name}\n\n无法载入对比图片：{error}")
+            return
+        if generation != self._comparison_load_generation:
+            comparison.close()
+            return
+        old = self._comparison_image
+        self._comparison_image = comparison
+        self._comparison_path = path
+        if old is not None:
+            self._retire_comparison_image(old)
+        self.compare_original.set(False)
+        self.split_compare_var.set(False)
+        self._animation_resume_after_file_compare = self._animation_playing
+        if self._animation_playing:
+            self._animation_playing = False
+            self._cancel_animation_timer()
+        self.file_compare_var.set(True)
+        self.viewer_file_compare_button.set_selected(True)
+        self._update_animation_controls()
+        self.mode_router.update_state(
+            mode=ModeId.VIEWER,
+            file_compare_enabled=True,
+            file_compare_path=str(path),
+        )
+        primary_name = self.image_path.name if self.image_path is not None else "当前图片"
+        self.status_var.set(f"双图对比：左侧 {primary_name}，右侧 {path.name}")
         self._refresh_preview()
 
+    def _disable_file_comparison(
+        self,
+        *,
+        announce: bool = True,
+        refresh: bool = True,
+        resume_animation: bool = True,
+    ) -> None:
+        self._comparison_load_generation += 1
+        image = self._comparison_image
+        self._comparison_image = None
+        self._comparison_path = None
+        self.file_compare_var.set(False)
+        if hasattr(self, "viewer_file_compare_button"):
+            self.viewer_file_compare_button.set_selected(False)
+        self.mode_router.update_state(
+            mode=ModeId.VIEWER,
+            file_compare_enabled=False,
+            file_compare_path=None,
+        )
+        if image is not None:
+            self._retire_comparison_image(image)
+        should_resume_animation = bool(
+            resume_animation
+            and self._animation_resume_after_file_compare
+            and self._animation_sequence is not None
+            and self.mode_router.active_mode is ModeId.VIEWER
+        )
+        self._animation_resume_after_file_compare = False
+        if announce:
+            self.status_var.set("已退出双图对比")
+        if should_resume_animation:
+            assert self._animation_sequence is not None
+            self._animation_playing = True
+            self._animation_index = (
+                self._animation_displayed_index + 1
+            ) % self._animation_sequence.frame_count
+            self._update_animation_controls()
+            self._show_animation_frame()
+        elif refresh and self.original is not None:
+            self._refresh_preview()
+
+    def _retain_comparison_image(self, image: Image.Image) -> None:
+        key = id(image)
+        with self._comparison_ref_lock:
+            self._comparison_render_refs[key] = self._comparison_render_refs.get(key, 0) + 1
+
+    def _release_comparison_image(self, image: Image.Image) -> None:
+        key = id(image)
+        close_image: Image.Image | None = None
+        with self._comparison_ref_lock:
+            remaining = self._comparison_render_refs.get(key, 0) - 1
+            if remaining > 0:
+                self._comparison_render_refs[key] = remaining
+            else:
+                self._comparison_render_refs.pop(key, None)
+                close_image = self._retired_comparison_images.pop(key, None)
+        if close_image is not None:
+            close_image.close()
+
+    def _retire_comparison_image(self, image: Image.Image) -> None:
+        key = id(image)
+        with self._comparison_ref_lock:
+            if self._comparison_render_refs.get(key, 0) > 0:
+                self._retired_comparison_images[key] = image
+                return
+        image.close()
+
+    def _close_comparison_images(self) -> None:
+        images: dict[int, Image.Image] = {}
+        if self._comparison_image is not None:
+            images[id(self._comparison_image)] = self._comparison_image
+        with self._comparison_ref_lock:
+            images.update(self._retired_comparison_images)
+            self._comparison_render_refs.clear()
+            self._retired_comparison_images.clear()
+        self._comparison_image = None
+        self._comparison_path = None
+        for image in images.values():
+            image.close()
+
+    @staticmethod
+    def _anchored_pan_offset(
+        *,
+        anchor: tuple[float, float],
+        old_offset: tuple[float, float],
+        old_scale: float,
+        new_scale: float,
+        content_size: tuple[float, float],
+        canvas_size: tuple[int, int],
+    ) -> tuple[int, int]:
+        """Return center-relative pan that keeps the anchor's source pixel fixed."""
+
+        safe_old_scale = max(1e-9, old_scale)
+        source_x = (anchor[0] - old_offset[0]) / safe_old_scale
+        source_y = (anchor[1] - old_offset[1]) / safe_old_scale
+        new_width = max(1, int(content_size[0] * new_scale))
+        new_height = max(1, int(content_size[1] * new_scale))
+        centered_x = (canvas_size[0] - new_width) / 2
+        centered_y = (canvas_size[1] - new_height) / 2
+        desired_x = anchor[0] - source_x * new_scale
+        desired_y = anchor[1] - source_y * new_scale
+        return (round(desired_x - centered_x), round(desired_y - centered_y))
+
+    def _current_zoom_percent(self) -> int:
+        if self.zoom_mode.get() == "适应":
+            return max(MIN_ZOOM_PERCENT, round(self.preview_scale * 100))
+        try:
+            return int(self.zoom_mode.get().removesuffix("%"))
+        except ValueError:
+            return 100
+
+    def _zoom_content_size(self) -> tuple[float, float] | None:
+        if (
+            self.base_preview_image is not None
+            and not self.file_compare_var.get()
+            and not self.split_compare_var.get()
+        ):
+            return (float(self.base_preview_image.width), float(self.base_preview_image.height))
+        if self.preview is not None and self.preview_scale > 0:
+            return (
+                self.preview.width() / self.preview_scale,
+                self.preview.height() / self.preview_scale,
+            )
+        return None
+
+    def _refresh_after_zoom(self) -> None:
+        if (
+            self._animation_sequence is not None
+            and self.mode_router.active_mode is ModeId.VIEWER
+            and not self.file_compare_var.get()
+        ):
+            self._cancel_animation_timer()
+            self._animation_index = self._animation_displayed_index
+            self._show_animation_frame()
+        else:
+            self._refresh_preview()
+
+    def _set_zoom_percent(
+        self,
+        percent: float,
+        *,
+        anchor: tuple[float, float] | None = None,
+    ) -> None:
+        bounded = max(MIN_ZOOM_PERCENT, min(MAX_ZOOM_PERCENT, round(percent)))
+        canvas_size = (
+            max(100, self.canvas.winfo_width()),
+            max(100, self.canvas.winfo_height()),
+        )
+        focus = anchor or (canvas_size[0] / 2, canvas_size[1] / 2)
+        content_size = self._zoom_content_size()
+        if content_size is not None and self.preview is not None:
+            focus = (
+                max(
+                    self.preview_offset[0],
+                    min(self.preview_offset[0] + self.preview.width(), focus[0]),
+                ),
+                max(
+                    self.preview_offset[1],
+                    min(self.preview_offset[1] + self.preview.height(), focus[1]),
+                ),
+            )
+            self.pan_offset = self._anchored_pan_offset(
+                anchor=focus,
+                old_offset=self.preview_offset,
+                old_scale=self.preview_scale,
+                new_scale=bounded / 100,
+                content_size=content_size,
+                canvas_size=canvas_size,
+            )
+        self.zoom_mode.set(f"{bounded}%")
+        self.status_var.set(f"缩放：{bounded}%")
+        self._refresh_after_zoom()
+
+    def _zoom_with_wheel(self, event: tk.Event) -> str:
+        direction = 1 if event.delta > 0 else -1
+        steps = max(1, abs(event.delta) // 120)
+        factor = ZOOM_STEP_FACTOR**steps
+        current = self._current_zoom_percent()
+        target = current * factor if direction > 0 else current / factor
+        self._set_zoom_percent(target, anchor=(event.x, event.y))
+        return "break"
+
+    def step_zoom(self, direction: int) -> None:
+        current = self._current_zoom_percent()
+        target = current * ZOOM_STEP_FACTOR if direction >= 0 else current / ZOOM_STEP_FACTOR
+        self._set_zoom_percent(target)
+
+    def _zoom_changed(self) -> None:
+        value = self.zoom_mode.get()
+        if value == "适应":
+            self.reset_view()
+            return
+        try:
+            percent = int(value.removesuffix("%"))
+        except ValueError:
+            percent = 100
+        self._set_zoom_percent(percent)
+
     def set_zoom(self, value: str) -> None:
-        self.zoom_mode.set(value)
-        self._zoom_changed()
+        if value == "适应":
+            self.reset_view()
+            return
+        try:
+            percent = int(value.removesuffix("%"))
+        except ValueError as error:
+            raise ValueError(f"无效缩放值：{value}") from error
+        self._set_zoom_percent(percent)
 
     def reset_view(self) -> None:
         self.zoom_mode.set("适应")
         self.pan_offset = (0, 0)
         self.status_var.set("已适应视图")
-        self._refresh_preview()
+        self._refresh_after_zoom()
 
     def _start_pan(self, event: tk.Event) -> None:
         if self.preview is None:
@@ -4903,16 +13484,69 @@ class ImageEditorApp(tk.Tk):
         )
         self._preview_generation += 1
         generation = self._preview_generation
-        timeline = self._timeline_for_preview()
-        future = self.preview_renderer.render(
-            self.original,
-            self.edit_state(),
-            compare_original=self.compare_original.get(),
-            canvas_size=(canvas_w, canvas_h),
-            zoom_percent=zoom_percent,
-            timeline=timeline,
-            split_compare=self.split_compare_var.get(),
+        conversion_recipe = (
+            self.conversion_draft_history.current.to_recipe()
+            if self.mode_router.active_mode is ModeId.CONVERT
+            else None
         )
+        timeline = None if conversion_recipe is not None else self._timeline_for_preview()
+        render_size = (
+            (max(100, round(canvas_w * 0.68)), max(100, round(canvas_h * 0.72)))
+            if zoom_percent is None
+            else (canvas_w, canvas_h)
+        )
+        comparison_image = (
+            self._comparison_image
+            if self.file_compare_var.get()
+            and self.mode_router.active_mode in {ModeId.VIEWER, ModeId.EDIT}
+            else None
+        )
+        comparison_labels: tuple[str, str] | None = None
+        if comparison_image is not None:
+            primary_name = self.image_path.name if self.image_path is not None else "当前图片"
+            secondary_name = (
+                self._comparison_path.name if self._comparison_path is not None else "对比图片"
+            )
+            comparison_labels = (primary_name, secondary_name)
+            self._retain_comparison_image(comparison_image)
+        display_proxy = None
+        if (
+            comparison_image is None
+            and self.mode_router.active_mode is ModeId.VIEWER
+            and self.image_path is not None
+            and zoom_percent is None
+            and not self.compare_original.get()
+            and not self.split_compare_var.get()
+            and timeline is not None
+            and timeline.cursor == 0
+        ):
+            display_proxy = self.image_loader.cached_preview(self.image_path)
+        try:
+            future = self.preview_renderer.render(
+                self.original,
+                self.edit_state(),
+                compare_original=self.compare_original.get(),
+                canvas_size=render_size,
+                zoom_percent=zoom_percent,
+                timeline=timeline,
+                split_compare=self.split_compare_var.get(),
+                comparison_image=comparison_image,
+                comparison_labels=comparison_labels,
+                display_proxy=display_proxy,
+                conversion_recipe=conversion_recipe,
+            )
+        except Exception:
+            if comparison_image is not None:
+                self._release_comparison_image(comparison_image)
+            if display_proxy is not None:
+                display_proxy.close()
+            raise
+        if comparison_image is not None:
+            future.add_done_callback(
+                lambda _future, image=comparison_image: self._release_comparison_image(image)
+            )
+        if display_proxy is not None:
+            future.add_done_callback(lambda _future, image=display_proxy: image.close())
         self._schedule_preview_poll(generation, future, canvas_w, canvas_h)
 
     def _schedule_preview_poll(
@@ -4984,58 +13618,94 @@ class ImageEditorApp(tk.Tk):
         self.preview_scale = frame.scale
         centered_x = (canvas_w - image.width) // 2
         centered_y = (canvas_h - image.height) // 2
-        if image.width <= canvas_w:
-            offset_x = centered_x
-        else:
-            offset_x = max(canvas_w - image.width, min(0, centered_x + self.pan_offset[0]))
-        if image.height <= canvas_h:
-            offset_y = centered_y
-        else:
-            offset_y = max(canvas_h - image.height, min(0, centered_y + self.pan_offset[1]))
+        min_x, max_x = min(0, canvas_w - image.width), max(0, canvas_w - image.width)
+        min_y, max_y = min(0, canvas_h - image.height), max(0, canvas_h - image.height)
+        offset_x = max(min_x, min(max_x, centered_x + self.pan_offset[0]))
+        offset_y = max(min_y, min(max_y, centered_y + self.pan_offset[1]))
         self.preview_offset = (offset_x, offset_y)
+        self.pan_offset = (offset_x - centered_x, offset_y - centered_y)
+        displayed_percent = (
+            round(frame.scale * 100)
+            if self.zoom_mode.get() == "适应"
+            else self._current_zoom_percent()
+        )
+        zoom_label = (
+            f"适应 · {displayed_percent}%"
+            if self.zoom_mode.get() == "适应"
+            else f"{displayed_percent}%"
+        )
+        self.canvas_metadata.configure(text=f"P3 色域 · 8 位    {zoom_label}")
 
+        tokens = self.theme_manager.tokens
         self.canvas.delete("all")
+        grid_color = "#dbd7dd" if tokens.name == "light" else "#211f26"
+        shadow_color = "#c8c1cc" if tokens.name == "light" else "#09080c"
+        for x in range(0, canvas_w, 28):
+            self.canvas.create_line(x, 0, x, canvas_h, fill=grid_color, tags="canvas-grid")
+        for y in range(0, canvas_h, 28):
+            self.canvas.create_line(0, y, canvas_w, y, fill=grid_color, tags="canvas-grid")
+        shadow_x = self.preview_offset[0] + 12
+        shadow_y = self.preview_offset[1] + 16
+        self.canvas.create_rectangle(
+            shadow_x,
+            shadow_y,
+            shadow_x + image.width,
+            shadow_y + image.height,
+            fill=shadow_color,
+            outline="",
+            tags="image-shadow",
+        )
         self.canvas.create_image(
             self.preview_offset[0], self.preview_offset[1], image=self.preview, anchor="nw"
         )
         if frame.split_layout is not None:
             layout = frame.split_layout
+            left_label, right_label = frame.split_labels or ("编辑前", "编辑后")
             divider_x = self.preview_offset[0] + layout.divider_x
             self.canvas.create_line(
                 divider_x,
                 self.preview_offset[1],
                 divider_x,
                 self.preview_offset[1] + image.height,
-                fill="#fbbf24",
+                fill=tokens.accent,
                 width=2,
             )
             self.canvas.create_text(
                 self.preview_offset[0] + layout.before_panel[0] + 8,
                 self.preview_offset[1] + 8,
-                text="编辑前",
-                fill="#fbbf24",
+                text=left_label,
+                fill=tokens.accent,
                 anchor="nw",
             )
             self.canvas.create_text(
                 self.preview_offset[0] + layout.after_panel[2] - 8,
                 self.preview_offset[1] + 8,
-                text="编辑后",
-                fill="#5eead4",
+                text=right_label,
+                fill=tokens.accent_hover,
                 anchor="ne",
             )
         self._draw_checker_bounds(image.width, image.height)
         if frame.split_layout is None:
+            self._draw_smart_selection_mask()
             self._draw_crop()
+            self._draw_smart_mask_strokes()
             self._draw_annotation_overlay()
         self._draw_histogram(frame.working)
-        if self.edit_panel_visible_var.get():
+        if self.edit_panel_visible_var.get() and self.mode_router.active_mode in {
+            ModeId.CONVERT,
+            ModeId.EDIT,
+        }:
             self.after_idle(self._update_estimate)
         frame.image.close()
 
     def _draw_checker_bounds(self, width: int, height: int) -> None:
         ox, oy = self.preview_offset
         self.canvas.create_rectangle(
-            ox - 1, oy - 1, ox + width + 1, oy + height + 1, outline="#4b5563"
+            ox - 1,
+            oy - 1,
+            ox + width + 1,
+            oy + height + 1,
+            outline=self.theme_manager.tokens.border,
         )
 
     def _canvas_to_image(self, x: int, y: int) -> tuple[int, int]:
@@ -5058,6 +13728,14 @@ class ImageEditorApp(tk.Tk):
             self._clear_annotation_drag(redraw=False)
             self._refresh_preview()
         self.annotation_tool_var.set(tool)
+        for name, button in getattr(self, "annotation_tool_buttons", {}).items():
+            button.configure(
+                style=("ToolShelfActive.TButton" if name == tool else "ToolShelf.TButton")
+            )
+        if hasattr(self, "dock_crop_button"):
+            self.dock_crop_button.set_selected(tool == "crop")
+        if hasattr(self, "canvas_select_button"):
+            self.canvas_select_button.set_selected(tool == "select")
         self.current_tool_label_var.set(f"当前：{ANNOTATION_TOOL_LABELS[tool]}")
         if tool != "select":
             self.selected_annotation_id = None
@@ -5071,12 +13749,19 @@ class ImageEditorApp(tk.Tk):
         self.canvas.configure(cursor="arrow" if tool == "select" else "crosshair")
         self.status_var.set(f"当前工具：{ANNOTATION_TOOL_LABELS[tool]}")
         self._draw_annotation_overlay()
+        self._update_crop_action_bar()
         self._save_config()
 
     def _canvas_press(self, event: tk.Event) -> None:
         self.canvas.focus_set()
-        if self.split_compare_var.get():
-            self.status_var.set("请先退出分屏对比，再进行裁剪或标注")
+        if self._side_by_side_comparison_active():
+            self.status_var.set("请先退出并排对比，再进行裁剪或标注")
+            return
+        if self._smart_mask_brush_active:
+            self._start_smart_mask_stroke(event)
+            return
+        if self._smart_alpha_brush_active:
+            self._start_smart_alpha_stroke(event)
             return
         tool = self.annotation_tool_var.get()
         if tool == "crop":
@@ -5089,7 +13774,13 @@ class ImageEditorApp(tk.Tk):
             self._start_annotation(event, tool)
 
     def _canvas_drag(self, event: tk.Event) -> None:
-        if self.split_compare_var.get():
+        if self._side_by_side_comparison_active():
+            return
+        if self._smart_mask_brush_active:
+            self._drag_smart_mask_stroke(event)
+            return
+        if self._smart_alpha_brush_active:
+            self._drag_smart_alpha_stroke(event)
             return
         tool = self.annotation_tool_var.get()
         if tool == "crop":
@@ -5102,7 +13793,13 @@ class ImageEditorApp(tk.Tk):
             self._drag_annotation(event, tool)
 
     def _canvas_release(self, event: tk.Event) -> None:
-        if self.split_compare_var.get():
+        if self._side_by_side_comparison_active():
+            return
+        if self._smart_mask_brush_active:
+            self._finish_smart_mask_stroke(event)
+            return
+        if self._smart_alpha_brush_active:
+            self._finish_smart_alpha_stroke(event)
             return
         tool = self.annotation_tool_var.get()
         if tool == "crop":
@@ -5115,6 +13812,15 @@ class ImageEditorApp(tk.Tk):
             self._finish_annotation(event, tool)
 
     def _canvas_motion(self, event: tk.Event) -> None:
+        if self._side_by_side_comparison_active():
+            self.canvas.configure(cursor="arrow")
+            return
+        if self._smart_mask_brush_active:
+            self.canvas.configure(cursor="crosshair")
+            return
+        if self._smart_alpha_brush_active:
+            self.canvas.configure(cursor="crosshair")
+            return
         tool = self.annotation_tool_var.get()
         if tool == "crop":
             self._update_crop_cursor(event)
@@ -5581,7 +14287,7 @@ class ImageEditorApp(tk.Tk):
             points = [self._normalized_to_canvas(x, y) for x, y in self.perspective_points]
             self.canvas.create_polygon(
                 *[coordinate for point in points for coordinate in point],
-                outline="#fbbf24",
+                outline=self.theme_manager.tokens.accent,
                 fill="",
                 width=2,
                 tags="annotation-ui",
@@ -5593,8 +14299,8 @@ class ImageEditorApp(tk.Tk):
                     y - radius,
                     x + radius,
                     y + radius,
-                    fill="#fbbf24",
-                    outline="#78350f",
+                    fill=self.theme_manager.tokens.accent,
+                    outline=self.theme_manager.tokens.foreground,
                     tags="annotation-ui",
                 )
                 self.canvas.create_text(x, y, text=str(index), fill="#111827", tags="annotation-ui")
@@ -5671,8 +14377,8 @@ class ImageEditorApp(tk.Tk):
                     y - radius,
                     x + radius,
                     y + radius,
-                    fill="#ccfbf1",
-                    outline="#0f766e",
+                    fill=self.theme_manager.tokens.surface,
+                    outline=self.theme_manager.tokens.accent,
                     tags="annotation-ui",
                 )
 
@@ -5681,13 +14387,24 @@ class ImageEditorApp(tk.Tk):
             return
         self.drag_start = self._canvas_to_image(event.x, event.y)
         self.crop_drag_start_box = self.crop_box
+        self._smart_text_adjusting_region = (
+            self._smart_text_region_box is not None
+            and self.crop_drag_start_box == self._smart_text_region_box
+        )
+        perspective_index = self._hit_test_smart_text_perspective(event.x, event.y)
+        if self._smart_text_adjusting_region and perspective_index is not None:
+            self.crop_action = f"perspective:{perspective_index}"
+            return
         self.crop_action = self._hit_test_crop(event.x, event.y)
 
     def _drag_crop(self, event: tk.Event) -> None:
         if self.base_preview_image is None or self.drag_start is None:
             return
         end = self._canvas_to_image(event.x, event.y)
-        if self.crop_action == "new" or self.crop_drag_start_box is None:
+        if self.crop_action.startswith("perspective:"):
+            index = int(self.crop_action.partition(":")[2])
+            self._set_smart_text_perspective_corner(index, end)
+        elif self.crop_action == "new" or self.crop_drag_start_box is None:
             left, right = sorted((self.drag_start[0], end[0]))
             top, bottom = sorted((self.drag_start[1], end[1]))
             self.crop_box = (left, top, right, bottom)
@@ -5698,6 +14415,10 @@ class ImageEditorApp(tk.Tk):
             )
         else:
             self.crop_box = self._resize_crop_box(self.crop_drag_start_box, self.crop_action, end)
+        if self._smart_text_adjusting_region and not self.crop_action.startswith("perspective:"):
+            self._smart_text_region_box = self.crop_box
+            self._smart_text_perspective_quad = None
+            self._update_smart_text_region_label()
         if self.document is not None:
             self.document.update_state("crop_drag", crop_box=self.crop_box)
         self._draw_crop()
@@ -5712,11 +14433,51 @@ class ImageEditorApp(tk.Tk):
             if self.document is not None:
                 self.document.update_state("crop_cancel", crop_box=None)
             self.crop_var.set("未设置裁剪")
+            if self._smart_text_selecting_region:
+                self._smart_text_region_box = None
+                self._smart_text_perspective_quad = None
+                self._update_smart_text_region_label()
+                self.smart_edit_status_var.set("文字区域过小，请重新框选")
+            if self._smart_repair_selecting_region:
+                self._smart_repair_region_box = None
+                self._update_smart_repair_region_label()
+                self.smart_edit_status_var.set("擦除区域过小，请重新框选")
         else:
             self._update_crop_label()
+            if self._smart_repair_selecting_region:
+                if self.crop_box != self._smart_selection_mask_box:
+                    self._smart_selection_suggestions = ()
+                    self._smart_selection_index = -1
+                    self._clear_smart_selection_mask()
+                self._smart_repair_region_box = self.crop_box
+                self._smart_repair_selecting_region = False
+                self._update_smart_repair_region_label()
+                self._set_annotation_tool("select")
+                self.smart_edit_status_var.set(
+                    "主体像素蒙版已记录，可调整羽化后执行修复"
+                    if self._smart_selection_mask_box == self.crop_box
+                    else "矩形擦除区域已记录，可调整羽化后执行修复"
+                )
+            elif self._smart_text_selecting_region:
+                self._smart_text_region_box = self.crop_box
+                self._smart_text_perspective_quad = None
+                self._smart_text_selecting_region = False
+                self._update_smart_text_region_label()
+                self._set_annotation_tool("select")
+                self.smart_edit_status_var.set("文字区域已记录，可调整文字样式后执行替换")
+            elif self._smart_text_adjusting_region:
+                self._smart_text_region_box = self.crop_box
+                self._update_smart_text_region_label()
+                self.smart_edit_status_var.set(
+                    "透视角点校正已同步，可继续识别或替换"
+                    if self.crop_action.startswith("perspective:")
+                    else "文字区域校正已同步，可继续识别或替换"
+                )
         self.drag_start = None
         self.crop_drag_start_box = None
         self.crop_action = "new"
+        self._smart_text_adjusting_region = False
+        self._update_smart_edit_buttons()
         self._draw_crop()
         self._update_estimate()
 
@@ -5733,24 +14494,134 @@ class ImageEditorApp(tk.Tk):
 
     def _draw_crop(self) -> None:
         self.canvas.delete("crop")
+        self._update_crop_action_bar()
         if self.crop_box is None:
             return
+        tokens = self.theme_manager.tokens
+        perspective_active = (
+            self._smart_text_perspective_quad is not None
+            and self._smart_text_region_box == self.crop_box
+        )
         left, top = self._image_to_canvas(self.crop_box[0], self.crop_box[1])
         right, bottom = self._image_to_canvas(self.crop_box[2], self.crop_box[3])
         self.canvas.create_rectangle(
-            left, top, right, bottom, outline="#2dd4bf", width=2, tags="crop"
+            left,
+            top,
+            right,
+            bottom,
+            outline=tokens.border if perspective_active else tokens.accent,
+            width=1 if perspective_active else 2,
+            dash=(4, 4) if perspective_active else (),
+            tags="crop",
         )
-        self.canvas.create_rectangle(
-            left + 1, top + 1, right - 1, bottom - 1, outline="#0f766e", width=1, tags="crop"
-        )
-        for x in (left + (right - left) / 3, left + (right - left) * 2 / 3):
-            self.canvas.create_line(x, top, x, bottom, fill="#5eead4", dash=(4, 4), tags="crop")
-        for y in (top + (bottom - top) / 3, top + (bottom - top) * 2 / 3):
-            self.canvas.create_line(left, y, right, y, fill="#5eead4", dash=(4, 4), tags="crop")
-        for hx, hy in self._crop_handle_points(left, top, right, bottom).values():
+        if not perspective_active:
             self.canvas.create_rectangle(
-                hx - 4, hy - 4, hx + 4, hy + 4, fill="#ccfbf1", outline="#0f766e", tags="crop"
+                left + 1,
+                top + 1,
+                right - 1,
+                bottom - 1,
+                outline=tokens.on_accent,
+                width=1,
+                tags="crop",
             )
+            for x in (left + (right - left) / 3, left + (right - left) * 2 / 3):
+                self.canvas.create_line(
+                    x, top, x, bottom, fill=tokens.on_accent, dash=(4, 4), tags="crop"
+                )
+            for y in (top + (bottom - top) / 3, top + (bottom - top) * 2 / 3):
+                self.canvas.create_line(
+                    left, y, right, y, fill=tokens.on_accent, dash=(4, 4), tags="crop"
+                )
+            for hx, hy in self._crop_handle_points(left, top, right, bottom).values():
+                self.canvas.create_rectangle(
+                    hx - 4,
+                    hy - 4,
+                    hx + 4,
+                    hy + 4,
+                    fill=tokens.surface,
+                    outline=tokens.accent,
+                    tags="crop",
+                )
+        if self._smart_text_perspective_quad is not None and self.original is not None:
+            quad_points = [
+                self._image_to_canvas(
+                    self._smart_text_perspective_quad[index] * self.original.width,
+                    self._smart_text_perspective_quad[index + 1] * self.original.height,
+                )
+                for index in range(0, 8, 2)
+            ]
+            self.canvas.create_polygon(
+                *[coordinate for point in quad_points for coordinate in point],
+                outline=tokens.accent,
+                fill="",
+                width=3,
+                tags="crop",
+            )
+            for index, (x, y) in enumerate(quad_points, start=1):
+                self.canvas.create_oval(
+                    x - 7,
+                    y - 7,
+                    x + 7,
+                    y + 7,
+                    fill=tokens.accent,
+                    outline=tokens.on_accent,
+                    width=2,
+                    tags="crop",
+                )
+                self.canvas.create_text(
+                    x,
+                    y,
+                    text=str(index),
+                    fill=tokens.on_accent,
+                    tags="crop",
+                )
+
+    def _hit_test_smart_text_perspective(self, x: int, y: int) -> int | None:
+        if self._smart_text_perspective_quad is None or self.original is None:
+            return None
+        tolerance = 13
+        for index in range(4):
+            canvas_x, canvas_y = self._image_to_canvas(
+                self._smart_text_perspective_quad[index * 2] * self.original.width,
+                self._smart_text_perspective_quad[index * 2 + 1] * self.original.height,
+            )
+            if abs(x - canvas_x) <= tolerance and abs(y - canvas_y) <= tolerance:
+                return index
+        return None
+
+    def _set_smart_text_perspective_corner(
+        self,
+        index: int,
+        point: tuple[int, int],
+    ) -> bool:
+        if self._smart_text_perspective_quad is None or self.original is None:
+            return False
+        if not 0 <= index < 4:
+            raise ValueError("透视文字角点索引无效")
+        values = list(self._smart_text_perspective_quad)
+        values[index * 2] = max(0.0, min(1.0, point[0] / max(1, self.original.width)))
+        values[index * 2 + 1] = max(
+            0.0,
+            min(1.0, point[1] / max(1, self.original.height)),
+        )
+        try:
+            quad = validate_normalized_quad(values)
+        except ValueError:
+            self.smart_edit_status_var.set("角点不能交叉或重叠，请保持四边形轮廓")
+            return False
+        left, top, right, bottom = quad_bounds(quad)
+        region_box = (
+            max(0, math.floor(left * self.original.width)),
+            max(0, math.floor(top * self.original.height)),
+            min(self.original.width, math.ceil(right * self.original.width)),
+            min(self.original.height, math.ceil(bottom * self.original.height)),
+        )
+        self._smart_text_perspective_quad = quad
+        self._smart_text_region_box = region_box
+        self.crop_box = region_box
+        self._update_smart_text_region_label()
+        self.smart_edit_status_var.set(f"正在校正透视角点 {index + 1}")
+        return True
 
     def _hit_test_crop(self, x: int, y: int) -> str:
         if self.crop_box is None:
@@ -5766,6 +14637,9 @@ class ImageEditorApp(tk.Tk):
         return "new"
 
     def _update_crop_cursor(self, event: tk.Event) -> None:
+        if self._hit_test_smart_text_perspective(event.x, event.y) is not None:
+            self.canvas.configure(cursor="sizing")
+            return
         action = self._hit_test_crop(event.x, event.y)
         cursors = {
             "move": "fleur",
@@ -5920,7 +14794,13 @@ class ImageEditorApp(tk.Tk):
             return
         prepared: Image.Image | None = None
         try:
-            if self.document is not None:
+            if self.mode_router.active_mode is ModeId.CONVERT:
+                prepared = execute_transform_recipe(
+                    self.original,
+                    self._active_conversion_recipe(),
+                )
+                size = estimate_save_size(prepared, options)
+            elif self.document is not None:
                 prepared = render_image(self.original, self.document.timeline)
                 size = estimate_save_size(self.original, options, timeline=self.document.timeline)
             else:

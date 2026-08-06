@@ -658,12 +658,20 @@ class InteractionLogicTests(unittest.TestCase):
                 app.toggle_fullscreen()
                 self.assertFalse(app._is_fullscreen)
 
-                with patch.object(
-                    app,
-                    "attributes",
-                    side_effect=tk.TclError("fullscreen unavailable"),
-                ):
-                    app.toggle_fullscreen()
+                if app.window_controller is not None:
+                    with patch.object(
+                        app.window_controller,
+                        "set_fullscreen",
+                        return_value=False,
+                    ):
+                        app.toggle_fullscreen()
+                else:
+                    with patch.object(
+                        app,
+                        "attributes",
+                        side_effect=tk.TclError("fullscreen unavailable"),
+                    ):
+                        app.toggle_fullscreen()
                 self.assertFalse(app._is_fullscreen)
                 self.assertIn("无法切换全屏", app.status_var.get())
             finally:

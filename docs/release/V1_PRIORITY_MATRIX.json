@@ -24,7 +24,7 @@
     {"id": "P1-FORMATS", "priority": "P1", "title": "AVIF and optional HEIF", "status": "passed", "evidence": ["light_image_editor/formats.py", "requirements-heif.lock", "test_v06_batch_formats.py"], "introduced_after_freeze": false},
     {"id": "P1-DPI-THEME", "priority": "P1", "title": "High DPI and dark mode", "status": "passed", "evidence": ["light_image_editor/dpi.py", "light_image_editor/theme.py", "test_v07_experience.py"], "introduced_after_freeze": false},
 
-    {"id": "P2-ENGLISH", "priority": "P2", "title": "English interface", "status": "passed", "evidence": ["resources/locales/en-US.json", "test_v07_experience.py"], "introduced_after_freeze": false},
+    {"id": "P2-CHINESE-ONLY", "priority": "P2", "title": "Simplified Chinese-only interface", "status": "passed", "evidence": ["resources/locales/zh-CN.json", "test_v07_experience.py"], "introduced_after_freeze": false},
     {"id": "P2-PLUGINS", "priority": "P2", "title": "Plugin system", "status": "deferred", "introduced_after_freeze": false},
     {"id": "P2-OCR", "priority": "P2", "title": "OCR", "status": "deferred", "introduced_after_freeze": false},
     {"id": "P2-CUTOUT", "priority": "P2", "title": "Smart background removal", "status": "deferred", "introduced_after_freeze": false},

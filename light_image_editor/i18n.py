@@ -1,4 +1,4 @@
-"""External JSON localisation with live Tk widget and variable updates."""
+"""Simplified Chinese resources and Tk widget text helpers."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import tkinter as tk
 from pathlib import Path
 from typing import Any
 
-SUPPORTED_LOCALES = ("zh-CN", "en-US")
+SUPPORTED_LOCALES = ("zh-CN",)
 DEFAULT_LOCALE = "zh-CN"
 
 
@@ -52,35 +52,7 @@ class Localizer:
         return template.format(**values)
 
     def translate_text(self, text: str) -> str:
-        if not text:
-            return text
-        source_locale = "en-US" if self.locale == DEFAULT_LOCALE else DEFAULT_LOCALE
-        source_catalog = self.catalogs[source_locale]
-        target_catalog = self.catalogs[self.locale]
-        source = {
-            **source_catalog.get("strings", {}),
-            **source_catalog.get("replacements", {}),
-        }
-        target = {
-            **target_catalog.get("strings", {}),
-            **target_catalog.get("replacements", {}),
-        }
-        exact_key = next((key for key, value in source.items() if value == text), None)
-        if exact_key is not None:
-            return str(target.get(exact_key, text))
-        translated = text
-        pairs = sorted(
-            (
-                (str(value), str(target.get(key, value)))
-                for key, value in source.items()
-                if value and target.get(key) is not None
-            ),
-            key=lambda item: len(item[0]),
-            reverse=True,
-        )
-        for original, replacement in pairs:
-            translated = translated.replace(original, replacement)
-        return translated
+        return text
 
     def set_locale(self, locale: str, root: tk.Misc | None = None) -> None:
         if locale not in SUPPORTED_LOCALES:

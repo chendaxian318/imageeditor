@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "release": "2.0",
+  "passed": false,
+  "blocker_count": 5,
+  "blockers": [
+    "V2-COMPAT-MISSING: 缺少场景 win10-22h2-current",
+    "V2-COMPAT-MISSING: 缺少场景 win11-23h2-current",
+    "V2-COMPAT-MISSING: 缺少场景 win11-24h2-multiscreen",
+    "V2-COMPAT-MISSING: 缺少场景 win11-24h2-offline-standard",
+    "V2-COMPAT-MISSING: 缺少场景 win11-upgrade-from-1.1.3"
+  ]
+}

@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "release": "2.0",
+  "generated_at": "2026-08-05",
+  "policy": "所有门禁必须有可复核证据并标记为 passed；blocked、pending、external 或损坏记录都会阻止公开发布。",
+  "gates": [
+    {
+      "id": "V2-SCOPE",
+      "area": "产品范围",
+      "title": "四模式功能归属与零丢失台账",
+      "status": "passed",
+      "evidence": ["docs/FOUR_MODE_DEVELOPMENT_PLAN.md", "docs/release/feature-palette-smoke.json", "light_image_editor/shell/feature_registry.py", "light_image_editor/ui/feature_palette.py", "test_four_mode_shell.py", "test_feature_palette.py"],
+      "closure": ""
+    },
+    {
+      "id": "V2-UI",
+      "area": "应用外壳",
+      "title": "纯中文 Material You 四模式界面",
+      "status": "passed",
+      "evidence": ["docs/release/feature-palette-smoke.json", "light_image_editor/ui/material.py", "light_image_editor/ui/feature_palette.py", "light_image_editor/theme.py", "test_material_you_ui.py", "test_feature_palette.py"],
+      "closure": ""
+    },
+    {
+      "id": "V2-VIEWER",
+      "area": "看图模式",
+      "title": "看图功能与性能门禁",
+      "status": "passed",
+      "evidence": ["docs/release/m2-viewer-validation.json", "test_viewer_performance_gate.py", "test_m2_folder_zoom.py"],
+      "closure": ""
+    },
+    {
+      "id": "V2-CONVERT",
+      "area": "转图模式",
+      "title": "转换队列、恢复、保真与性能门禁",
+      "status": "passed",
+      "evidence": ["docs/release/m3-conversion-validation.json", "docs/release/m3-conversion-fidelity-validation.json", "test_conversion_session_ui_integration.py"],
+      "closure": ""
+    },
+    {
+      "id": "V2-AI-PLATFORM",
+      "area": "AI 平台",
+      "title": "素材、修订、任务、凭据与授权基础设施",
+      "status": "passed",
+      "evidence": ["docs/release/m4-platform-validation.json", "test_ai_platform.py", "test_ai_authorization.py"],
+      "closure": ""
+    },
+    {
+      "id": "V2-TASK-TRAY",
+      "area": "任务体验",
+      "title": "转图、智能改图和生图统一任务托盘",
+      "status": "passed",
+      "evidence": ["docs/release/unified-task-tray-smoke.json", "light_image_editor/ui/task_tray.py", "test_task_tray.py"],
+      "closure": ""
+    },
+    {
+      "id": "V2-SMART-EDIT",
+      "area": "改图模式",
+      "title": "生产级高清、去背景和改文字验收",
+      "status": "blocked",
+      "evidence": ["docs/release/m5-smart-edit-quality-validation.json", "docs/release/m5-windows-ocr-validation.json", "light_image_editor/providers/mock_provider.py", "light_image_editor/domain/selection_mask_refinement.py", "light_image_editor/services/background_analysis.py", "light_image_editor/services/background_compositor.py", "light_image_editor/services/font_matcher.py", "light_image_editor/services/region_repair.py", "light_image_editor/services/smart_selection.py", "light_image_editor/services/text_region_detector.py", "light_image_editor/services/text_ocr.py", "benchmarks/run_windows_ocr_gate.py", "test_ai_platform.py", "test_background_compositor.py", "test_font_matcher.py", "test_region_repair.py", "test_selection_mask_refinement.py", "test_smart_selection.py", "test_text_region_detector.py", "test_text_ocr.py", "test_windows_ocr_gate.py", "test_four_mode_ui.py", "docs/release/V2_PROVIDER_SELECTION_CONTRACT.json", "docs/release/V2_PROVIDER_SELECTION_EVIDENCE.template.json", "docs/release/v2-provider-selection-status.json", "scripts/verify_v2_provider_selection.py", "test_v2_provider_selection.py"],
+      "closure": "导入满足冻结能力、隐私和费用契约的真实 smart_edit 沙盒候选，由产品负责人明确批准，再完成真实照片生产级中文 OCR、重叠或遮挡多平面场景文字、弧形或艺术字检测及真实复杂毛发、玻璃和烟雾质量门禁"
+    },
+    {
+      "id": "V2-GENERATION",
+      "area": "生图模式",
+      "title": "生产模型语义与审美验收",
+      "status": "blocked",
+      "evidence": ["docs/release/m6-generation-quality-validation.json", "docs/release/m6-generation-workspace-smoke.json", "light_image_editor/ui/generation_workspace.py", "test_generation_workspace.py", "test_four_mode_ui.py", "docs/release/V2_PROVIDER_SELECTION_CONTRACT.json", "docs/release/V2_PROVIDER_SELECTION_EVIDENCE.template.json", "docs/release/v2-provider-selection-status.json", "scripts/verify_v2_provider_selection.py", "test_v2_provider_selection.py"],
+      "closure": "导入满足冻结能力、隐私和费用契约的真实 generation 沙盒候选，由产品负责人明确批准，并完成真实提示词语义、审美、参考图和内容策略验收"
+    },
+    {
+      "id": "V2-AI-PRIVACY-COST",
+      "area": "隐私与费用",
+      "title": "真实 Provider 上传、留存、区域与费用验收",
+      "status": "blocked",
+      "evidence": ["docs/FOUR_MODE_DEVELOPMENT_PLAN.md", "docs/release/V2_PROVIDER_SELECTION_CONTRACT.json", "docs/release/V2_PROVIDER_SELECTION_EVIDENCE.template.json", "docs/release/v2-provider-selection-status.json", "scripts/verify_v2_provider_selection.py", "test_v2_provider_selection.py"],
+      "closure": "为改图与生图导入真实沙盒请求、响应、质量、费用和隐私审查哈希证据，确认留存不超过 30 天且客户数据不用于训练，并由产品负责人明确批准"
+    },
+    {
+      "id": "V2-STABILITY",
+      "area": "稳定性",
+      "title": "四模式连续长稳与故障注入",
+      "status": "passed",
+      "evidence": ["benchmarks/run_four_mode_soak.py", "docs/release/m7-four-mode-soak-validation.json", "test_four_mode_soak_gate.py"],
+      "closure": ""
+    },
+    {
+      "id": "V2-COMPAT",
+      "area": "兼容性",
+      "title": "Windows 10/11 与 100%～200% DPI 实机矩阵",
+      "status": "external",
+      "evidence": ["docs/release/COMPATIBILITY_MATRIX.md", "docs/release/m7-windows10-compatibility.json", "docs/release/V2_COMPATIBILITY_CONTRACT.json", "docs/release/V2_COMPATIBILITY_EVIDENCE.template.json", "docs/release/v2-compatibility-evidence-status.json", "benchmarks/run_windows_compatibility_probe.py", "scripts/verify_v2_compatibility_evidence.py", "test_windows_compatibility_probe.py", "test_v2_compatibility_evidence.py"],
+      "closure": "Windows 10 22H2 当前机器的 UI/DPI 探针已通过；使用冻结的外部证据契约导入 Windows 10/11 安装版、便携版、标准用户离线、混合 DPI 多屏和 1.1.3 升级共五个实机场景的哈希证据"
+    },
+    {
+      "id": "V2-INSTALL-UPGRADE",
+      "area": "安装与回滚",
+      "title": "v2.0 安装、升级、卸载与回滚包",
+      "status": "pending",
+      "evidence": ["docs/release/V2_INSTALL_CONTRACT.json", "docs/release/v2-install-preflight.json", "scripts/verify_v2_install_preflight.py", "packaging/windows/LightImageEditor.iss", "scripts/test_install_cycles.ps1"],
+      "closure": "功能冻结后将源码版本升至 2.0.0，生成 PE/SBOM/校验和一致的候选安装包、便携包和 1.1.3 回滚包，并在干净配置中完成至少三轮 1.1.3→2.0.0 真升级、目标版修复安装、保留/清除数据卸载及机器可读证据验收"
+    },
+    {
+      "id": "V2-SIGN-MALWARE",
+      "area": "供应链安全",
+      "title": "时间戳签名、Defender 与多引擎扫描",
+      "status": "external",
+      "evidence": ["scripts/inspect_release.ps1", "docs/release/V2_SUPPLY_CHAIN_CONTRACT.json", "docs/release/V2_LOCAL_SECURITY_SCAN.template.json", "docs/release/V2_MULTI_ENGINE_REVIEW.template.json", "docs/release/v2-supply-chain-status.json", "scripts/verify_v2_supply_chain_evidence.py", "test_v2_supply_chain_evidence.py"],
+      "closure": "对四个冻结最终产物完成批准发布者时间戳签名、当前 Defender 扫描和逐哈希人工批准的多引擎复核，并由严格供应链校验器生成零阻塞状态"
+    },
+    {
+      "id": "V2-LICENSE",
+      "area": "许可",
+      "title": "第一方与第三方再分发权利",
+      "status": "blocked",
+      "evidence": ["LICENSE", "NOTICE.md", "THIRD_PARTY_LICENSES.md", "docs/release/V2_LICENSE_EVIDENCE_CONTRACT.json", "docs/release/V2_LICENSE_EVIDENCE.template.json", "docs/release/v2-license-evidence-status.json", "scripts/verify_v2_license_evidence.py", "test_v2_license_evidence.py"],
+      "closure": "导入第一方权属与书面再分发授权、第三方依赖商业再分发审查和 Inno Setup 商业许可的有效期、文件哈希及人工批准证据"
+    },
+    {
+      "id": "V2-AUTOMATION",
+      "area": "自动化",
+      "title": "四模式全量自动化与静态质量门禁",
+      "status": "passed",
+      "evidence": ["docs/release/unified-task-tray-smoke.json", "test_four_mode_ui.py", "test_v10_production_release.py"],
+      "closure": ""
+    }
+  ]
+}

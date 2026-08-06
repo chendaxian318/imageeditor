@@ -22,11 +22,7 @@ $AppSpec = Join-Path $Root "packaging\windows\image_editor.spec"
 $PortableSpec = Join-Path $Root "packaging\windows\image_editor_portable.spec"
 $InnoScript = Join-Path $Root "packaging\windows\LightImageEditor.iss"
 $LegalDocuments = @("LICENSE", "NOTICE.md", "PRIVACY.md", "THIRD_PARTY_LICENSES.md")
-$ReleaseDocuments = @(
-    "docs\release\RELEASE_NOTES-v1.0.0.md",
-    "docs\release\RELEASE_PAGE-v1.0.0.md",
-    "docs\release\V1_RELEASE_GATES.json",
-    "docs\release\V1_PRIORITY_MATRIX.json",
+$CommonReleaseDocuments = @(
     "docs\release\POST_RELEASE_MONITORING.md",
     "docs\release\HOTFIX_RUNBOOK.md",
     "docs\release\PRODUCTION_RELEASE_RUNBOOK.md",
@@ -116,6 +112,28 @@ function Remove-GeneratedDirectory {
     if (Test-Path -LiteralPath $resolved) {
         Remove-Item -LiteralPath $resolved -Recurse -Force
     }
+}
+
+function Get-ReleaseDocumentSet {
+    param([Parameter(Mandatory = $true)][string]$Version)
+
+    $parsedVersion = [System.Version]::Parse($Version)
+    if ($parsedVersion.Major -ge 2) {
+        return @(
+            "docs\release\RELEASE_NOTES-v$Version.md",
+            "docs\release\RELEASE_PAGE-v$Version.md",
+            "docs\release\V2_RELEASE_GATES.json",
+            "docs\release\V2_INSTALL_CONTRACT.json",
+            "docs\release\v2-release-readiness.json",
+            "docs\release\v2-install-preflight.json"
+        ) + $CommonReleaseDocuments
+    }
+    return @(
+        "docs\release\RELEASE_NOTES-v1.0.0.md",
+        "docs\release\RELEASE_PAGE-v1.0.0.md",
+        "docs\release\V1_RELEASE_GATES.json",
+        "docs\release\V1_PRIORITY_MATRIX.json"
+    ) + $CommonReleaseDocuments
 }
 
 function Write-ReleaseChecksums {
@@ -326,6 +344,13 @@ try {
     $version = Invoke-CheckedCapture $Python @(
         "-c", "from light_image_editor.version import __version__; print(__version__)"
     )
+    $releaseDocuments = @(Get-ReleaseDocumentSet -Version $version)
+    $releaseNotesDocument = if (([System.Version]::Parse($version)).Major -ge 2) {
+        Join-Path $Root "docs\release\RELEASE_NOTES-v$version.md"
+    }
+    else {
+        Join-Path $Root "docs\release\RELEASE_NOTES-v1.0.0.md"
+    }
 
     $env:PYTHONHASHSEED = "0"
     Write-Host "Building the installed onedir application..."
@@ -372,6 +397,7 @@ try {
         "/DMyAppVersion=$version",
         "/DSourceDir=$appDirectory",
         "/DOutputDir=$Release",
+        "/DReleaseNotesFile=$releaseNotesDocument",
         $InnoScript
     )
     $setupName = "LightImageEditor-Setup-x64-$version.exe"
@@ -505,19 +531,147 @@ try {
     # verifier as well so the generated gate result is covered by the final manifest.
     Write-ReleaseChecksums -ReleasePath $Release -OutputPath $checksumPath
 
-    $releaseGateArguments = @(
-        "-m", "scripts.verify_production_release",
-        "--gates", (Join-Path $Root "docs\release\V1_RELEASE_GATES.json"),
-        "--priorities", (Join-Path $Root "docs\release\V1_PRIORITY_MATRIX.json"),
-        "--stability", (Join-Path $Root "docs\release\RC_STABILITY_LOG.json"),
-        "--evidence", (Join-Path $Release "BUILD_PROVENANCE.json"),
-        "--security", (Join-Path $Release "LOCAL_SECURITY_SCAN.json"),
-        "--release", $Release,
-        "--output", (Join-Path $Release "RELEASE_GATE_STATUS.json")
-    )
-    if ($ProductionCandidate) { $releaseGateArguments += "--candidate" }
-    elseif (-not $Production) { $releaseGateArguments += "--allow-blocked" }
-    Invoke-Checked $Python $releaseGateArguments
+    if (([System.Version]::Parse($version)).Major -ge 2) {
+        $providerEvidence = Join-Path $Root "docs\release\V2_PROVIDER_SELECTION_EVIDENCE.template.json"
+        if ($env:IMAGEEDITOR_V2_PROVIDER_EVIDENCE) {
+            $providerEvidence = [System.IO.Path]::GetFullPath($env:IMAGEEDITOR_V2_PROVIDER_EVIDENCE)
+        }
+        if (-not (Test-Path -LiteralPath $providerEvidence -PathType Leaf)) {
+            throw "Provider selection evidence does not exist: $providerEvidence"
+        }
+        $providerEvidenceRoot = Split-Path -Parent $providerEvidence
+        if ($env:IMAGEEDITOR_V2_PROVIDER_EVIDENCE_ROOT) {
+            $providerEvidenceRoot = [System.IO.Path]::GetFullPath(
+                $env:IMAGEEDITOR_V2_PROVIDER_EVIDENCE_ROOT
+            )
+        }
+        $providerStatus = Join-Path $Release "V2_PROVIDER_SELECTION_STATUS.json"
+        $providerSelectionArguments = @(
+            "-m", "scripts.verify_v2_provider_selection",
+            "--contract", (Join-Path $Root "docs\release\V2_PROVIDER_SELECTION_CONTRACT.json"),
+            "--evidence", $providerEvidence,
+            "--evidence-root", $providerEvidenceRoot,
+            "--output", $providerStatus
+        )
+        $compatibilityEvidence = Join-Path $Root "docs\release\V2_COMPATIBILITY_EVIDENCE.template.json"
+        if ($env:IMAGEEDITOR_V2_COMPATIBILITY_EVIDENCE) {
+            $compatibilityEvidence = [System.IO.Path]::GetFullPath(
+                $env:IMAGEEDITOR_V2_COMPATIBILITY_EVIDENCE
+            )
+        }
+        if (-not (Test-Path -LiteralPath $compatibilityEvidence -PathType Leaf)) {
+            throw "Compatibility evidence does not exist: $compatibilityEvidence"
+        }
+        $compatibilityEvidenceRoot = Split-Path -Parent $compatibilityEvidence
+        if ($env:IMAGEEDITOR_V2_COMPATIBILITY_EVIDENCE_ROOT) {
+            $compatibilityEvidenceRoot = [System.IO.Path]::GetFullPath(
+                $env:IMAGEEDITOR_V2_COMPATIBILITY_EVIDENCE_ROOT
+            )
+        }
+        $compatibilityStatus = Join-Path $Release "V2_COMPATIBILITY_STATUS.json"
+        $compatibilityArguments = @(
+            "-m", "scripts.verify_v2_compatibility_evidence",
+            "--contract", (Join-Path $Root "docs\release\V2_COMPATIBILITY_CONTRACT.json"),
+            "--evidence", $compatibilityEvidence,
+            "--evidence-root", $compatibilityEvidenceRoot,
+            "--output", $compatibilityStatus
+        )
+        $installStatus = Join-Path $Release "V2_INSTALL_PREFLIGHT.json"
+        $installPreflightArguments = @(
+            "-m", "scripts.verify_v2_install_preflight",
+            "--contract", (Join-Path $Root "docs\release\V2_INSTALL_CONTRACT.json"),
+            "--repository", $Root,
+            "--output", $installStatus
+        )
+        $multiEngineEvidence = Join-Path $Root "docs\release\V2_MULTI_ENGINE_REVIEW.template.json"
+        if ($env:IMAGEEDITOR_MULTI_ENGINE_EVIDENCE) {
+            $multiEngineEvidence = [System.IO.Path]::GetFullPath(
+                $env:IMAGEEDITOR_MULTI_ENGINE_EVIDENCE
+            )
+        }
+        if (-not (Test-Path -LiteralPath $multiEngineEvidence -PathType Leaf)) {
+            throw "Multi-engine evidence does not exist: $multiEngineEvidence"
+        }
+        $approvedThumbprint = if ($env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT) {
+            $env:IMAGEEDITOR_AUTHENTICODE_THUMBPRINT
+        }
+        else {
+            ""
+        }
+        $supplyChainStatus = Join-Path $Release "V2_SUPPLY_CHAIN_STATUS.json"
+        $supplyChainArguments = @(
+            "-m", "scripts.verify_v2_supply_chain_evidence",
+            "--contract", (Join-Path $Root "docs\release\V2_SUPPLY_CHAIN_CONTRACT.json"),
+            "--local-scan", (Join-Path $Release "LOCAL_SECURITY_SCAN.json"),
+            "--multi-engine", $multiEngineEvidence,
+            "--artifact-root", $Release,
+            "--approved-thumbprint=$approvedThumbprint",
+            "--output", $supplyChainStatus
+        )
+        $licenseEvidence = Join-Path $Root "docs\release\V2_LICENSE_EVIDENCE.template.json"
+        if ($env:IMAGEEDITOR_V2_LICENSE_EVIDENCE) {
+            $licenseEvidence = [System.IO.Path]::GetFullPath(
+                $env:IMAGEEDITOR_V2_LICENSE_EVIDENCE
+            )
+        }
+        if (-not (Test-Path -LiteralPath $licenseEvidence -PathType Leaf)) {
+            throw "Licence evidence does not exist: $licenseEvidence"
+        }
+        $licenseEvidenceRoot = Split-Path -Parent $licenseEvidence
+        if ($env:IMAGEEDITOR_V2_LICENSE_EVIDENCE_ROOT) {
+            $licenseEvidenceRoot = [System.IO.Path]::GetFullPath(
+                $env:IMAGEEDITOR_V2_LICENSE_EVIDENCE_ROOT
+            )
+        }
+        $licenseStatus = Join-Path $Release "V2_LICENSE_EVIDENCE_STATUS.json"
+        $licenseArguments = @(
+            "-m", "scripts.verify_v2_license_evidence",
+            "--contract", (Join-Path $Root "docs\release\V2_LICENSE_EVIDENCE_CONTRACT.json"),
+            "--evidence", $licenseEvidence,
+            "--evidence-root", $licenseEvidenceRoot,
+            "--output", $licenseStatus
+        )
+        $readinessArguments = @(
+            "-m", "scripts.verify_v2_release_readiness",
+            "--gates", (Join-Path $Root "docs\release\V2_RELEASE_GATES.json"),
+            "--repository", $Root,
+            "--provider-status", $providerStatus,
+            "--compatibility-status", $compatibilityStatus,
+            "--install-status", $installStatus,
+            "--supply-chain-status", $supplyChainStatus,
+            "--license-status", $licenseStatus,
+            "--output", (Join-Path $Release "RELEASE_GATE_STATUS.json")
+        )
+        if (-not ($Production -or $ProductionCandidate)) {
+            $providerSelectionArguments += "--allow-blocked"
+            $compatibilityArguments += "--allow-blocked"
+            $installPreflightArguments += "--allow-blocked"
+            $supplyChainArguments += "--allow-blocked"
+            $licenseArguments += "--allow-blocked"
+            $readinessArguments += "--allow-blocked"
+        }
+        Invoke-Checked $Python $providerSelectionArguments
+        Invoke-Checked $Python $compatibilityArguments
+        Invoke-Checked $Python $installPreflightArguments
+        Invoke-Checked $Python $supplyChainArguments
+        Invoke-Checked $Python $licenseArguments
+        Invoke-Checked $Python $readinessArguments
+    }
+    else {
+        $releaseGateArguments = @(
+            "-m", "scripts.verify_production_release",
+            "--gates", (Join-Path $Root "docs\release\V1_RELEASE_GATES.json"),
+            "--priorities", (Join-Path $Root "docs\release\V1_PRIORITY_MATRIX.json"),
+            "--stability", (Join-Path $Root "docs\release\RC_STABILITY_LOG.json"),
+            "--evidence", (Join-Path $Release "BUILD_PROVENANCE.json"),
+            "--security", (Join-Path $Release "LOCAL_SECURITY_SCAN.json"),
+            "--release", $Release,
+            "--output", (Join-Path $Release "RELEASE_GATE_STATUS.json")
+        )
+        if ($ProductionCandidate) { $releaseGateArguments += "--candidate" }
+        elseif (-not $Production) { $releaseGateArguments += "--allow-blocked" }
+        Invoke-Checked $Python $releaseGateArguments
+    }
     Write-ReleaseChecksums -ReleasePath $Release -OutputPath $checksumPath
 
     Write-Host "Build complete (version $version):"

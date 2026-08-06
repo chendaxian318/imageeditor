@@ -65,6 +65,21 @@ def parse_geometry(value: str) -> tuple[int, int, int, int] | None:
     return tuple(map(int, match.groups())) if match else None  # type: ignore[return-value]
 
 
+def fit_geometry_to_work_area(
+    geometry: str,
+    work: WorkArea,
+    *,
+    margin: int = 16,
+) -> str | None:
+    """Clamp a Tk geometry string to one monitor, including negative coordinates."""
+
+    parsed = parse_geometry(geometry)
+    if parsed is None:
+        return None
+    width, height, x, y = clamp_geometry(*parsed, work, margin=margin)
+    return f"{width}x{height}+{x}+{y}"
+
+
 def monitor_work_area(root: tk.Misc) -> WorkArea:
     if os.name != "nt":
         return WorkArea(0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
@@ -126,3 +141,19 @@ class DpiManager:
             width, height, x, y = parsed
         bounded = clamp_geometry(width, height, x, y, work)
         return f"{bounded[0]}x{bounded[1]}+{bounded[2]}+{bounded[3]}"
+
+    def constrain_to_current_work_area(self) -> bool:
+        """Keep a window fully visible after Windows reports a monitor/DPI transition."""
+
+        try:
+            current = self.root.geometry()
+        except tk.TclError:
+            return False
+        fitted = fit_geometry_to_work_area(current, monitor_work_area(self.root))
+        if fitted is None or fitted == current:
+            return False
+        try:
+            self.root.geometry(fitted)
+        except tk.TclError:
+            return False
+        return True

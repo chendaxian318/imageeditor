@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "captured_at_local": "2026-08-05",
+  "application_version": "1.1.3",
+  "profile": "m4-platform-integration",
+  "environment": {
+    "platform": "Windows x64",
+    "python": "3.12.10"
+  },
+  "automated_tests": {
+    "full_unittest": {
+      "tests_run": 333,
+      "elapsed_seconds": 87.704,
+      "failures": 0,
+      "errors": 0,
+      "passed": true
+    },
+    "m4_targeted": {
+      "tests_run": 45,
+      "elapsed_seconds": 3.438,
+      "failures": 0,
+      "errors": 0,
+      "passed": true
+    }
+  },
+  "static_checks": {
+    "ruff": "passed",
+    "production_mypy_files": 67,
+    "production_mypy": "passed",
+    "git_diff_check": "passed"
+  },
+  "acceptance": {
+    "external_asset_identity_reused_after_restart": true,
+    "managed_blobs_content_addressed": true,
+    "revision_parent_integrity_enforced": true,
+    "provider_calls_off_tk_thread": true,
+    "job_persisted_before_provider_submission": true,
+    "interrupted_submission_not_replayed": true,
+    "offline_generation_produces_real_png": true,
+    "generated_candidates_imported_as_managed_revisions": true,
+    "cancel_failure_and_unknown_do_not_block_base_modes": true,
+    "upload_and_cost_authorization_fail_closed": true,
+    "credentials_not_persisted_in_plaintext_settings": true
+  },
+  "visual_review": {
+    "preview_url": "http://127.0.0.1:8765/ui-preview/",
+    "selected_style": 17,
+    "material_you_rounding": true,
+    "four_mode_navigation": true,
+    "simplified_chinese_only": true
+  },
+  "passed": true
+}

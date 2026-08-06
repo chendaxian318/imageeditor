@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "release": "2.0",
+  "passed": false,
+  "blocker_count": 17,
+  "blockers": [
+    "V2-SUPPLY-APPROVAL: 必须提供四十位批准发布者证书指纹",
+    "V2-SUPPLY-ARTIFACT: 缺少最终产物：LightImageEditor/ImageEditor.exe",
+    "V2-SUPPLY-ARTIFACT: 缺少最终产物：LightImageEditor-Portable-x64-2.0.0.exe",
+    "V2-SUPPLY-ARTIFACT: 缺少最终产物：LightImageEditor-Setup-x64-2.0.0.exe",
+    "V2-SUPPLY-ARTIFACT: 缺少最终产物：LightImageEditor-Rollback-x64-1.1.3.exe",
+    "V2-SUPPLY-LOCAL: GeneratedUtc 必须是 UTC 时间",
+    "V2-SUPPLY-LOCAL: Authenticode 汇总未通过",
+    "V2-SUPPLY-LOCAL: Defender 扫描未通过",
+    "V2-SUPPLY-LOCAL: Defender 病毒库版本不能为空",
+    "V2-SUPPLY-LOCAL: 多引擎复核汇总未批准",
+    "V2-SUPPLY-LOCAL: 本地安全报告未达到公开发布条件",
+    "V2-SUPPLY-MULTI: 必须由人工明确批准多引擎复核",
+    "V2-SUPPLY-MULTI: ReviewedUtc 必须是 UTC 时间",
+    "V2-SUPPLY-MULTI[0]: 未知产物 LightImageEditor/ImageEditor.exe",
+    "V2-SUPPLY-MULTI[1]: 未知产物 LightImageEditor-Portable-x64-2.0.0.exe",
+    "V2-SUPPLY-MULTI[2]: 未知产物 LightImageEditor-Setup-x64-2.0.0.exe",
+    "V2-SUPPLY-MULTI[3]: 未知产物 LightImageEditor-Rollback-x64-1.1.3.exe"
+  ]
+}

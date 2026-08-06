@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "application_version": "1.1.3",
+  "captured_at_utc": "2026-08-05T11:49:36.881101+00:00",
+  "host": {
+    "is_windows": true,
+    "major": 10,
+    "minor": 0,
+    "build": 19045,
+    "release": "10",
+    "pointer_bits": 64,
+    "per_monitor_v2_api": true,
+    "get_dpi_for_system_api": true
+  },
+  "display": {
+    "actual_dpi": 96,
+    "screen_pixels": [
+      2560,
+      1440
+    ]
+  },
+  "scales": [
+    {
+      "dpi": 96,
+      "scale_percent": 100,
+      "tk_scaling": 1.33399,
+      "mode_layouts": {
+        "viewer": true,
+        "convert": true,
+        "edit": true,
+        "generate": true
+      },
+      "all_mode_layouts_fit": true,
+      "font_measurement_px": 52,
+      "font_rendering_available": true,
+      "antialiased_rounding": true,
+      "rounded_region_diameter": 56,
+      "rounded_region_scales": true
+    },
+    {
+      "dpi": 120,
+      "scale_percent": 125,
+      "tk_scaling": 1.666257,
+      "mode_layouts": {
+        "viewer": true,
+        "convert": true,
+        "edit": true,
+        "generate": true
+      },
+      "all_mode_layouts_fit": true,
+      "font_measurement_px": 68,
+      "font_rendering_available": true,
+      "antialiased_rounding": true,
+      "rounded_region_diameter": 70,
+      "rounded_region_scales": true
+    },
+    {
+      "dpi": 144,
+      "scale_percent": 150,
+      "tk_scaling": 1.998033,
+      "mode_layouts": {
+        "viewer": true,
+        "convert": true,
+        "edit": true,
+        "generate": true
+      },
+      "all_mode_layouts_fit": true,
+      "font_measurement_px": 80,
+      "font_rendering_available": true,
+      "antialiased_rounding": true,
+      "rounded_region_diameter": 84,
+      "rounded_region_scales": true
+    },
+    {
+      "dpi": 192,
+      "scale_percent": 200,
+      "tk_scaling": 2.664045,
+      "mode_layouts": {
+        "viewer": true,
+        "convert": true,
+        "edit": true,
+        "generate": true
+      },
+      "all_mode_layouts_fit": true,
+      "font_measurement_px": 108,
+      "font_rendering_available": true,
+      "antialiased_rounding": true,
+      "rounded_region_diameter": 112,
+      "rounded_region_scales": true
+    }
+  ],
+  "virtual_monitors": {
+    "passed": true,
+    "transitions": 1000,
+    "negative_coordinate_monitors": 3,
+    "clamped_transitions": 1000,
+    "failures": [],
+    "samples": [
+      {
+        "name": "主屏",
+        "dpi": 96,
+        "work_area": [
+          0,
+          0,
+          2560,
+          1400
+        ],
+        "requested": "1240x780+1440+710",
+        "fitted": "1240x780+1304+604",
+        "inside": true
+      },
+      {
+        "name": "左侧副屏",
+        "dpi": 120,
+        "work_area": [
+          -1920,
+          0,
+          0,
+          1040
+        ],
+        "requested": "1550x975+-2040+-90",
+        "fitted": "1550x975+-1904+16",
+        "inside": true
+      },
+      {
+        "name": "上方副屏",
+        "dpi": 144,
+        "work_area": [
+          0,
+          -1440,
+          2560,
+          0
+        ],
+        "requested": "1860x1170+820+-1530",
+        "fitted": "1860x1170+684+-1424",
+        "inside": true
+      },
+      {
+        "name": "右侧高 DPI",
+        "dpi": 192,
+        "work_area": [
+          2560,
+          -200,
+          4480,
+          880
+        ],
+        "requested": "2480x1560+2440+-590",
+        "fitted": "1888x1048+2576+-184",
+        "inside": true
+      },
+      {
+        "name": "小工作区",
+        "dpi": 192,
+        "work_area": [
+          -800,
+          -600,
+          0,
+          0
+        ],
+        "requested": "2480x1560+-2360+-690",
+        "fitted": "768x568+-784+-584",
+        "inside": true
+      }
+    ]
+  },
+  "thresholds": {
+    "required_scales": [
+      96,
+      120,
+      144,
+      192
+    ],
+    "minimum_windows_10_build": 19045,
+    "minimum_windows_11_build": 22000,
+    "required_pointer_bits": 64,
+    "minimum_virtual_transitions": 1000
+  },
+  "violations": [],
+  "passed": true
+}

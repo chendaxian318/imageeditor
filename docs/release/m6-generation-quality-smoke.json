@@ -1,0 +1,226 @@
+{
+  "schema_version": 1,
+  "application_version": "1.1.3",
+  "captured_at_utc": "2026-08-05T10:54:40.931216+00:00",
+  "profile": "smoke",
+  "provider": {
+    "provider_id": "offline.mock",
+    "provider_name": "Offline Mock Provider",
+    "provider_version": "1.0",
+    "model": "mock-image-v1",
+    "offline": true
+  },
+  "environment": {
+    "os": "Windows-10-10.0.19045-SP0",
+    "machine": "AMD64",
+    "python": "3.12.10",
+    "pillow": "11.3.0"
+  },
+  "fixtures": {
+    "image_size": [
+      128,
+      96
+    ],
+    "repetitions": 2,
+    "candidate_count": 2,
+    "reference_count": 2
+  },
+  "text_to_image": {
+    "request_count": 2,
+    "requested_candidates_per_request": 2,
+    "minimum_candidates_per_request": 2,
+    "maximum_candidates_per_request": 2,
+    "all_candidate_counts_match": true,
+    "output_count": 4,
+    "runs": [
+      [
+        {
+          "revision_id": "rev_mock_a6fccef29fe6f2c045277b05",
+          "asset_id": "asset_mock_dbb9b307a7c7650f63658dcb",
+          "size": [
+            128,
+            96
+          ],
+          "mode": "RGB",
+          "format": "PNG",
+          "pixel_hash": "4e878ee2ce51eaeeef214b465f3ac235422d1a34c8b1e31476656b8fe2c2fc8b",
+          "file_sha256_matches": true,
+          "byte_size_matches": true,
+          "declared_size_matches": true,
+          "decoded_size_matches": true,
+          "media_type_is_png": true,
+          "unique_color_count": 29,
+          "luma_span": 135,
+          "luma_stddev": 48.745806
+        },
+        {
+          "revision_id": "rev_mock_a5e5c069dda8982581e07564",
+          "asset_id": "asset_mock_f99caa76f74f732c8bfb295b",
+          "size": [
+            128,
+            96
+          ],
+          "mode": "RGB",
+          "format": "PNG",
+          "pixel_hash": "57ba74326689dc954c6d93f25a1506e8baa67cfa71cc0ba8a70ac05aa80089d9",
+          "file_sha256_matches": true,
+          "byte_size_matches": true,
+          "declared_size_matches": true,
+          "decoded_size_matches": true,
+          "media_type_is_png": true,
+          "unique_color_count": 29,
+          "luma_span": 93,
+          "luma_stddev": 19.914486
+        }
+      ],
+      [
+        {
+          "revision_id": "rev_mock_caa600ba87348100f98dbc2b",
+          "asset_id": "asset_mock_afb6e11bedb586104f739aa2",
+          "size": [
+            128,
+            96
+          ],
+          "mode": "RGB",
+          "format": "PNG",
+          "pixel_hash": "4e878ee2ce51eaeeef214b465f3ac235422d1a34c8b1e31476656b8fe2c2fc8b",
+          "file_sha256_matches": true,
+          "byte_size_matches": true,
+          "declared_size_matches": true,
+          "decoded_size_matches": true,
+          "media_type_is_png": true,
+          "unique_color_count": 29,
+          "luma_span": 135,
+          "luma_stddev": 48.745806
+        },
+        {
+          "revision_id": "rev_mock_d657a536b216c908723f1b27",
+          "asset_id": "asset_mock_947e499275527399056c687d",
+          "size": [
+            128,
+            96
+          ],
+          "mode": "RGB",
+          "format": "PNG",
+          "pixel_hash": "57ba74326689dc954c6d93f25a1506e8baa67cfa71cc0ba8a70ac05aa80089d9",
+          "file_sha256_matches": true,
+          "byte_size_matches": true,
+          "declared_size_matches": true,
+          "decoded_size_matches": true,
+          "media_type_is_png": true,
+          "unique_color_count": 29,
+          "luma_span": 93,
+          "luma_stddev": 19.914486
+        }
+      ]
+    ],
+    "all_outputs_valid_png": true,
+    "fixed_seed_reproduces_each_candidate": true,
+    "minimum_candidate_uniqueness_ratio": 1.0,
+    "distinct_asset_and_revision_identity": true,
+    "provenance_complete": true,
+    "minimum_unique_color_count": 29,
+    "minimum_luma_span": 93.0,
+    "minimum_luma_stddev": 19.914486,
+    "elapsed_ms": {
+      "unit": "ms",
+      "count": 2,
+      "median": 9.562,
+      "mean": 9.562,
+      "minimum": 2.074,
+      "maximum": 17.049,
+      "p95": 16.301,
+      "samples": [
+        17.049,
+        2.074
+      ]
+    }
+  },
+  "multi_reference": {
+    "reference_count": 2,
+    "source_revision_ids": [
+      "rev_generation_gate_reference_0",
+      "rev_generation_gate_reference_1"
+    ],
+    "roles": [
+      "content",
+      "style"
+    ],
+    "strengths": [
+      0.5,
+      0.5
+    ],
+    "expected_weighted_rgb": [
+      130,
+      60,
+      130
+    ],
+    "observed_rgb": [
+      [
+        130,
+        60,
+        130
+      ],
+      [
+        130,
+        60,
+        130
+      ]
+    ],
+    "maximum_weighted_color_mae": 0.0,
+    "all_outputs_valid_png": true,
+    "all_output_counts_match": true,
+    "deterministic_pixels": true,
+    "distinct_asset_and_revision_identity": true,
+    "provenance_records_every_reference": true,
+    "fingerprint_changes_with_strength": true,
+    "fingerprint_changes_with_order": true,
+    "elapsed_ms": {
+      "unit": "ms",
+      "count": 2,
+      "median": 4.3,
+      "mean": 4.3,
+      "minimum": 1.581,
+      "maximum": 7.018,
+      "p95": 6.746,
+      "samples": [
+        7.018,
+        1.581
+      ]
+    }
+  },
+  "variation": {
+    "source_revision_id": "rev_mock_a6fccef29fe6f2c045277b05",
+    "minimum_changed_pixel_ratio": 1.0,
+    "deterministic_pixels": true,
+    "distinct_asset_and_revision_identity": true,
+    "source_lineage_and_strength_match": true,
+    "all_outputs_valid_png": true,
+    "all_output_counts_match": true,
+    "elapsed_ms": {
+      "unit": "ms",
+      "count": 2,
+      "median": 3.04,
+      "mean": 3.04,
+      "minimum": 1.333,
+      "maximum": 4.748,
+      "p95": 4.577,
+      "samples": [
+        4.748,
+        1.333
+      ]
+    }
+  },
+  "thresholds": {
+    "minimum_candidates_per_request": 2,
+    "minimum_reference_count": 2,
+    "minimum_unique_color_count": 3,
+    "minimum_luma_span": 20.0,
+    "maximum_reference_color_mae": 2.0,
+    "minimum_variation_change_ratio": 0.05,
+    "maximum_operation_p95_ms": 5000.0
+  },
+  "scope_limit": "技术契约与像素基线；验证真实 PNG、非退化输出、复现、候选区分、参考权重、变体、来源和性能，不代表提示词语义或审美质量；当前为离线确定性 Provider，不代表生产模型质量",
+  "violations": [],
+  "passed": true
+}

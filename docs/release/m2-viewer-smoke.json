@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-08-05T06:03:43.921960+00:00",
+  "profile": "smoke",
+  "environment": {
+    "os": "Windows-10-10.0.19045-SP0",
+    "machine": "AMD64",
+    "python": "3.12.10"
+  },
+  "fixtures": {
+    "large_size": [
+      1600,
+      1200
+    ],
+    "switch_count": 4,
+    "directory_count": 40,
+    "navigation_steps": 10,
+    "navigation_size": [
+      480,
+      320
+    ],
+    "open_repetitions": 1,
+    "switch_repetitions": 1
+  },
+  "metrics": {
+    "first_preview": {
+      "unit": "ms",
+      "count": 1,
+      "median": 406.891,
+      "mean": 406.891,
+      "minimum": 406.891,
+      "maximum": 406.891,
+      "p95": 406.891,
+      "samples": [
+        406.891
+      ]
+    },
+    "prefetched_switch": {
+      "unit": "ms",
+      "count": 3,
+      "median": 131.861,
+      "mean": 131.236,
+      "minimum": 127.208,
+      "maximum": 134.64,
+      "p95": 134.362,
+      "samples": [
+        131.861,
+        134.64,
+        127.208
+      ]
+    },
+    "directory_navigation": {
+      "unit": "ms",
+      "count": 10,
+      "median": 189.305,
+      "mean": 185.556,
+      "minimum": 153.711,
+      "maximum": 205.336,
+      "p95": 203.332,
+      "samples": [
+        195.916,
+        205.336,
+        187.175,
+        189.834,
+        200.881,
+        171.255,
+        188.775,
+        191.014,
+        153.711,
+        171.665
+      ]
+    }
+  },
+  "memory": {
+    "final_growth_mib": 1.492,
+    "peak_rss_mib": 71.43,
+    "monotonic_non_decreasing": false
+  },
+  "thresholds": {
+    "first_preview_p95_ms": 1800.0,
+    "prefetched_switch_p95_ms": 300.0,
+    "navigation_p95_ms": 300.0,
+    "directory_count": 500,
+    "navigation_steps": 100,
+    "final_rss_growth_mib": 256.0,
+    "monotonic_growth_review_mib": 64.0
+  },
+  "violations": [],
+  "passed": true
+}

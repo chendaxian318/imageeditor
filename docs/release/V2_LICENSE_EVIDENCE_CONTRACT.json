@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "release": "2.0",
+  "required_grants": [
+    {
+      "id": "first_party_rights",
+      "required_scopes": ["modify", "source_redistribution", "binary_redistribution", "commercial_distribution"],
+      "commercial_use_required": true,
+      "redistribution_required": true,
+      "required_files": ["authorization_document", "chain_of_title_review"]
+    },
+    {
+      "id": "third_party_dependencies",
+      "required_scopes": ["binary_redistribution", "notice_distribution", "commercial_distribution"],
+      "commercial_use_required": true,
+      "redistribution_required": true,
+      "required_files": ["dependency_inventory", "legal_review"]
+    },
+    {
+      "id": "inno_setup_commercial",
+      "required_scopes": ["commercial_installer_build", "redistribute_compiled_installer"],
+      "commercial_use_required": true,
+      "redistribution_required": true,
+      "required_files": ["license_document", "legal_review"]
+    }
+  ]
+}

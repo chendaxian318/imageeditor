@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-05",
+  "component": "unified_task_tray",
+  "status": "passed",
+  "language": "zh-CN",
+  "covered_task_kinds": [
+    "conversion",
+    "smart_edit",
+    "generation"
+  ],
+  "verified_behaviors": {
+    "active_first_ordering": true,
+    "bounded_history": true,
+    "progress_and_details": true,
+    "activate_routes_to_owned_mode": true,
+    "cancel_routes_to_existing_controller": true,
+    "explicit_retry_only": true,
+    "clear_finished_preserves_active": true,
+    "strict_local_json": true,
+    "terminal_history_restores": true,
+    "interrupted_history_becomes_unknown": true,
+    "interrupted_history_is_not_replayed": true
+  },
+  "quality_gate": {
+    "unittest_total": 389,
+    "unittest_failures": 0,
+    "unittest_errors": 0,
+    "ruff": "passed",
+    "mypy_files": 77,
+    "mypy": "passed",
+    "diff_check": "passed"
+  }
+}

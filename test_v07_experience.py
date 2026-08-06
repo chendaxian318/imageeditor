@@ -3,7 +3,6 @@ from __future__ import annotations
 import ctypes
 import json
 import os
-import re
 import tempfile
 import time
 import tkinter as tk
@@ -16,6 +15,7 @@ from light_image_editor.dpi import (
     WorkArea,
     clamp_geometry,
     dpi_scale,
+    fit_geometry_to_work_area,
     monitor_work_area,
     parse_geometry,
 )
@@ -42,30 +42,20 @@ def descendants(widget: tk.Misc) -> list[tk.Misc]:
 
 
 class LocalisationTests(unittest.TestCase):
-    def test_external_catalogs_have_matching_stable_keys(self) -> None:
+    def test_only_simplified_chinese_catalog_is_shipped(self) -> None:
         locale_dir = ROOT / "resources" / "locales"
-        catalogs = {
-            locale: json.loads((locale_dir / f"{locale}.json").read_text(encoding="utf-8"))
-            for locale in SUPPORTED_LOCALES
-        }
-        self.assertEqual(set(catalogs), {"zh-CN", "en-US"})
-        self.assertEqual(
-            set(catalogs["zh-CN"]["strings"]),
-            set(catalogs["en-US"]["strings"]),
-        )
-        self.assertEqual(
-            set(catalogs["zh-CN"]["replacements"]),
-            set(catalogs["en-US"]["replacements"]),
-        )
+        catalog = json.loads((locale_dir / "zh-CN.json").read_text(encoding="utf-8"))
+        self.assertEqual(SUPPORTED_LOCALES, ("zh-CN",))
+        self.assertEqual(catalog["locale"], "zh-CN")
+        self.assertFalse((locale_dir / "en-US.json").exists())
 
-    def test_language_switch_is_reversible_without_reinstall(self) -> None:
-        localizer = Localizer("zh-CN", ROOT / "resources" / "locales")
+    def test_unsupported_locale_falls_back_and_cannot_be_selected(self) -> None:
+        localizer = Localizer("en-US", ROOT / "resources" / "locales")
+        self.assertEqual(localizer.locale, "zh-CN")
         self.assertEqual(localizer.translate_text("打开"), "打开")
-        localizer.set_locale("en-US")
-        self.assertEqual(localizer.translate_text("打开"), "Open")
-        self.assertEqual(localizer.gettext("settings_title"), "Settings")
-        localizer.set_locale("zh-CN")
-        self.assertEqual(localizer.translate_text("Open"), "打开")
+        self.assertEqual(localizer.gettext("settings_title"), "设置")
+        with self.assertRaises(ValueError):
+            localizer.set_locale("en-US")
 
 
 class ThemeAndDpiTests(unittest.TestCase):
@@ -90,6 +80,11 @@ class ThemeAndDpiTests(unittest.TestCase):
         self.assertGreaterEqual(x, left_monitor.left + 16)
         self.assertGreaterEqual(y, left_monitor.top + 16)
         self.assertEqual(parse_geometry("1240x780+-1800+80"), (1240, 780, -1800, 80))
+        self.assertEqual(
+            fit_geometry_to_work_area("2400x1400+5000+-900", left_monitor),
+            "1888x1048+-1904+16",
+        )
+        self.assertIsNone(fit_geometry_to_work_area("invalid", left_monitor))
 
 
 class OfflinePrivacyTests(unittest.TestCase):
@@ -110,13 +105,16 @@ class OfflinePrivacyTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "real Tk integration is Windows-specific")
 class ExperienceUiTests(unittest.TestCase):
-    def test_runtime_language_settings_keyboard_and_accessible_names(self) -> None:
+    def test_chinese_only_settings_keyboard_and_accessible_names(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = SettingsStore(Path(directory) / "settings.json")
-            settings.save({"onboarding_completed": True, "locale": "zh-CN"})
+            settings.save({"onboarding_completed": True, "locale": "en-US"})
             app = ImageEditorApp(settings_store=settings)
             try:
                 app.update_idletasks()
+                self.assertEqual(app.localizer.locale, "zh-CN")
+                self.assertFalse(hasattr(app, "locale_var"))
+                self.assertEqual(app.title(), "轻量图片编辑器")
                 self.assertEqual(str(app.canvas.cget("takefocus")), "1")
                 self.assertEqual(
                     getattr(app.canvas, "accessible_name"),
@@ -132,13 +130,17 @@ class ExperienceUiTests(unittest.TestCase):
                     child for child in app.winfo_children() if isinstance(child, tk.Toplevel)
                 )
                 widgets = descendants(settings_window)
-                language_box = next(
-                    widget
-                    for widget in widgets
-                    if isinstance(widget, ttk.Combobox)
-                    and "English" in tuple(widget.cget("values"))
+                labels = [
+                    str(widget.cget("text")) for widget in widgets if isinstance(widget, ttk.Label)
+                ]
+                self.assertNotIn("界面语言", labels)
+                self.assertFalse(
+                    any(
+                        "English" in tuple(widget.cget("values"))
+                        for widget in widgets
+                        if isinstance(widget, ttk.Combobox)
+                    )
                 )
-                language_box.set("English")
                 apply_button = next(
                     widget
                     for widget in widgets
@@ -146,23 +148,13 @@ class ExperienceUiTests(unittest.TestCase):
                 )
                 apply_button.invoke()
                 app.update_idletasks()
-                self.assertEqual(app.locale_var.get(), "en-US")
-                self.assertEqual(app.title(), "Light Image Editor")
+                self.assertEqual(app.localizer.locale, "zh-CN")
+                self.assertEqual(app.title(), "轻量图片编辑器")
                 self.assertEqual(
                     getattr(app.canvas, "accessible_name"),
-                    "Image preview and editing canvas",
+                    "图片预览与编辑画布",
                 )
-                self.assertEqual(settings.load()["locale"], "en-US")
-                untranslated = []
-                for widget in descendants(app):
-                    try:
-                        if "text" in widget.keys():
-                            value = str(widget.cget("text"))
-                            if re.search(r"[\u4e00-\u9fff]", value):
-                                untranslated.append(value)
-                    except tk.TclError:
-                        pass
-                self.assertEqual(untranslated, [])
+                self.assertNotIn("locale", settings.load())
                 self.assertEqual(app.focus_navigator.move(), "break")
 
                 app.show_shortcut_help()
@@ -170,7 +162,7 @@ class ExperienceUiTests(unittest.TestCase):
                 help_window = next(
                     child
                     for child in app.winfo_children()
-                    if isinstance(child, tk.Toplevel) and child.title() == "Keyboard shortcuts"
+                    if isinstance(child, tk.Toplevel) and child.title() == "快捷键帮助"
                 )
                 geometry = parse_geometry(help_window.geometry())
                 self.assertIsNotNone(geometry)
@@ -186,7 +178,7 @@ class ExperienceUiTests(unittest.TestCase):
 
 
 class PackagingTests(unittest.TestCase):
-    def test_both_windows_builds_ship_external_locale_resources(self) -> None:
+    def test_both_windows_builds_ship_chinese_locale_resource(self) -> None:
         for name in ("image_editor.spec", "image_editor_portable.spec"):
             source = (ROOT / "packaging" / "windows" / name).read_text(encoding="utf-8")
             self.assertIn('"resources/locales"', source)

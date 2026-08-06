@@ -16,6 +16,9 @@
 #define RegistryName "LightImageEditor"
 #define ProgId "LightImageEditor.Image"
 #define ProjectProgId "LightImageEditor.Project"
+#ifndef ReleaseNotesFile
+#define ReleaseNotesFile SourcePath + "\..\..\docs\release\RELEASE_NOTES-v1.0.0.md"
+#endif
 
 [Setup]
 AppId={#MyAppId}
@@ -67,7 +70,7 @@ Source: "{#SourcePath}\..\..\NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\..\..\PRIVACY.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\..\..\THIRD_PARTY_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\..\..\docs\USER_MANUAL.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourcePath}\..\..\docs\release\RELEASE_NOTES-v1.0.0.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseNotesFile}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\..\..\docs\DEFAULT_APP_HELP.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

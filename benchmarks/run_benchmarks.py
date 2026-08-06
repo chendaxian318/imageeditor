@@ -17,6 +17,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,6 +52,12 @@ def _metric(samples: list[float], unit: str = "ms") -> dict[str, Any]:
     if not samples:
         raise ValueError("a benchmark metric requires at least one sample")
     rounded = [round(value, 3) for value in samples]
+    ordered = sorted(samples)
+    percentile_position = (len(ordered) - 1) * 0.95
+    lower_index = int(percentile_position)
+    upper_index = min(len(ordered) - 1, lower_index + 1)
+    fraction = percentile_position - lower_index
+    p95 = ordered[lower_index] + (ordered[upper_index] - ordered[lower_index]) * fraction
     return {
         "unit": unit,
         "count": len(rounded),
@@ -58,6 +65,7 @@ def _metric(samples: list[float], unit: str = "ms") -> dict[str, Any]:
         "mean": round(statistics.fmean(samples), 3),
         "minimum": round(min(samples), 3),
         "maximum": round(max(samples), 3),
+        "p95": round(p95, 3),
         "samples": rounded,
     }
 
@@ -418,10 +426,24 @@ def _worker_switch(paths: list[Path]) -> dict[str, Any]:
         previous_generation = app.preview_ready_generation
         app.open_path(paths[0], confirm=False)
         _wait_for_preview(app, previous_generation)
-        for path in paths[1:]:
+        for _path in paths[1:]:
+            # The M2 gate measures switching after the target decode has really
+            # entered ImageLoader's cache.  Waiting here keeps decoder latency
+            # out of the prefetched-switch measurement instead of merely hoping
+            # the neighbor prefetch has completed before the click.
+            neighbors = app.navigation.neighbors()
+            if not neighbors:
+                raise RuntimeError("switch benchmark navigation has no neighbor")
+            path = neighbors[0]
+            cache_ready = threading.Event()
+            prefetched = app.image_loader.load(path, callback=lambda _future: cache_ready.set())
+            prefetched.result(timeout=30)
+            if not cache_ready.wait(timeout=30):
+                raise TimeoutError(f"prefetch cache callback timed out: {path}")
             previous_generation = app.preview_ready_generation
             started = time.perf_counter()
-            app.open_path(path, confirm=False)
+            if not app.navigate_folder(1):
+                raise RuntimeError("prefetched switch navigation did not advance")
             samples.append(_wait_for_preview(app, previous_generation, started=started))
             peak_rss = max(peak_rss, _process_rss_bytes())
         return {
@@ -448,6 +470,45 @@ def _worker_zoom(path: Path) -> dict[str, Any]:
             app._refresh_preview()
             samples.append(_wait_for_preview(app, generation, started=started))
         return {"zoom_samples_ms": samples}
+    finally:
+        _destroy_ui_application(app)
+
+
+def _worker_viewer_navigation(directory: Path, steps: int) -> dict[str, Any]:
+    files = sorted(directory.glob("*.jpg"))
+    if len(files) < 2:
+        raise ValueError("viewer navigation benchmark needs at least two images")
+    app = _create_ui_application()
+    app.withdraw()
+    samples: list[float] = []
+    rss_samples: list[int] = []
+    try:
+        generation = app.preview_ready_generation
+        app.open_path(files[0], confirm=False)
+        _wait_for_preview(app, generation)
+        initial_rss = _process_rss_bytes()
+        rss_samples.append(initial_rss)
+        for _ in range(max(1, steps)):
+            generation = app.preview_ready_generation
+            started = time.perf_counter()
+            if not app.navigate_folder(1):
+                raise RuntimeError("viewer navigation stopped before the requested step count")
+            samples.append(_wait_for_preview(app, generation, started=started))
+            rss_samples.append(_process_rss_bytes())
+        final_rss = rss_samples[-1]
+        peak_rss = max(rss_samples)
+        monotonic_growth = all(
+            current >= previous for previous, current in zip(rss_samples, rss_samples[1:])
+        )
+        return {
+            "directory_count": len(app.navigation.files),
+            "navigation_samples_ms": samples,
+            "initial_rss_bytes": initial_rss,
+            "final_rss_bytes": final_rss,
+            "peak_rss_bytes": peak_rss,
+            "final_growth_bytes": max(0, final_rss - initial_rss),
+            "monotonic_non_decreasing": monotonic_growth,
+        }
     finally:
         _destroy_ui_application(app)
 
@@ -498,6 +559,8 @@ def _run_worker(arguments: list[str]) -> int:
         payload = _worker_switch([Path(value) for value in arguments[1:]])
     elif mode == "zoom":
         payload = _worker_zoom(Path(arguments[1]))
+    elif mode == "viewer-navigation":
+        payload = _worker_viewer_navigation(Path(arguments[1]), int(arguments[2]))
     else:
         raise ValueError(f"unknown worker mode: {mode}")
     print(json.dumps(payload, ensure_ascii=False), flush=True)

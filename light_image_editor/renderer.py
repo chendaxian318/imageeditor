@@ -284,29 +284,42 @@ def render_image(
 
 
 def histogram(image: Image.Image, max_pixels: int = 1_000_000) -> dict[str, tuple[int, ...]]:
-    sample = image.convert("RGB")
-    if sample.width * sample.height > max_pixels:
+    sample = image
+    owns_sample = False
+    if image.width * image.height > max_pixels:
         scale = math.sqrt(max_pixels / (sample.width * sample.height))
         sample = sample.resize(
             (max(1, round(sample.width * scale)), max(1, round(sample.height * scale))),
             Image.Resampling.BILINEAR,
+            reducing_gap=2.0,
         )
-    pixels = np.asarray(sample, dtype=np.uint8)
-    red = np.bincount(pixels[..., 0].ravel(), minlength=256)
-    green = np.bincount(pixels[..., 1].ravel(), minlength=256)
-    blue = np.bincount(pixels[..., 2].ravel(), minlength=256)
-    luma = np.clip(
-        np.rint(pixels[..., 0] * 0.2126 + pixels[..., 1] * 0.7152 + pixels[..., 2] * 0.0722),
-        0,
-        255,
-    ).astype(np.uint8)
-    luminance = np.bincount(luma.ravel(), minlength=256)
-    return {
-        "luma": tuple(int(value) for value in luminance),
-        "red": tuple(int(value) for value in red),
-        "green": tuple(int(value) for value in green),
-        "blue": tuple(int(value) for value in blue),
-    }
+        owns_sample = True
+    if sample.mode != "RGB":
+        converted = sample.convert("RGB")
+        if owns_sample:
+            sample.close()
+        sample = converted
+        owns_sample = True
+    try:
+        pixels = np.asarray(sample, dtype=np.uint8)
+        red = np.bincount(pixels[..., 0].ravel(), minlength=256)
+        green = np.bincount(pixels[..., 1].ravel(), minlength=256)
+        blue = np.bincount(pixels[..., 2].ravel(), minlength=256)
+        luma = np.clip(
+            np.rint(pixels[..., 0] * 0.2126 + pixels[..., 1] * 0.7152 + pixels[..., 2] * 0.0722),
+            0,
+            255,
+        ).astype(np.uint8)
+        luminance = np.bincount(luma.ravel(), minlength=256)
+        return {
+            "luma": tuple(int(value) for value in luminance),
+            "red": tuple(int(value) for value in red),
+            "green": tuple(int(value) for value in green),
+            "blue": tuple(int(value) for value in blue),
+        }
+    finally:
+        if owns_sample:
+            sample.close()
 
 
 def detect_straighten_angle(image: Image.Image) -> StraightenResult:

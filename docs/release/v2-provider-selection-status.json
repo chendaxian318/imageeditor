@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "release": "2.0",
+  "passed": false,
+  "blocker_count": 4,
+  "blockers": [
+    "V2-PROVIDER-MISSING-CANDIDATE: smart_edit 缺少生产候选",
+    "V2-PROVIDER-MISSING-CANDIDATE: generation 缺少生产候选",
+    "V2-PROVIDER-MISSING-DECISION: smart_edit 缺少人工选型决策",
+    "V2-PROVIDER-MISSING-DECISION: generation 缺少人工选型决策"
+  ]
+}

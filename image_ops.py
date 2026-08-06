@@ -32,7 +32,7 @@ SUPPORTED_INPUTS = {
     ".heif",
 }
 
-SUPPORTED_FORMATS = ("JPEG", "PNG", "WEBP", "AVIF", "BMP", "TIFF")
+SUPPORTED_FORMATS = ("JPEG", "PNG", "WEBP", "AVIF", "BMP", "TIFF", "GIF")
 _NATURAL_PARTS = re.compile(r"(\d+)")
 
 

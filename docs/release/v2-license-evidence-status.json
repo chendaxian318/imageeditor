@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "release": "2.0",
+  "passed": false,
+  "blocker_count": 3,
+  "blockers": [
+    "V2-LICENSE-MISSING: 缺少授权 first_party_rights",
+    "V2-LICENSE-MISSING: 缺少授权 third_party_dependencies",
+    "V2-LICENSE-MISSING: 缺少授权 inno_setup_commercial"
+  ]
+}

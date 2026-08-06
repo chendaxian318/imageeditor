@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "release": "2.0",
+  "selection_policy": "必须由产品负责人基于真实沙盒证据明确批准；禁止自动排名或自动选择 Provider。",
+  "max_retention_days": 30,
+  "required_common_capabilities": [
+    "content_policy",
+    "cancellation",
+    "idempotency"
+  ],
+  "required_evidence_files": [
+    "request",
+    "response",
+    "quality_result",
+    "cost_result",
+    "privacy_review"
+  ],
+  "required_roles": [
+    {
+      "role": "smart_edit",
+      "required_capabilities": [
+        "upscale",
+        "remove_background",
+        "ocr_text",
+        "replace_text"
+      ]
+    },
+    {
+      "role": "generation",
+      "required_capabilities": [
+        "text_to_image",
+        "reference_image",
+        "variation",
+        "negative_prompt",
+        "fixed_seed"
+      ]
+    }
+  ]
+}

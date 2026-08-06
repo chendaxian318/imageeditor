@@ -3,6 +3,7 @@
 /build/
 /dist/
 /release/
+/artifacts/
 __pycache__/
 *.py[cod]
 *.spec

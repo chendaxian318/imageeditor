@@ -85,6 +85,48 @@ class ImageLoaderTests(unittest.TestCase):
             self.assertEqual(raised.exception.kind, "damaged")
             self.assertIn("损坏", raised.exception.user_message)
 
+    def test_inflight_callers_receive_independent_images_and_cached_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "large.png"
+            Image.new("RGB", (2000, 1200), "#245680").save(path)
+            loader = ImageLoader(max_workers=1, cache_size=2)
+            try:
+                first_future = loader.load(path)
+                second_future = loader.load(path)
+                first = first_future.result(timeout=10)
+                second = second_future.result(timeout=10)
+                first.close()
+                self.assertEqual(second.getpixel((10, 10)), (36, 86, 128))
+                proxy = loader.cached_preview(path)
+                self.assertIsNotNone(proxy)
+                assert proxy is not None
+                self.assertLessEqual(max(proxy.size), 1600)
+                proxy.close()
+                second.close()
+            finally:
+                loader.shutdown()
+
+    def test_navigation_can_take_prefetched_bitmap_without_losing_screen_proxy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "prefetched.png"
+            Image.new("RGB", (2000, 1200), "#5a7896").save(path)
+            loader = ImageLoader(max_workers=1, cache_size=2)
+            try:
+                warm = loader.load(path).result(timeout=10)
+                warm.close()
+
+                document_image = loader.load(path, take_cached=True).result(timeout=10)
+                proxy = loader.cached_preview(path)
+
+                self.assertEqual(document_image.getpixel((20, 20)), (90, 120, 150))
+                self.assertIsNotNone(proxy)
+                assert proxy is not None
+                self.assertLessEqual(max(proxy.size), 1600)
+                proxy.close()
+                document_image.close()
+            finally:
+                loader.shutdown()
+
     def test_large_preview_is_rendered_to_canvas_size_in_background(self) -> None:
         image = Image.new("RGB", (4000, 3000), "navy")
         renderer = PreviewRenderer()
@@ -114,6 +156,58 @@ class ImageLoaderTests(unittest.TestCase):
         )
         self.assertEqual(frame.working.size, (40, 80))
         self.assertEqual(image.size, (80, 40))
+
+    def test_preview_can_compare_two_different_files_with_distinct_labels(self) -> None:
+        primary = Image.new("RGB", (40, 30), "red")
+        secondary = Image.new("RGB", (40, 30), "blue")
+        try:
+            frame = render_preview(
+                primary,
+                EditState(),
+                compare_original=False,
+                canvas_size=(120, 60),
+                zoom_percent=None,
+                comparison_image=secondary,
+                comparison_labels=("主图.png", "参考图.png"),
+            )
+            try:
+                self.assertIsNotNone(frame.split_layout)
+                assert frame.split_layout is not None
+                self.assertEqual(frame.split_labels, ("主图.png", "参考图.png"))
+                self.assertEqual(frame.image.getpixel((5, 5)), (255, 0, 0))
+                self.assertEqual(
+                    frame.image.getpixel((frame.split_layout.after_panel[0] + 5, 5)),
+                    (0, 0, 255),
+                )
+                self.assertIs(frame.working, primary)
+            finally:
+                frame.close()
+        finally:
+            primary.close()
+            secondary.close()
+
+    def test_preview_proxy_keeps_full_image_coordinates(self) -> None:
+        original = Image.new("RGB", (4000, 3000), "red")
+        proxy = Image.new("RGB", (400, 300), "blue")
+        try:
+            frame = render_preview(
+                original,
+                EditState(),
+                compare_original=False,
+                canvas_size=(200, 150),
+                zoom_percent=None,
+                display_proxy=proxy,
+            )
+            try:
+                self.assertIs(frame.working, original)
+                self.assertEqual(frame.image.size, (200, 150))
+                self.assertEqual(frame.image.getpixel((100, 75)), (0, 0, 255))
+                self.assertAlmostEqual(frame.scale, 0.05)
+            finally:
+                frame.close()
+        finally:
+            original.close()
+            proxy.close()
 
 
 class MetadataAndFileTests(unittest.TestCase):

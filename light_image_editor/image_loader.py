@@ -24,6 +24,7 @@ MAX_DECODE_PIXELS = 120_000_000
 MAX_IMAGE_DIMENSION = 100_000
 MAX_ANIMATION_FRAMES = 10_000
 SUPPORTED_DECODE_FORMATS = {"JPEG", "PNG", "WEBP", "BMP", "TIFF", "GIF", "AVIF", "HEIF"}
+CACHED_PREVIEW_MAX_SIZE = (1600, 1600)
 
 HEIF_AVAILABLE, HEIF_DETAIL = register_optional_heif()
 
@@ -152,7 +153,8 @@ class ImageLoader:
         )
         self._cache_size = max(1, cache_size)
         self._cache: OrderedDict[str, Image.Image] = OrderedDict()
-        self._inflight: dict[str, Future[Image.Image]] = {}
+        self._preview_cache: dict[str, Image.Image] = {}
+        self._inflight: dict[str, Future[None]] = {}
         self._lock = threading.Lock()
 
     @staticmethod
@@ -166,44 +168,148 @@ class ImageLoader:
         self,
         path: str | Path,
         callback: Callable[[Future[Image.Image]], object] | None = None,
+        *,
+        take_cached: bool = False,
     ) -> Future[Image.Image]:
         key = self._key(path)
+        new_base_future: Future[None] | None = None
         with self._lock:
             cached = self._cache.get(key)
             if cached is not None:
-                self._cache.move_to_end(key)
                 future: Future[Image.Image] = Future()
-                future.set_result(cached.copy())
-            else:
-                existing = self._inflight.get(key)
-                if existing is not None:
-                    future = existing
+                if take_cached:
+                    # Navigation transfers the cache-owned full bitmap directly
+                    # into the new Document.  Copying a 24 MP RGB image on Tk's
+                    # thread added visible latency even though decode/prefetch had
+                    # already completed.  The screen-sized proxy stays available
+                    # for the first render; adjacent prefetch repopulates the full
+                    # cache when the user moves on again.
+                    self._cache.pop(key)
+                    future.set_result(cached)
                 else:
-                    future = self._executor.submit(decode_image, path)
-                    self._inflight[key] = future
+                    self._cache.move_to_end(key)
+                    future.set_result(cached.copy())
+            else:
+                base_future = self._inflight.get(key)
+                if base_future is None:
+                    base_future = self._executor.submit(self._decode_into_cache, key, path)
+                    self._inflight[key] = base_future
+                    new_base_future = base_future
+                future = self._copy_after_cached(key, base_future)
+        if new_base_future is not None:
 
-                    def remember(completed: Future[Image.Image], cache_key: str = key) -> None:
-                        self._remember(cache_key, completed)
+            def clear(completed: Future[None], cache_key: str = key) -> None:
+                self._clear_inflight(cache_key, completed)
 
-                    future.add_done_callback(remember)
+            new_base_future.add_done_callback(clear)
         if callback is not None:
             future.add_done_callback(callback)
         return future
 
-    def _remember(self, key: str, future: Future[Image.Image]) -> None:
+    def _decode_into_cache(self, key: str, path: str | Path) -> None:
+        decoded = decode_image(path)
+        try:
+            self._store_decoded(key, decoded)
+        finally:
+            decoded.close()
+
+    def _store_decoded(self, key: str, decoded: Image.Image) -> None:
+        cached = decoded.copy()
+        scale = min(
+            CACHED_PREVIEW_MAX_SIZE[0] / decoded.width,
+            CACHED_PREVIEW_MAX_SIZE[1] / decoded.height,
+            1.0,
+        )
+        preview_size = (
+            max(1, round(decoded.width * scale)),
+            max(1, round(decoded.height * scale)),
+        )
+        preview = (
+            decoded.copy()
+            if preview_size == decoded.size
+            else decoded.resize(
+                preview_size,
+                Image.Resampling.LANCZOS,
+                reducing_gap=2.0,
+            )
+        )
+        retired: list[Image.Image] = []
         with self._lock:
-            self._inflight.pop(key, None)
-            if future.cancelled() or future.exception() is not None:
-                return
-            self._cache[key] = future.result().copy()
+            old_cached = self._cache.pop(key, None)
+            old_preview = self._preview_cache.pop(key, None)
+            if old_cached is not None:
+                retired.append(old_cached)
+            if old_preview is not None:
+                retired.append(old_preview)
+            self._cache[key] = cached
+            self._preview_cache[key] = preview
             self._cache.move_to_end(key)
             while len(self._cache) > self._cache_size:
-                _, old_image = self._cache.popitem(last=False)
-                old_image.close()
+                old_key, old_image = self._cache.popitem(last=False)
+                retired.append(old_image)
+                old_small = self._preview_cache.pop(old_key, None)
+                if old_small is not None:
+                    retired.append(old_small)
+        for image in retired:
+            image.close()
+
+    def _copy_after_cached(
+        self,
+        key: str,
+        base_future: Future[None],
+    ) -> Future[Image.Image]:
+        response: Future[Image.Image] = Future()
+
+        def deliver(completed: Future[None]) -> None:
+            if completed.cancelled():
+                response.cancel()
+                return
+            error = completed.exception()
+            if error is not None:
+                response.set_exception(error)
+                return
+            with self._lock:
+                cached = self._cache.get(key)
+                if cached is None:
+                    response.set_exception(RuntimeError("decoded image was not cached"))
+                    return
+                self._cache.move_to_end(key)
+                image = cached.copy()
+            response.set_result(image)
+
+        base_future.add_done_callback(deliver)
+        return response
+
+    def _clear_inflight(self, key: str, future: Future[None]) -> None:
+        with self._lock:
+            if self._inflight.get(key) is future:
+                self._inflight.pop(key, None)
+
+    def cached_preview(self, path: str | Path) -> Image.Image | None:
+        """Return an owned screen-sized preview when adjacent prefetch is ready."""
+
+        key = self._key(path)
+        with self._lock:
+            preview = self._preview_cache.get(key)
+            if preview is None:
+                return None
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            return preview.copy()
 
     def prefetch(self, paths: Iterable[str | Path]) -> None:
         for path in paths:
-            self.load(path)
+            key = self._key(path)
+            with self._lock:
+                if key in self._cache or key in self._inflight:
+                    continue
+                future = self._executor.submit(self._decode_into_cache, key, path)
+                self._inflight[key] = future
+
+            def clear(completed: Future[None], cache_key: str = key) -> None:
+                self._clear_inflight(cache_key, completed)
+
+            future.add_done_callback(clear)
 
     def load_animation(self, path: str | Path) -> Future[AnimationSequence]:
         """Decode an animation after its first frame without blocking Tk."""
@@ -214,13 +320,18 @@ class ImageLoader:
         key = self._key(path)
         with self._lock:
             image = self._cache.pop(key, None)
+            preview = self._preview_cache.pop(key, None)
         if image is not None:
             image.close()
+        if preview is not None:
+            preview.close()
 
     def shutdown(self, *, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait, cancel_futures=True)
         with self._lock:
             images = list(self._cache.values())
+            images.extend(self._preview_cache.values())
             self._cache.clear()
+            self._preview_cache.clear()
         for image in images:
             image.close()

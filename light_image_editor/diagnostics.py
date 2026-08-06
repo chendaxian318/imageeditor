@@ -82,7 +82,6 @@ def configure_diagnostics(root: str | Path | None = None) -> logging.Logger:
 def _safe_settings(settings: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "schema_version",
-        "locale",
         "theme_mode",
         "decode_workers",
         "preview_cache",

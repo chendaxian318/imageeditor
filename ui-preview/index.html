@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="轻量图片编辑器 · 20 种界面设计方向交互预览" />
+  <title>轻量图片编辑器 · 界面方向预览</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-theme="material" data-mode="viewer">
+  <div class="page-shell">
+    <header class="showcase-bar">
+      <div class="showcase-brand">
+        <span class="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span><span></span>
+        </span>
+        <div>
+          <p>轻量图片编辑器 · 界面实验室</p>
+          <h1>20 种工作台风格</h1>
+        </div>
+      </div>
+
+      <div class="style-title" aria-live="polite">
+        <button class="round-button" id="previousTheme" aria-label="上一个风格">←</button>
+        <div>
+          <span id="themeIndex">17 / 20</span>
+          <strong id="themeName">个性化圆润</strong>
+          <small id="themeDescription">四模式常驻，命令靠近底部操作区</small>
+          <em class="layout-name" id="layoutName">底部胶囊命令坞</em>
+        </div>
+        <button class="round-button" id="nextTheme" aria-label="下一个风格">→</button>
+      </div>
+
+      <div class="showcase-actions">
+        <span class="key-hint">← → 切换</span>
+        <button class="outline-button" id="toggleRail" aria-expanded="false" aria-controls="themeRail">全部风格</button>
+      </div>
+    </header>
+
+    <nav class="theme-rail" id="themeRail" aria-label="界面风格列表"></nav>
+
+    <main class="editor-window">
+      <header class="app-titlebar">
+        <div class="window-title">
+          <img src="../resources/icons/app-32.png" alt="" />
+          <span>轻量图片编辑器</span>
+          <em>山谷清晨.jpg</em>
+        </div>
+        <div class="window-controls" aria-hidden="true">
+          <span>—</span><span>□</span><span class="close">×</span>
+        </div>
+      </header>
+
+      <section class="mode-shell" aria-label="四模式导航">
+        <div class="viewer-mode-actions">
+          <button aria-label="上一张图片">‹</button>
+          <button aria-label="下一张图片">›</button>
+          <button>适应</button>
+          <button>1:1</button>
+          <button class="filled" data-mode-jump="convert">去转图</button>
+          <button data-mode-jump="edit">去改图</button>
+        </div>
+        <nav class="mode-switcher" aria-label="工作模式">
+          <button class="active" data-mode-button="viewer" aria-pressed="true">看图</button>
+          <button data-mode-button="convert" aria-pressed="false">转图</button>
+          <button data-mode-button="edit" aria-pressed="false">改图</button>
+          <button data-mode-button="generate" aria-pressed="false">生图</button>
+        </nav>
+        <span class="mode-summary" id="modeSummary">浏览与预览 · 本地</span>
+        <div class="favorite-strip">
+          <span>收藏工具</span>
+          <button>打开</button><button>保存图片</button><button>撤销</button>
+          <button>重做</button><button>裁剪</button><button>配置…</button>
+        </div>
+      </section>
+
+      <section class="command-bar">
+        <div class="command-group primary-commands">
+          <button class="tool-button accent"><i data-icon="folder"></i><span>打开</span></button>
+          <button class="tool-button"><i data-icon="save"></i><span>保存</span></button>
+          <button class="tool-button"><i data-icon="export"></i><span>导出</span></button>
+        </div>
+        <div class="command-divider"></div>
+        <div class="command-group edit-commands">
+          <button class="icon-button" data-tooltip="撤销" aria-label="撤销"><i data-icon="undo"></i></button>
+          <button class="icon-button" data-tooltip="重做" aria-label="重做"><i data-icon="redo"></i></button>
+          <button class="icon-button active" data-tooltip="裁剪" aria-label="裁剪"><i data-icon="crop"></i></button>
+          <button class="icon-button" data-tooltip="左转" aria-label="向左旋转"><i data-icon="rotate"></i></button>
+          <button class="icon-button" data-tooltip="对比原图" aria-label="对比原图"><i data-icon="compare"></i></button>
+        </div>
+        <div class="command-spacer"></div>
+        <div class="zoom-control">
+          <button id="zoomOut" aria-label="缩小画布">−</button>
+          <span id="zoomValue">68%</span>
+          <button id="zoomIn" aria-label="放大画布">＋</button>
+        </div>
+        <button class="icon-button subtle" data-tooltip="全屏" aria-label="进入全屏"><i data-icon="fullscreen"></i></button>
+        <button class="avatar-button" aria-label="当前用户：林">林</button>
+      </section>
+
+      <section class="workspace">
+        <aside class="asset-panel">
+          <div class="panel-heading">
+            <div>
+              <span id="assetPanelTitle">资源库</span>
+              <small id="assetPanelMeta">夏日旅行 · 12 张</small>
+            </div>
+            <button class="mini-button" aria-label="添加图片">＋</button>
+          </div>
+          <div class="search-field"><i data-icon="search"></i><span>搜索当前文件夹</span><kbd>Ctrl F</kbd></div>
+          <div class="thumbnail-grid" id="thumbnailGrid">
+            <button class="thumbnail selected" data-file="山谷清晨.jpg" aria-label="山谷清晨">
+              <span class="thumb-art art-one"></span><small>山谷清晨</small><em>2400 万像素</em>
+            </button>
+            <button class="thumbnail" data-file="海岸午后.jpg" aria-label="海岸午后">
+              <span class="thumb-art art-two"></span><small>海岸午后</small><em>1800 万像素</em>
+            </button>
+            <button class="thumbnail" data-file="城市夜色.jpg" aria-label="城市夜色">
+              <span class="thumb-art art-three"></span><small>城市夜色</small><em>2000 万像素</em>
+            </button>
+            <button class="thumbnail" data-file="林间小路.jpg" aria-label="林间小路">
+              <span class="thumb-art art-four"></span><small>林间小路</small><em>2400 万像素</em>
+            </button>
+            <button class="thumbnail" data-file="白色建筑.jpg" aria-label="白色建筑">
+              <span class="thumb-art art-five"></span><small>白色建筑</small><em>1200 万像素</em>
+            </button>
+          </div>
+          <div class="panel-footer"><span>1 / 12</span><button>排序 ↑</button></div>
+        </aside>
+
+        <section class="canvas-stage">
+          <div class="canvas-grid"></div>
+          <div class="generate-preview">
+            <span class="generate-kicker">完全离线 · 不联网 · 不计费</span>
+            <h2>生图模式</h2>
+            <p>先使用离线模拟服务验证任务、取消、候选结果与跨模块流转。</p>
+            <label>提示词</label>
+            <div class="prompt-preview">一张清晨山谷的清新插画，柔和自然光</div>
+            <div class="generate-options"><span>768 × 768</span><span>生成 2 张</span></div>
+            <div class="generate-actions"><button>运行离线测试</button><button>取消任务</button></div>
+            <small>当前未运行任务 · 真实智能服务将在后续里程碑接入</small>
+          </div>
+          <div class="floating-tools" aria-label="画布工具">
+            <button class="active" aria-label="选择工具"><i data-icon="pointer"></i></button>
+            <button aria-label="平移画布"><i data-icon="hand"></i></button>
+            <button aria-label="缩放工具"><i data-icon="magnify"></i></button>
+          </div>
+          <div class="photo-frame" id="photoFrame">
+            <svg viewBox="0 0 1200 800" role="img" aria-label="山谷清晨示例图">
+              <defs>
+                <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stop-color="#b8d8e8"/><stop offset=".55" stop-color="#e9c9a2"/><stop offset="1" stop-color="#f5dfbf"/>
+                </linearGradient>
+                <linearGradient id="mountain" x1="0" y1="0" x2="1" y2="1">
+                  <stop stop-color="#344f50"/><stop offset="1" stop-color="#75917e"/>
+                </linearGradient>
+                <linearGradient id="field" x1="0" y1="0" x2="0" y2="1">
+                  <stop stop-color="#a8a56c"/><stop offset="1" stop-color="#4b5c43"/>
+                </linearGradient>
+                <filter id="blur"><feGaussianBlur stdDeviation="22"/></filter>
+              </defs>
+              <rect width="1200" height="800" fill="url(#sky)"/>
+              <circle cx="820" cy="245" r="82" fill="#fff2c9" opacity=".86" filter="url(#blur)"/>
+              <circle cx="820" cy="245" r="48" fill="#fff8d8"/>
+              <path d="M0 430 L175 264 L328 397 L505 197 L747 438 L904 298 L1200 487 L1200 800 L0 800Z" fill="#78908a" opacity=".42"/>
+              <path d="M0 515 L226 322 L410 492 L638 268 L881 494 L1035 363 L1200 487 L1200 800 L0 800Z" fill="url(#mountain)"/>
+              <path d="M0 548 Q200 500 380 552 T760 540 T1200 516 L1200 800 L0 800Z" fill="url(#field)"/>
+              <path d="M545 800 C548 718 587 650 675 568 C712 533 756 500 811 472 C749 534 715 600 698 800Z" fill="#d1b686" opacity=".82"/>
+              <g fill="#263d35">
+                <path d="M140 580 l20-78 20 78h-12l22 72h-58l21-72z"/><path d="M985 535 l27-103 26 103h-14l28 94h-80l27-94z"/>
+                <path d="M1060 570 l20-78 20 78h-12l22 72h-58l21-72z"/><path d="M88 612 l17-63 16 63h-9l18 59H79l18-59z"/>
+              </g>
+              <g fill="#e8d5ab" opacity=".84">
+                <circle cx="332" cy="605" r="3"/><circle cx="352" cy="623" r="4"/><circle cx="304" cy="635" r="3"/><circle cx="882" cy="604" r="4"/><circle cx="922" cy="630" r="3"/>
+              </g>
+            </svg>
+            <span class="crop-handle nw"></span><span class="crop-handle ne"></span>
+            <span class="crop-handle sw"></span><span class="crop-handle se"></span>
+            <div class="crop-grid"><i></i><i></i><i></i><i></i></div>
+            <div class="photo-meta"><span>6000 × 4000</span><strong>原始格式 + 调整</strong></div>
+          </div>
+          <div class="canvas-status">
+            <span><i class="status-dot"></i> 已自动保存</span>
+            <span>P3 色域 · 8 位</span>
+            <button>适合画布</button>
+          </div>
+        </section>
+
+        <aside class="inspector-panel">
+          <div class="inspector-tabs" role="tablist" aria-label="参数类别">
+            <button role="tab" aria-selected="false" data-inspector="convert">转图</button><button class="active" role="tab" aria-selected="true" data-inspector="adjust">调整</button><button role="tab" aria-selected="false" data-inspector="annotation">标注</button><button role="tab" aria-selected="false" data-inspector="history">历史</button>
+          </div>
+          <div class="quick-filters">
+            <button><i class="filter-preview natural"></i><span>原图</span></button>
+            <button class="active"><i class="filter-preview vivid"></i><span>鲜明</span></button>
+            <button><i class="filter-preview warm"></i><span>暖阳</span></button>
+            <button><i class="filter-preview mono"></i><span>黑白</span></button>
+          </div>
+          <div class="control-section">
+            <div class="section-title"><span>光线</span><button>自动</button></div>
+            <label class="slider-row"><span>曝光</span><input type="range" min="-100" max="100" value="12"/><output>+12</output></label>
+            <label class="slider-row"><span>对比度</span><input type="range" min="-100" max="100" value="8"/><output>+8</output></label>
+            <label class="slider-row"><span>高光</span><input type="range" min="-100" max="100" value="-18"/><output>−18</output></label>
+            <label class="slider-row"><span>阴影</span><input type="range" min="-100" max="100" value="26"/><output>+26</output></label>
+          </div>
+          <div class="control-section">
+            <div class="section-title"><span>颜色</span><button>重置</button></div>
+            <label class="slider-row temp"><span>色温</span><input type="range" min="-100" max="100" value="6"/><output>+6</output></label>
+            <label class="slider-row"><span>自然饱和度</span><input type="range" min="-100" max="100" value="14"/><output>+14</output></label>
+          </div>
+          <div class="control-section collapsed"><div class="section-title"><span>细节</span><button>⌄</button></div></div>
+          <button class="export-button"><span>导出图像</span><small>Ctrl + E</small></button>
+        </aside>
+      </section>
+    </main>
+
+    <footer class="concept-note">
+      <div><span>设计关键词</span><strong id="themeKeywords">圆润 / 系统化 / 易用</strong></div>
+      <p id="themeNote">看图、转图、改图和生图拥有常驻一级入口；看图时隐藏参数面板，并保留收藏工具和底部胶囊命令。</p>
+      <span class="prototype-badge">交互原型</span>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

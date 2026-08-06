@@ -12,6 +12,8 @@ from PIL import Image, ImageCms
 from image_ops import EditState, apply_edits
 from light_image_editor.commands import EditTimeline
 from light_image_editor.document import metadata_from_image
+from light_image_editor.domain.recipe_executor import execute_transform_recipe
+from light_image_editor.domain.recipes import TransformRecipe
 from light_image_editor.renderer import render_image
 
 _DISPLAY_PROFILE = ImageCms.createProfile("sRGB")
@@ -35,6 +37,7 @@ class PreviewFrame:
     scale: float
     owns_working: bool = False
     split_layout: SplitPreviewLayout | None = None
+    split_labels: tuple[str, str] | None = None
 
     def close(self) -> None:
         """Release worker-owned pixels when a stale preview is discarded."""
@@ -53,13 +56,20 @@ def render_preview(
     zoom_percent: int | None,
     timeline: EditTimeline | None = None,
     split_compare: bool = False,
+    comparison_image: Image.Image | None = None,
+    comparison_labels: tuple[str, str] | None = None,
+    display_proxy: Image.Image | None = None,
+    conversion_recipe: TransformRecipe | None = None,
 ) -> PreviewFrame:
     """Apply edits and resize without touching Tk from the worker thread."""
 
     if compare_original:
         working = original
         owns_working = False
-    elif timeline is not None:
+    elif conversion_recipe is not None:
+        working = execute_transform_recipe(original, conversion_recipe)
+        owns_working = True
+    elif timeline is not None and timeline.cursor > 0:
         working = render_image(original, timeline)
         owns_working = True
     elif edit_state == EditState():
@@ -71,14 +81,29 @@ def render_preview(
 
     canvas_w = max(100, canvas_size[0])
     canvas_h = max(100, canvas_size[1])
+    if comparison_image is not None:
+        return _render_split_preview(
+            working,
+            comparison_image,
+            frame_working=working,
+            owns_working=owns_working,
+            canvas_size=(canvas_w, canvas_h),
+            zoom_percent=zoom_percent,
+            left_icc_profile=metadata_from_image(original).icc_profile,
+            right_icc_profile=metadata_from_image(comparison_image).icc_profile,
+            labels=comparison_labels or ("当前图片", "对比图片"),
+        )
     if split_compare and not compare_original:
         return _render_split_preview(
             original,
             working,
+            frame_working=working,
             owns_working=owns_working,
             canvas_size=(canvas_w, canvas_h),
             zoom_percent=zoom_percent,
-            icc_profile=metadata_from_image(original).icc_profile,
+            left_icc_profile=metadata_from_image(original).icc_profile,
+            right_icc_profile=metadata_from_image(original).icc_profile,
+            labels=("编辑前", "编辑后"),
         )
     if zoom_percent is None:
         scale = min(canvas_w / working.width, canvas_h / working.height, 1.0)
@@ -89,10 +114,11 @@ def render_preview(
         max(1, int(working.width * scale)),
         max(1, int(working.height * scale)),
     )
-    if preview_size == working.size:
-        display = working.copy()
+    display_source = display_proxy if display_proxy is not None else working
+    if preview_size == display_source.size:
+        display = display_source.copy()
     else:
-        display = working.resize(
+        display = display_source.resize(
             preview_size,
             Image.Resampling.LANCZOS,
             reducing_gap=3.0 if scale < 1.0 else None,
@@ -142,19 +168,22 @@ def _paste_with_alpha(canvas: Image.Image, image: Image.Image, position: tuple[i
 
 
 def _render_split_preview(
-    original: Image.Image,
-    working: Image.Image,
+    left_image: Image.Image,
+    right_image: Image.Image,
     *,
+    frame_working: Image.Image,
     owns_working: bool,
     canvas_size: tuple[int, int],
     zoom_percent: int | None,
-    icc_profile: bytes | None,
+    left_icc_profile: bytes | None,
+    right_icc_profile: bytes | None,
+    labels: tuple[str, str],
 ) -> PreviewFrame:
     """Render two complete images at one common scale in equal-width panels."""
 
     gap = 8
-    max_width = max(original.width, working.width)
-    max_height = max(original.height, working.height)
+    max_width = max(left_image.width, right_image.width)
+    max_height = max(left_image.height, right_image.height)
     if zoom_percent is None:
         available_panel_width = max(1, (canvas_size[0] - gap) // 2)
         scale = min(available_panel_width / max_width, canvas_size[1] / max_height, 1.0)
@@ -163,15 +192,15 @@ def _render_split_preview(
     panel_width = max(1, round(max_width * scale))
     panel_height = max(1, round(max_height * scale))
     before_size = (
-        max(1, round(original.width * scale)),
-        max(1, round(original.height * scale)),
+        max(1, round(left_image.width * scale)),
+        max(1, round(left_image.height * scale)),
     )
     after_size = (
-        max(1, round(working.width * scale)),
-        max(1, round(working.height * scale)),
+        max(1, round(right_image.width * scale)),
+        max(1, round(right_image.height * scale)),
     )
-    before = _display_copy(original, before_size, icc_profile)
-    after = _display_copy(working, after_size, icc_profile)
+    before = _display_copy(left_image, before_size, left_icc_profile)
+    after = _display_copy(right_image, after_size, right_icc_profile)
     combined = Image.new("RGB", (panel_width * 2 + gap, panel_height), "#1f232b")
     before_position = (
         (panel_width - before.width) // 2,
@@ -193,11 +222,12 @@ def _render_split_preview(
         after_panel=(panel_width + gap, 0, panel_width * 2 + gap, panel_height),
     )
     return PreviewFrame(
-        working=working,
+        working=frame_working,
         image=combined,
         scale=scale,
         owns_working=owns_working,
         split_layout=layout,
+        split_labels=labels,
     )
 
 
@@ -243,6 +273,10 @@ class PreviewRenderer:
         zoom_percent: int | None,
         timeline: EditTimeline | None = None,
         split_compare: bool = False,
+        comparison_image: Image.Image | None = None,
+        comparison_labels: tuple[str, str] | None = None,
+        display_proxy: Image.Image | None = None,
+        conversion_recipe: TransformRecipe | None = None,
     ) -> Future[PreviewFrame]:
         with self._lock:
             if self._pending is not None and not self._pending.running():
@@ -256,6 +290,10 @@ class PreviewRenderer:
                 zoom_percent=zoom_percent,
                 timeline=timeline,
                 split_compare=split_compare,
+                comparison_image=comparison_image,
+                comparison_labels=comparison_labels,
+                display_proxy=display_proxy,
+                conversion_recipe=conversion_recipe,
             )
             self._pending = future
             return future

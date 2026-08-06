@@ -1,0 +1,1221 @@
+{
+  "schema_version": 1,
+  "application_version": "1.1.3",
+  "captured_at_utc": "2026-08-05T17:43:59.219827+00:00",
+  "profile": "standard",
+  "environment": {
+    "os": "Windows-10-10.0.19045-SP0",
+    "machine": "AMD64",
+    "python": "3.12.10",
+    "pillow": "11.3.0"
+  },
+  "fixtures": {
+    "image_size": [
+      512,
+      384
+    ],
+    "repetitions": 3,
+    "background_count": 3,
+    "backgrounds": [
+      [
+        250,
+        250,
+        250
+      ],
+      [
+        42,
+        180,
+        74
+      ],
+      [
+        28,
+        32,
+        40
+      ]
+    ]
+  },
+  "upscale": {
+    "source_size": [
+      512,
+      384
+    ],
+    "scales": {
+      "2": {
+        "expected_size": [
+          1024,
+          768
+        ],
+        "output_sizes": [
+          [
+            1024,
+            768
+          ],
+          [
+            1024,
+            768
+          ],
+          [
+            1024,
+            768
+          ]
+        ],
+        "modes": [
+          "RGBA",
+          "RGBA",
+          "RGBA"
+        ],
+        "maximum_alpha_mae": 0.0,
+        "deterministic_pixels": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 136.374,
+          "mean": 137.226,
+          "minimum": 133.524,
+          "maximum": 141.778,
+          "p95": 141.238,
+          "samples": [
+            133.524,
+            136.374,
+            141.778
+          ]
+        }
+      },
+      "4": {
+        "expected_size": [
+          2048,
+          1536
+        ],
+        "output_sizes": [
+          [
+            2048,
+            1536
+          ],
+          [
+            2048,
+            1536
+          ],
+          [
+            2048,
+            1536
+          ]
+        ],
+        "modes": [
+          "RGBA",
+          "RGBA",
+          "RGBA"
+        ],
+        "maximum_alpha_mae": 0.0,
+        "deterministic_pixels": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 439.541,
+          "mean": 440.978,
+          "minimum": 439.227,
+          "maximum": 444.166,
+          "p95": 443.703,
+          "samples": [
+            444.166,
+            439.227,
+            439.541
+          ]
+        }
+      }
+    }
+  },
+  "remove_background": {
+    "case_count": 3,
+    "cases": [
+      {
+        "background_rgb": [
+          250,
+          250,
+          250
+        ],
+        "subject_box": [
+          128,
+          76,
+          384,
+          307
+        ],
+        "minimum_foreground_recall": 1.0,
+        "minimum_background_removal": 1.0,
+        "deterministic_pixels": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 33.881,
+          "mean": 35.494,
+          "minimum": 33.58,
+          "maximum": 39.022,
+          "p95": 38.508,
+          "samples": [
+            33.58,
+            33.881,
+            39.022
+          ]
+        }
+      },
+      {
+        "background_rgb": [
+          42,
+          180,
+          74
+        ],
+        "subject_box": [
+          128,
+          76,
+          384,
+          307
+        ],
+        "minimum_foreground_recall": 1.0,
+        "minimum_background_removal": 1.0,
+        "deterministic_pixels": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 35.659,
+          "mean": 35.652,
+          "minimum": 31.868,
+          "maximum": 39.43,
+          "p95": 39.053,
+          "samples": [
+            35.659,
+            39.43,
+            31.868
+          ]
+        }
+      },
+      {
+        "background_rgb": [
+          28,
+          32,
+          40
+        ],
+        "subject_box": [
+          128,
+          76,
+          384,
+          307
+        ],
+        "minimum_foreground_recall": 1.0,
+        "minimum_background_removal": 1.0,
+        "deterministic_pixels": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 35.315,
+          "mean": 34.91,
+          "minimum": 33.715,
+          "maximum": 35.699,
+          "p95": 35.661,
+          "samples": [
+            35.699,
+            35.315,
+            33.715
+          ]
+        }
+      }
+    ]
+  },
+  "edge_background": {
+    "case_count": 2,
+    "cases": [
+      {
+        "scenario": "opaque",
+        "subject_box": [
+          0,
+          0,
+          170,
+          384
+        ],
+        "expected_subject_alpha": 255,
+        "maximum_foreground_alpha_mae": 0.0,
+        "minimum_background_removal": 1.0,
+        "deterministic_pixels": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 35.006,
+          "mean": 34.312,
+          "minimum": 29.917,
+          "maximum": 38.012,
+          "p95": 37.711,
+          "samples": [
+            38.012,
+            29.917,
+            35.006
+          ]
+        }
+      },
+      {
+        "scenario": "semi_transparent",
+        "subject_box": [
+          0,
+          0,
+          170,
+          384
+        ],
+        "expected_subject_alpha": 128,
+        "maximum_foreground_alpha_mae": 0.0,
+        "minimum_background_removal": 1.0,
+        "deterministic_pixels": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 32.051,
+          "mean": 33.175,
+          "minimum": 29.432,
+          "maximum": 38.041,
+          "p95": 37.442,
+          "samples": [
+            38.041,
+            32.051,
+            29.432
+          ]
+        }
+      }
+    ]
+  },
+  "alpha_refinement": {
+    "preserve_alpha": 255,
+    "remove_alpha": 0,
+    "source_lineage_matches": true,
+    "elapsed_ms": 11.071
+  },
+  "background_replacement": {
+    "case_count": 2,
+    "cases": [
+      {
+        "kind": "solid_color",
+        "expected_background_pixel": [
+          242,
+          184,
+          181
+        ],
+        "background_pixels": [
+          [
+            242,
+            184,
+            181
+          ],
+          [
+            242,
+            184,
+            181
+          ],
+          [
+            242,
+            184,
+            181
+          ]
+        ],
+        "expected_subject_pixel": [
+          225,
+          82,
+          90,
+          255
+        ],
+        "subject_pixels": [
+          [
+            225,
+            82,
+            90,
+            255
+          ],
+          [
+            225,
+            82,
+            90,
+            255
+          ],
+          [
+            225,
+            82,
+            90,
+            255
+          ]
+        ],
+        "modes": [
+          "RGBA",
+          "RGBA",
+          "RGBA"
+        ],
+        "alpha_extrema": [
+          [
+            255,
+            255
+          ],
+          [
+            255,
+            255
+          ],
+          [
+            255,
+            255
+          ]
+        ],
+        "source_had_transparency": true,
+        "expected_background_sha256": null,
+        "background_sha256": [
+          null,
+          null,
+          null
+        ],
+        "deterministic_pixels": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 7.708,
+          "mean": 8.173,
+          "minimum": 7.143,
+          "maximum": 9.668,
+          "p95": 9.472,
+          "samples": [
+            7.143,
+            7.708,
+            9.668
+          ]
+        }
+      },
+      {
+        "kind": "custom_image",
+        "expected_background_pixel": [
+          34,
+          139,
+          230
+        ],
+        "background_pixels": [
+          [
+            34,
+            139,
+            230
+          ],
+          [
+            34,
+            139,
+            230
+          ],
+          [
+            34,
+            139,
+            230
+          ]
+        ],
+        "expected_subject_pixel": [
+          225,
+          82,
+          90,
+          255
+        ],
+        "subject_pixels": [
+          [
+            225,
+            82,
+            90,
+            255
+          ],
+          [
+            225,
+            82,
+            90,
+            255
+          ],
+          [
+            225,
+            82,
+            90,
+            255
+          ]
+        ],
+        "modes": [
+          "RGBA",
+          "RGBA",
+          "RGBA"
+        ],
+        "alpha_extrema": [
+          [
+            255,
+            255
+          ],
+          [
+            255,
+            255
+          ],
+          [
+            255,
+            255
+          ]
+        ],
+        "source_had_transparency": true,
+        "expected_background_sha256": "5042827b4547bca8da3660c872e67ca271a4e83c9b7829bc3e6cd430713ff8f6",
+        "background_sha256": [
+          "5042827b4547bca8da3660c872e67ca271a4e83c9b7829bc3e6cd430713ff8f6",
+          "5042827b4547bca8da3660c872e67ca271a4e83c9b7829bc3e6cd430713ff8f6",
+          "5042827b4547bca8da3660c872e67ca271a4e83c9b7829bc3e6cd430713ff8f6"
+        ],
+        "deterministic_pixels": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 10.474,
+          "mean": 10.229,
+          "minimum": 9.589,
+          "maximum": 10.623,
+          "p95": 10.608,
+          "samples": [
+            10.474,
+            10.623,
+            9.589
+          ]
+        }
+      }
+    ]
+  },
+  "region_repair": {
+    "region": [
+      0.298828125,
+      0.2994791666666667,
+      0.69921875,
+      0.6979166666666666
+    ],
+    "maximum_region_mae": 0.564435,
+    "maximum_alpha_mae": 0.0,
+    "minimum_outside_unchanged": 1.0,
+    "source_lineage_matches": true,
+    "deterministic_pixels": true,
+    "elapsed_ms": {
+      "unit": "ms",
+      "count": 3,
+      "median": 15.536,
+      "mean": 15.447,
+      "minimum": 15.096,
+      "maximum": 15.708,
+      "p95": 15.691,
+      "samples": [
+        15.708,
+        15.536,
+        15.096
+      ]
+    }
+  },
+  "mask_repair": {
+    "candidate_count": 2,
+    "minimum_selected_change": 1.0,
+    "minimum_outside_mask_unchanged": 1.0,
+    "minimum_unselected_subject_unchanged": 1.0,
+    "minimum_manual_exclusion_unchanged": 1.0,
+    "source_lineage_matches": true,
+    "provenance_stores_identity_only": true,
+    "deterministic_pixels": true,
+    "elapsed_ms": {
+      "unit": "ms",
+      "count": 3,
+      "median": 12.67,
+      "mean": 12.845,
+      "minimum": 12.462,
+      "maximum": 13.401,
+      "p95": 13.328,
+      "samples": [
+        12.67,
+        12.462,
+        13.401
+      ]
+    }
+  },
+  "text_replacement": {
+    "region": [
+      0.2,
+      0.3,
+      0.8,
+      0.7
+    ],
+    "minimum_region_change": 0.430132,
+    "minimum_outside_unchanged": 1.0,
+    "minimum_red_pixels": 5971,
+    "maximum_old_dark_pixels": 0,
+    "deterministic_pixels": true,
+    "elapsed_ms": {
+      "unit": "ms",
+      "count": 3,
+      "median": 31.052,
+      "mean": 32.58,
+      "minimum": 30.716,
+      "maximum": 35.973,
+      "p95": 35.481,
+      "samples": [
+        35.973,
+        30.716,
+        31.052
+      ]
+    },
+    "vertical": {
+      "region": [
+        0.35,
+        0.08,
+        0.65,
+        0.92
+      ],
+      "minimum_red_pixels": 3026,
+      "minimum_aspect_ratio": 9.46875,
+      "minimum_outside_unchanged": 1.0,
+      "deterministic_pixels": true,
+      "elapsed_ms": {
+        "unit": "ms",
+        "count": 3,
+        "median": 33.772,
+        "mean": 33.024,
+        "minimum": 30.504,
+        "maximum": 34.797,
+        "p95": 34.695,
+        "samples": [
+          30.504,
+          34.797,
+          33.772
+        ]
+      }
+    },
+    "perspective": {
+      "region": [
+        0.12,
+        0.2,
+        0.84,
+        0.75
+      ],
+      "quad": [
+        0.16,
+        0.3,
+        0.78,
+        0.2,
+        0.84,
+        0.75,
+        0.12,
+        0.63
+      ],
+      "minimum_red_pixels": 3179,
+      "minimum_outside_quad_unchanged": 1.0,
+      "deterministic_pixels": true,
+      "elapsed_ms": {
+        "unit": "ms",
+        "count": 3,
+        "median": 39.561,
+        "mean": 41.476,
+        "minimum": 39.247,
+        "maximum": 45.621,
+        "p95": 45.015,
+        "samples": [
+          45.621,
+          39.247,
+          39.561
+        ]
+      }
+    }
+  },
+  "text_detection": {
+    "case_count": 8,
+    "cases": [
+      {
+        "expected_angle": 0.0,
+        "detected": true,
+        "detected_angle": -0.0,
+        "angle_error": 0.0,
+        "overlap": 0.96463,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 538.653,
+          "mean": 536.267,
+          "minimum": 523.734,
+          "maximum": 546.415,
+          "p95": 545.639,
+          "samples": [
+            546.415,
+            523.734,
+            538.653
+          ]
+        }
+      },
+      {
+        "expected_angle": 17.0,
+        "detected": true,
+        "detected_angle": 17.0,
+        "angle_error": 0.0,
+        "overlap": 0.985374,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 525.983,
+          "mean": 525.789,
+          "minimum": 520.159,
+          "maximum": 531.226,
+          "p95": 530.702,
+          "samples": [
+            520.159,
+            531.226,
+            525.983
+          ]
+        }
+      },
+      {
+        "expected_angle": 30.0,
+        "detected": true,
+        "detected_angle": 30.0,
+        "angle_error": 0.0,
+        "overlap": 0.996844,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 563.842,
+          "mean": 565.046,
+          "minimum": 535.341,
+          "maximum": 595.956,
+          "p95": 592.744,
+          "samples": [
+            563.842,
+            535.341,
+            595.956
+          ]
+        }
+      },
+      {
+        "expected_angle": -30.0,
+        "detected": true,
+        "detected_angle": -29.0,
+        "angle_error": 1.0,
+        "overlap": 0.973561,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 570.102,
+          "mean": 568.676,
+          "minimum": 564.832,
+          "maximum": 571.094,
+          "p95": 570.995,
+          "samples": [
+            571.094,
+            564.832,
+            570.102
+          ]
+        }
+      },
+      {
+        "expected_angle": 58.0,
+        "detected": true,
+        "detected_angle": 58.0,
+        "angle_error": 0.0,
+        "overlap": 0.979514,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 563.928,
+          "mean": 573.132,
+          "minimum": 560.649,
+          "maximum": 594.817,
+          "p95": 591.728,
+          "samples": [
+            594.817,
+            563.928,
+            560.649
+          ]
+        }
+      },
+      {
+        "expected_angle": 80.0,
+        "detected": true,
+        "detected_angle": 80.0,
+        "angle_error": 0.0,
+        "overlap": 0.968565,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 598.217,
+          "mean": 602.107,
+          "minimum": 597.325,
+          "maximum": 610.778,
+          "p95": 609.522,
+          "samples": [
+            610.778,
+            597.325,
+            598.217
+          ]
+        }
+      },
+      {
+        "expected_angle": -83.0,
+        "detected": true,
+        "detected_angle": -83.0,
+        "angle_error": 0.0,
+        "overlap": 0.976993,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 602.024,
+          "mean": 596.93,
+          "minimum": 584.749,
+          "maximum": 604.016,
+          "p95": 603.817,
+          "samples": [
+            604.016,
+            584.749,
+            602.024
+          ]
+        }
+      },
+      {
+        "expected_angle": 90.0,
+        "detected": true,
+        "detected_angle": 90.0,
+        "angle_error": 0.0,
+        "overlap": 0.96463,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 523.395,
+          "mean": 524.615,
+          "minimum": 516.625,
+          "maximum": 533.826,
+          "p95": 532.783,
+          "samples": [
+            533.826,
+            523.395,
+            516.625
+          ]
+        }
+      }
+    ],
+    "perspective": {
+      "detected": true,
+      "candidate_count": 2,
+      "candidate_angles": [
+        2.0,
+        23.0
+      ],
+      "quadrilateral_candidate_count": 1,
+      "detected_angle": 2.0,
+      "overlap": 1.0,
+      "scale_delta": 0.047448,
+      "deterministic": true,
+      "elapsed_ms": {
+        "unit": "ms",
+        "count": 3,
+        "median": 404.239,
+        "mean": 404.662,
+        "minimum": 394.307,
+        "maximum": 415.44,
+        "p95": 414.32,
+        "samples": [
+          404.239,
+          394.307,
+          415.44
+        ]
+      }
+    },
+    "elapsed_ms": {
+      "unit": "ms",
+      "count": 27,
+      "median": 560.649,
+      "mean": 544.136,
+      "minimum": 394.307,
+      "maximum": 610.778,
+      "p95": 603.419,
+      "samples": [
+        546.415,
+        523.734,
+        538.653,
+        520.159,
+        531.226,
+        525.983,
+        563.842,
+        535.341,
+        595.956,
+        571.094,
+        564.832,
+        570.102,
+        594.817,
+        563.928,
+        560.649,
+        610.778,
+        597.325,
+        598.217,
+        604.016,
+        584.749,
+        602.024,
+        533.826,
+        523.395,
+        516.625,
+        404.239,
+        394.307,
+        415.44
+      ]
+    }
+  },
+  "font_matching": {
+    "candidate_fonts": [
+      "微软雅黑",
+      "宋体",
+      "黑体",
+      "等线"
+    ],
+    "case_count": 2,
+    "cases": [
+      {
+        "expected_font": "微软雅黑",
+        "top_font": "微软雅黑",
+        "top_score": 0.768009,
+        "top1_correct": true,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 41.365,
+          "mean": 41.245,
+          "minimum": 40.92,
+          "maximum": 41.452,
+          "p95": 41.443,
+          "samples": [
+            41.452,
+            41.365,
+            40.92
+          ]
+        }
+      },
+      {
+        "expected_font": "宋体",
+        "top_font": "宋体",
+        "top_score": 0.672793,
+        "top1_correct": true,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 37.025,
+          "mean": 37.819,
+          "minimum": 36.813,
+          "maximum": 39.62,
+          "p95": 39.36,
+          "samples": [
+            39.62,
+            37.025,
+            36.813
+          ]
+        }
+      }
+    ],
+    "elapsed_ms": {
+      "unit": "ms",
+      "count": 6,
+      "median": 40.27,
+      "mean": 39.532,
+      "minimum": 36.813,
+      "maximum": 41.452,
+      "p95": 41.43,
+      "samples": [
+        41.452,
+        41.365,
+        40.92,
+        39.62,
+        37.025,
+        36.813
+      ]
+    }
+  },
+  "smart_selection": {
+    "case_count": 7,
+    "cases": [
+      {
+        "name": "centered_contrast",
+        "detected": true,
+        "expected_source": "contrast",
+        "source": "contrast",
+        "expected_min_candidates": 1,
+        "candidate_count": 1,
+        "expected_min_color_split": 0,
+        "color_split_candidate_count": 0,
+        "split_probe_exclusive": true,
+        "expected_min_shape_split": 0,
+        "shape_split_candidate_count": 0,
+        "shape_probe_exclusive": true,
+        "coverage": 1.0,
+        "iou": 0.832237,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 66.433,
+          "mean": 66.053,
+          "minimum": 64.23,
+          "maximum": 67.497,
+          "p95": 67.391,
+          "samples": [
+            66.433,
+            67.497,
+            64.23
+          ]
+        }
+      },
+      {
+        "name": "edge_gradient",
+        "detected": true,
+        "expected_source": "contrast",
+        "source": "contrast",
+        "expected_min_candidates": 1,
+        "candidate_count": 1,
+        "expected_min_color_split": 0,
+        "color_split_candidate_count": 0,
+        "split_probe_exclusive": true,
+        "expected_min_shape_split": 0,
+        "shape_split_candidate_count": 0,
+        "shape_probe_exclusive": true,
+        "coverage": 1.0,
+        "iou": 0.846352,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 48.327,
+          "mean": 48.887,
+          "minimum": 44.874,
+          "maximum": 53.46,
+          "p95": 52.947,
+          "samples": [
+            48.327,
+            53.46,
+            44.874
+          ]
+        }
+      },
+      {
+        "name": "transparent_alpha",
+        "detected": true,
+        "expected_source": "alpha",
+        "source": "alpha",
+        "expected_min_candidates": 1,
+        "candidate_count": 1,
+        "expected_min_color_split": 0,
+        "color_split_candidate_count": 0,
+        "split_probe_exclusive": true,
+        "expected_min_shape_split": 0,
+        "shape_split_candidate_count": 0,
+        "shape_probe_exclusive": true,
+        "coverage": 1.0,
+        "iou": 0.835891,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 34.514,
+          "mean": 36.076,
+          "minimum": 33.163,
+          "maximum": 40.552,
+          "p95": 39.948,
+          "samples": [
+            34.514,
+            33.163,
+            40.552
+          ]
+        }
+      },
+      {
+        "name": "multiple_subjects",
+        "detected": true,
+        "expected_source": "contrast",
+        "source": "contrast",
+        "expected_min_candidates": 2,
+        "candidate_count": 2,
+        "expected_min_color_split": 0,
+        "color_split_candidate_count": 0,
+        "split_probe_exclusive": true,
+        "expected_min_shape_split": 0,
+        "shape_split_candidate_count": 0,
+        "shape_probe_exclusive": true,
+        "coverage": 1.0,
+        "iou": 0.828439,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 79.056,
+          "mean": 80.182,
+          "minimum": 67.99,
+          "maximum": 93.499,
+          "p95": 92.055,
+          "samples": [
+            93.499,
+            67.99,
+            79.056
+          ]
+        }
+      },
+      {
+        "name": "touching_color_split",
+        "detected": true,
+        "expected_source": "contrast",
+        "source": "contrast",
+        "expected_min_candidates": 3,
+        "candidate_count": 3,
+        "expected_min_color_split": 2,
+        "color_split_candidate_count": 2,
+        "split_probe_exclusive": true,
+        "expected_min_shape_split": 0,
+        "shape_split_candidate_count": 0,
+        "shape_probe_exclusive": true,
+        "coverage": 1.0,
+        "iou": 0.851348,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 129.101,
+          "mean": 125.62,
+          "minimum": 111.706,
+          "maximum": 136.055,
+          "p95": 135.36,
+          "samples": [
+            136.055,
+            111.706,
+            129.101
+          ]
+        }
+      },
+      {
+        "name": "same_color_shape_split",
+        "detected": true,
+        "expected_source": "contrast",
+        "source": "contrast",
+        "expected_min_candidates": 3,
+        "candidate_count": 3,
+        "expected_min_color_split": 0,
+        "color_split_candidate_count": 0,
+        "split_probe_exclusive": true,
+        "expected_min_shape_split": 2,
+        "shape_split_candidate_count": 2,
+        "shape_probe_exclusive": true,
+        "coverage": 1.0,
+        "iou": 0.86281,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 109.194,
+          "mean": 108.899,
+          "minimum": 102.058,
+          "maximum": 115.445,
+          "p95": 114.82,
+          "samples": [
+            102.058,
+            115.445,
+            109.194
+          ]
+        }
+      },
+      {
+        "name": "same_color_moderate_overlap",
+        "detected": true,
+        "expected_source": "contrast",
+        "source": "contrast",
+        "expected_min_candidates": 3,
+        "candidate_count": 3,
+        "expected_min_color_split": 0,
+        "color_split_candidate_count": 0,
+        "split_probe_exclusive": true,
+        "expected_min_shape_split": 2,
+        "shape_split_candidate_count": 2,
+        "shape_probe_exclusive": true,
+        "coverage": 1.0,
+        "iou": 0.855439,
+        "deterministic": true,
+        "elapsed_ms": {
+          "unit": "ms",
+          "count": 3,
+          "median": 89.882,
+          "mean": 92.936,
+          "minimum": 86.264,
+          "maximum": 102.662,
+          "p95": 101.384,
+          "samples": [
+            86.264,
+            102.662,
+            89.882
+          ]
+        }
+      }
+    ],
+    "elapsed_ms": {
+      "unit": "ms",
+      "count": 21,
+      "median": 79.056,
+      "mean": 79.808,
+      "minimum": 33.163,
+      "maximum": 136.055,
+      "p95": 129.101,
+      "samples": [
+        66.433,
+        67.497,
+        64.23,
+        48.327,
+        53.46,
+        44.874,
+        34.514,
+        33.163,
+        40.552,
+        93.499,
+        67.99,
+        79.056,
+        136.055,
+        111.706,
+        129.101,
+        102.058,
+        115.445,
+        109.194,
+        86.264,
+        102.662,
+        89.882
+      ]
+    }
+  },
+  "thresholds": {
+    "minimum_background_cases": 3,
+    "minimum_foreground_recall": 0.995,
+    "minimum_background_removal": 0.995,
+    "minimum_edge_background_cases": 2,
+    "maximum_edge_foreground_alpha_mae": 2.0,
+    "minimum_background_replacement_cases": 2,
+    "maximum_region_repair_mae": 3.0,
+    "minimum_region_repair_outside_unchanged": 1.0,
+    "minimum_mask_selected_change": 0.95,
+    "minimum_mask_outside_unchanged": 1.0,
+    "minimum_mask_unselected_subject_unchanged": 1.0,
+    "minimum_mask_manual_exclusion_unchanged": 1.0,
+    "maximum_upscale_alpha_mae": 2.0,
+    "minimum_text_region_change": 0.03,
+    "minimum_text_red_pixels": 5,
+    "minimum_vertical_text_red_pixels": 5,
+    "minimum_vertical_text_aspect_ratio": 1.5,
+    "minimum_perspective_text_red_pixels": 5,
+    "minimum_perspective_scale_delta": 0.04,
+    "minimum_outside_region_unchanged": 1.0,
+    "minimum_text_detection_cases": 8,
+    "minimum_text_detection_overlap": 0.4,
+    "maximum_text_detection_angle_error": 1.0,
+    "maximum_text_detection_p95_ms": 1000.0,
+    "minimum_font_match_cases": 2,
+    "maximum_font_match_p95_ms": 1000.0,
+    "minimum_smart_selection_cases": 7,
+    "minimum_smart_selection_coverage": 0.95,
+    "minimum_smart_selection_iou": 0.7,
+    "maximum_smart_selection_p95_ms": 1000.0,
+    "maximum_operation_p95_ms": 5000.0
+  },
+  "scope_limit": "离线确定性基线；文字区域检测以10°粗搜和1°局部精修覆盖-90°～+90°受控普通印刷体，精确竖排方向需要用户选择，受控单平面梯形透视可输出四角并完成校正识别与替换，去背景贴边/渐变/半透明样本为受控合成图，不代表复杂毛发、像素蒙版来自离线颜色/Alpha 连通域与可见轮廓厚度启发式，只覆盖受控异色及同色可见中等宽接触分离，不代表语义分割、深度遮挡或不可见像素恢复；也不代表多平面场景文字、弧形/艺术字、复杂纹理修复或生产 OCR 质量",
+  "violations": [],
+  "passed": true
+}

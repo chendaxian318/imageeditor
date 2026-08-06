@@ -1,0 +1,12 @@
+{
+  "SchemaVersion": 1,
+  "GeneratedUtc": "YYYY-MM-DDTHH:MM:SSZ",
+  "ApplicationVersion": "2.0.0",
+  "AuthenticodePassed": false,
+  "Signatures": [],
+  "DefenderStatus": "unavailable",
+  "DefenderSignatureVersion": "",
+  "DefenderScans": [],
+  "MultiEngineReview": "required-before-publication",
+  "PublicReleaseReady": false
+}

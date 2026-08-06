@@ -41,6 +41,14 @@ base dependency closure, and is not bundled in the standard v1.0.0 artifacts.
 Any future release that bundles it must add its licence and the complete native
 `libheif`/codec notice set to the distributed notice bundle.
 
+## Optional local OCR executable not included in the base installer
+
+The smart text workflow can detect a user-installed `tesseract` executable on
+`PATH` and invoke it locally for a selected image region. The base installer does
+not bundle Tesseract or OCR language data. Any future build that redistributes
+the executable or language packs must add their exact versions, authoritative
+licence texts and notices to the release inventory before packaging.
+
 The PyInstaller exception permits linking or embedding its compiled bootloader
 and related files into another program and distributing that combination
 without GPL restrictions arising solely from those files. This statement is a
