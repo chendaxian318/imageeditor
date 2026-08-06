@@ -221,6 +221,20 @@ TRANSPARENCY_BACKGROUND_LABELS: dict[str, str | None] = {
     "白色背景": "#ffffff",
     "黑色背景": "#000000",
 }
+PNG_PALETTE_LABELS: dict[str, int | None] = {
+    "保留原色": None,
+    "256 色": 256,
+    "128 色": 128,
+    "64 色": 64,
+    "32 色": 32,
+    "16 色": 16,
+}
+TIFF_COMPRESSION_LABELS: dict[str, str] = {
+    "不压缩": "raw",
+    "LZW": "tiff_lzw",
+    "Deflate": "tiff_adobe_deflate",
+    "PackBits": "packbits",
+}
 SMART_TEXT_FONTS = tuple(FONT_FILES)
 SMART_TEXT_ALIGNMENTS = {
     "左对齐": "left",
@@ -626,6 +640,9 @@ class ImageEditorApp(tk.Tk):
         self.format_var = tk.StringVar(value="JPEG")
         self.quality_var = tk.IntVar(value=85)
         self.target_size_var = tk.StringVar()
+        self.webp_lossless_var = tk.BooleanVar(value=False)
+        self.png_palette_var = tk.StringVar(value="保留原色")
+        self.tiff_compression_var = tk.StringVar(value="不压缩")
         self.filename_prefix_var = tk.StringVar()
         self.filename_suffix_var = tk.StringVar()
         self.watermark_text_var = tk.StringVar()
@@ -2097,28 +2114,60 @@ class ImageEditorApp(tk.Tk):
             state="readonly",
         )
         fmt.grid(row=1, column=1, sticky="ew", pady=5)
-        fmt.bind("<<ComboboxSelected>>", lambda _event: self._custom_export_changed())
+        fmt.bind("<<ComboboxSelected>>", lambda _event: self._format_changed())
         self._slider(export_box, "质量", self.quality_var, 1, 100, 2, self._custom_export_changed)
         ttk.Label(export_box, text="目标 KB").grid(row=3, column=0, sticky="w", pady=5)
         target_entry = ttk.Entry(export_box, textvariable=self.target_size_var)
+        self.target_size_entry = target_entry
         target_entry.grid(row=3, column=1, sticky="ew", pady=5)
         target_entry.bind("<KeyRelease>", lambda _event: self._custom_export_changed())
-        ttk.Label(export_box, text="文件前缀").grid(row=4, column=0, sticky="w", pady=5)
+        self.webp_lossless_check = ttk.Checkbutton(
+            export_box,
+            text="WebP 无损",
+            variable=self.webp_lossless_var,
+            command=self._advanced_format_changed,
+        )
+        self.webp_lossless_check.grid(row=4, column=1, sticky="w", pady=5)
+        ttk.Label(export_box, text="PNG 调色板").grid(row=5, column=0, sticky="w", pady=5)
+        self.png_palette_box = ttk.Combobox(
+            export_box,
+            textvariable=self.png_palette_var,
+            values=tuple(PNG_PALETTE_LABELS),
+            state="readonly",
+        )
+        self.png_palette_box.grid(row=5, column=1, sticky="ew", pady=5)
+        self.png_palette_box.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self._advanced_format_changed(),
+        )
+        ttk.Label(export_box, text="TIFF 压缩").grid(row=6, column=0, sticky="w", pady=5)
+        self.tiff_compression_box = ttk.Combobox(
+            export_box,
+            textvariable=self.tiff_compression_var,
+            values=tuple(TIFF_COMPRESSION_LABELS),
+            state="readonly",
+        )
+        self.tiff_compression_box.grid(row=6, column=1, sticky="ew", pady=5)
+        self.tiff_compression_box.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self._advanced_format_changed(),
+        )
+        ttk.Label(export_box, text="文件前缀").grid(row=7, column=0, sticky="w", pady=5)
         prefix_entry = ttk.Entry(export_box, textvariable=self.filename_prefix_var)
-        prefix_entry.grid(row=4, column=1, sticky="ew", pady=5)
+        prefix_entry.grid(row=7, column=1, sticky="ew", pady=5)
         prefix_entry.bind("<KeyRelease>", lambda _event: self._save_config())
-        ttk.Label(export_box, text="文件后缀").grid(row=5, column=0, sticky="w", pady=5)
+        ttk.Label(export_box, text="文件后缀").grid(row=8, column=0, sticky="w", pady=5)
         suffix_entry = ttk.Entry(export_box, textvariable=self.filename_suffix_var)
-        suffix_entry.grid(row=5, column=1, sticky="ew", pady=5)
+        suffix_entry.grid(row=8, column=1, sticky="ew", pady=5)
         suffix_entry.bind("<KeyRelease>", lambda _event: self._save_config())
         ttk.Label(export_box, text="透明底色").grid(
-            row=6,
+            row=9,
             column=0,
             sticky="w",
             pady=5,
         )
         transparency_row = ttk.Frame(export_box)
-        transparency_row.grid(row=6, column=1, sticky="ew", pady=5)
+        transparency_row.grid(row=9, column=1, sticky="ew", pady=5)
         transparency_row.columnconfigure(0, weight=1)
         transparency_box = ttk.Combobox(
             transparency_row,
@@ -2143,13 +2192,14 @@ class ImageEditorApp(tk.Tk):
             text="保留 EXIF / ICC / DPI / XMP",
             variable=self.preserve_metadata_var,
             command=self._custom_export_changed,
-        ).grid(row=7, column=1, sticky="w", pady=(6, 0))
+        ).grid(row=10, column=1, sticky="w", pady=(6, 0))
         ttk.Checkbutton(
             export_box,
             text="覆盖前创建 .bak 备份",
             variable=self.backup_on_overwrite_var,
             command=self._save_config,
-        ).grid(row=8, column=1, sticky="w", pady=(4, 0))
+        ).grid(row=11, column=1, sticky="w", pady=(4, 0))
+        self._update_format_advanced_controls()
         ttk.Checkbutton(
             export_box,
             text="保存后定位文件",
@@ -7873,6 +7923,12 @@ class ImageEditorApp(tk.Tk):
 
     def _conversion_control_state(self) -> ConversionControlState:
         current = ConversionControlState.from_draft(self.conversion_draft_history.current)
+        png_palette_label = self.png_palette_var.get()
+        if png_palette_label not in PNG_PALETTE_LABELS:
+            raise ValueError("PNG 调色板选项无效")
+        tiff_compression_label = self.tiff_compression_var.get()
+        if tiff_compression_label not in TIFF_COMPRESSION_LABELS:
+            raise ValueError("TIFF 压缩选项无效")
         return ConversionControlState(
             width_text=self.width_var.get(),
             height_text=self.height_var.get(),
@@ -7885,6 +7941,9 @@ class ImageEditorApp(tk.Tk):
             output_format=self.format_var.get(),
             quality=int(self.quality_var.get()),
             target_size_text=self.target_size_var.get(),
+            webp_lossless=self.webp_lossless_var.get(),
+            png_palette_colors=PNG_PALETTE_LABELS[png_palette_label],
+            tiff_compression=TIFF_COMPRESSION_LABELS[tiff_compression_label],
             preserve_metadata=(
                 self.preserve_metadata_var.get() and not self.batch_strip_metadata_var.get()
             ),
@@ -7914,6 +7973,25 @@ class ImageEditorApp(tk.Tk):
             self.format_var.set(state.output_format)
             self.quality_var.set(state.quality)
             self.target_size_var.set(state.target_size_text)
+            self.webp_lossless_var.set(state.webp_lossless)
+            palette_label = next(
+                (
+                    label
+                    for label, value in PNG_PALETTE_LABELS.items()
+                    if value == state.png_palette_colors
+                ),
+                "保留原色",
+            )
+            self.png_palette_var.set(palette_label)
+            compression_label = next(
+                (
+                    label
+                    for label, value in TIFF_COMPRESSION_LABELS.items()
+                    if value == state.tiff_compression
+                ),
+                "不压缩",
+            )
+            self.tiff_compression_var.set(compression_label)
             self.preserve_metadata_var.set(state.preserve_metadata)
             self.batch_strip_metadata_var.set(not state.preserve_metadata)
             self.batch_rename_template_var.set(state.rename_template)
@@ -7934,6 +8012,7 @@ class ImageEditorApp(tk.Tk):
             self.crop_box = None
         finally:
             self._syncing_document = False
+        self._update_format_advanced_controls()
         self.crop_var.set("配方中已有裁切" if draft.crop_box is not None else "未设置裁剪")
 
     def _update_conversion_draft_from_controls(self) -> None:
@@ -12918,6 +12997,9 @@ class ImageEditorApp(tk.Tk):
                     output_format=profile.output_format,
                     quality=profile.quality,
                     target_size_kb=profile.target_size_kb,
+                    webp_lossless=profile.webp_lossless,
+                    png_palette_colors=profile.png_palette_colors,
+                    tiff_compression=profile.tiff_compression,
                     preserve_metadata=profile.preserve_metadata,
                 )
             except (tk.TclError, TypeError, ValueError) as error:
@@ -13058,8 +13140,12 @@ class ImageEditorApp(tk.Tk):
                 self.preserve_metadata_var.set(state.preserve_metadata)
                 self.batch_strip_metadata_var.set(not state.preserve_metadata)
                 self.export_preset_var.set(state.export_preset)
+                self.webp_lossless_var.set(False)
+                self.png_palette_var.set("保留原色")
+                self.tiff_compression_var.set("不压缩")
             finally:
                 self._syncing_document = False
+            self._update_format_advanced_controls()
             self._update_conversion_draft_from_controls()
             self._save_config()
             self.status_var.set(f"已应用转图导出预设：{state.export_preset}")
@@ -13080,6 +13166,38 @@ class ImageEditorApp(tk.Tk):
         self._save_config()
         self._update_estimate()
         self.status_var.set(f"已应用导出预设：{state.export_preset}")
+
+    def _format_changed(self) -> None:
+        output_format = self.format_var.get().strip().upper()
+        if output_format != "WEBP":
+            self.webp_lossless_var.set(False)
+        if output_format != "PNG":
+            self.png_palette_var.set("保留原色")
+        if output_format != "TIFF":
+            self.tiff_compression_var.set("不压缩")
+        self._update_format_advanced_controls()
+        self._custom_export_changed()
+
+    def _advanced_format_changed(self) -> None:
+        if self.format_var.get().strip().upper() == "WEBP" and self.webp_lossless_var.get():
+            self.target_size_var.set("")
+        self._update_format_advanced_controls()
+        self._custom_export_changed()
+
+    def _update_format_advanced_controls(self) -> None:
+        output_format = self.format_var.get().strip().upper()
+        if output_format == "WEBP":
+            self.webp_lossless_check.state(("!disabled",))
+        else:
+            self.webp_lossless_check.state(("disabled",))
+        self.png_palette_box.configure(state="readonly" if output_format == "PNG" else "disabled")
+        self.tiff_compression_box.configure(
+            state="readonly" if output_format == "TIFF" else "disabled"
+        )
+        if output_format == "WEBP" and self.webp_lossless_var.get():
+            self.target_size_entry.state(("disabled",))
+        else:
+            self.target_size_entry.state(("!disabled",))
 
     def _custom_export_changed(self) -> None:
         if self.mode_router.active_mode is ModeId.CONVERT:

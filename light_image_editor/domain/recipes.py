@@ -13,10 +13,11 @@ if TYPE_CHECKING:
     from ..batch import BatchRecipe
 
 
-TRANSFORM_RECIPE_SCHEMA_VERSION = 1
+TRANSFORM_RECIPE_SCHEMA_VERSION = 2
 RECIPE_SCHEMA_VERSION = TRANSFORM_RECIPE_SCHEMA_VERSION
 SUPPORTED_OUTPUT_FORMATS = frozenset({"JPEG", "PNG", "WEBP", "AVIF", "BMP", "TIFF", "GIF"})
 SUPPORTED_CONFLICT_POLICIES = frozenset({"error", "overwrite", "unique"})
+SUPPORTED_TIFF_COMPRESSIONS = frozenset({"raw", "tiff_lzw", "tiff_adobe_deflate", "packbits"})
 
 _TEMPLATE_FIELD = re.compile(r"\{(stem|name|ext|index|date|datetime)(?::([^{}]+))?\}")
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -74,6 +75,15 @@ def _normalize_conflict_policy(value: Any) -> str:
     normalized = value.strip().lower()
     if normalized not in SUPPORTED_CONFLICT_POLICIES:
         raise ValueError(f"未知的同名冲突策略：{value}")
+    return normalized
+
+
+def _normalize_tiff_compression(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("TIFF 压缩方式必须是字符串")
+    normalized = value.strip().lower()
+    if normalized not in SUPPORTED_TIFF_COMPRESSIONS:
+        raise ValueError(f"不支持的 TIFF 压缩方式：{value}")
     return normalized
 
 
@@ -315,6 +325,9 @@ class ExportProfile:
     output_format: str = "JPEG"
     quality: int = 85
     target_size_kb: int | None = None
+    webp_lossless: bool = False
+    png_palette_colors: int | None = None
+    tiff_compression: str = "raw"
     preserve_metadata: bool = True
     rename_template: str = "{stem}_{index:04d}"
     conflict_policy: str = "unique"
@@ -327,6 +340,9 @@ class ExportProfile:
         "output_format",
         "quality",
         "target_size_kb",
+        "webp_lossless",
+        "png_palette_colors",
+        "tiff_compression",
         "preserve_metadata",
         "rename_template",
         "conflict_policy",
@@ -344,6 +360,21 @@ class ExportProfile:
         )
         if target_size_kb is not None and output_format not in {"JPEG", "WEBP"}:
             raise ValueError("目标 KB 仅适用于 JPEG 和 WEBP")
+        webp_lossless = _strict_bool(self.webp_lossless, "WebP 无损")
+        png_palette_colors = (
+            None
+            if self.png_palette_colors is None
+            else _strict_int(self.png_palette_colors, "PNG 调色板颜色数", 2, 256)
+        )
+        tiff_compression = _normalize_tiff_compression(self.tiff_compression)
+        if webp_lossless and output_format != "WEBP":
+            raise ValueError("WebP 无损仅适用于 WEBP 输出")
+        if webp_lossless and target_size_kb is not None:
+            raise ValueError("WebP 无损不能与目标 KB 同时启用")
+        if png_palette_colors is not None and output_format != "PNG":
+            raise ValueError("PNG 调色板仅适用于 PNG 输出")
+        if tiff_compression != "raw" and output_format != "TIFF":
+            raise ValueError("TIFF 压缩仅适用于 TIFF 输出")
         preserve_metadata = _strict_bool(self.preserve_metadata, "保留元数据")
         rename_template = _validate_rename_template(self.rename_template)
         conflict_policy = _normalize_conflict_policy(self.conflict_policy)
@@ -355,6 +386,9 @@ class ExportProfile:
         object.__setattr__(self, "output_format", output_format)
         object.__setattr__(self, "quality", quality)
         object.__setattr__(self, "target_size_kb", target_size_kb)
+        object.__setattr__(self, "webp_lossless", webp_lossless)
+        object.__setattr__(self, "png_palette_colors", png_palette_colors)
+        object.__setattr__(self, "tiff_compression", tiff_compression)
         object.__setattr__(self, "preserve_metadata", preserve_metadata)
         object.__setattr__(self, "rename_template", rename_template)
         object.__setattr__(self, "conflict_policy", conflict_policy)
@@ -371,6 +405,9 @@ class ExportProfile:
             "output_format": self.output_format,
             "quality": self.quality,
             "target_size_kb": self.target_size_kb,
+            "webp_lossless": self.webp_lossless,
+            "png_palette_colors": self.png_palette_colors,
+            "tiff_compression": self.tiff_compression,
             "preserve_metadata": self.preserve_metadata,
             "rename_template": self.rename_template,
             "conflict_policy": self.conflict_policy,
@@ -465,11 +502,24 @@ class TransformRecipe:
         raw_steps = payload["steps"]
         if not isinstance(raw_steps, list):
             raise ValueError("转图配方 steps 必须是数组")
+        schema_version = payload["schema_version"]
+        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+            raise ValueError("配方 schema_version 必须是整数")
+        if schema_version not in {1, TRANSFORM_RECIPE_SCHEMA_VERSION}:
+            raise ValueError(f"不支持的转图配方版本：{schema_version}")
+        export_payload = payload["export"]
+        if not isinstance(export_payload, dict):
+            raise ValueError("导出配置必须是对象")
+        if schema_version == 1:
+            export_payload = copy.deepcopy(export_payload)
+            export_payload.setdefault("webp_lossless", False)
+            export_payload.setdefault("png_palette_colors", None)
+            export_payload.setdefault("tiff_compression", "raw")
         return cls(
-            schema_version=payload["schema_version"],
+            schema_version=TRANSFORM_RECIPE_SCHEMA_VERSION,
             name=payload["name"],
             steps=tuple(TransformStep.from_json(step) for step in raw_steps),
-            export_profile=ExportProfile.from_json(payload["export"]),
+            export_profile=ExportProfile.from_json(export_payload),
         )
 
     @classmethod

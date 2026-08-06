@@ -237,6 +237,9 @@ class ConversionControlState:
     output_format: str = "JPEG"
     quality: int = 85
     target_size_text: str = ""
+    webp_lossless: bool = False
+    png_palette_colors: int | None = None
+    tiff_compression: str = "raw"
     preserve_metadata: bool = True
     rename_template: str = "{stem}_{index:04d}"
     conflict_policy: str = "unique"
@@ -278,6 +281,9 @@ class ConversionControlState:
             target_size_text=(
                 "" if profile.target_size_kb is None else str(profile.target_size_kb)
             ),
+            webp_lossless=profile.webp_lossless,
+            png_palette_colors=profile.png_palette_colors,
+            tiff_compression=profile.tiff_compression,
             preserve_metadata=profile.preserve_metadata,
             rename_template=profile.rename_template,
             conflict_policy=profile.conflict_policy,
@@ -329,6 +335,9 @@ class ConversionControlState:
                 output_format=self.output_format,
                 quality=self.quality,
                 target_size_kb=target_size_kb,
+                webp_lossless=self.webp_lossless,
+                png_palette_colors=self.png_palette_colors,
+                tiff_compression=self.tiff_compression,
                 preserve_metadata=self.preserve_metadata,
                 rename_template=self.rename_template,
                 conflict_policy=self.conflict_policy,

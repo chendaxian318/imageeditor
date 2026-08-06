@@ -202,12 +202,37 @@ class ConversionDraftTests(unittest.TestCase):
             ConversionControlState(output_format="PNG", target_size_text="20").apply_to(draft)
         with self.assertRaises(ValueError):
             ConversionControlState(
+                output_format="WEBP",
+                target_size_text="20",
+                webp_lossless=True,
+            ).apply_to(draft)
+        with self.assertRaises(ValueError):
+            ConversionControlState(
+                output_format="JPEG",
+                png_palette_colors=64,
+            ).apply_to(draft)
+        with self.assertRaises(ValueError):
+            ConversionControlState(
                 transparency_background_explicit=1  # type: ignore[arg-type]
             ).apply_to(draft)
 
         exact = ConversionControlState(width_text="320", height_text="180").apply_to(draft)
         self.assertEqual(exact.resize_params["exact_width"], 320)
         self.assertTrue(exact.resize_params["allow_upscale"])
+
+    def test_control_state_preserves_advanced_format_options(self) -> None:
+        profiles = (
+            ExportProfile(output_format="WEBP", webp_lossless=True),
+            ExportProfile(output_format="PNG", png_palette_colors=32),
+            ExportProfile(output_format="TIFF", tiff_compression="packbits"),
+        )
+
+        for profile in profiles:
+            with self.subTest(output_format=profile.output_format):
+                draft = ConversionDraft.from_recipe(TransformRecipe(export_profile=profile))
+                controls = ConversionControlState.from_draft(draft)
+                restored = controls.apply_to(draft)
+                self.assertEqual(restored.export_profile, profile)
 
 
 def _step_key(step: TransformStep) -> str:

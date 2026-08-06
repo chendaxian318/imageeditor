@@ -8,6 +8,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from PIL import Image, features
 
@@ -113,6 +114,8 @@ def export_animation(
     output_format: str,
     *,
     quality: int = 85,
+    webp_lossless: bool = False,
+    png_palette_colors: int | None = None,
     transform: Callable[[Image.Image], Image.Image] | None = None,
 ) -> Path:
     """Atomically export GIF/APNG/WebP animation, optionally transforming each frame."""
@@ -127,8 +130,88 @@ def export_animation(
     destination = Path(target)
     destination.parent.mkdir(parents=True, exist_ok=True)
     prepared = [transform(frame.copy()) if transform else frame.copy() for frame in sequence.frames]
-    if fmt == "GIF":
-        prepared = [frame.convert("RGBA").quantize(colors=256) for frame in prepared]
+    palette_colors = 256 if fmt == "GIF" else None
+    if palette_colors is not None:
+        quantized: list[Image.Image] = []
+        try:
+            for frame in prepared:
+                rgba = frame.convert("RGBA")
+                try:
+                    quantized.append(
+                        rgba.quantize(
+                            colors=palette_colors,
+                            method=Image.Quantize.FASTOCTREE,
+                            dither=Image.Dither.FLOYDSTEINBERG,
+                        )
+                    )
+                finally:
+                    rgba.close()
+        except BaseException:
+            for frame in quantized:
+                frame.close()
+            raise
+        for frame in prepared:
+            frame.close()
+        prepared = quantized
+    elif fmt == "PNG" and png_palette_colors is not None:
+        if not 2 <= png_palette_colors <= 256:
+            for frame in prepared:
+                frame.close()
+            raise ValueError("PNG 调色板颜色数必须位于 2 到 256 之间")
+        for frame in prepared:
+            rgba = frame.convert("RGBA")
+            try:
+                alpha = rgba.getchannel("A")
+                try:
+                    min_alpha = cast(int, alpha.getextrema()[0])
+                finally:
+                    alpha.close()
+                if min_alpha < 255:
+                    for item in prepared:
+                        item.close()
+                    raise ValueError("带透明通道的 APNG 暂不支持调色板量化")
+            finally:
+                rgba.close()
+        atlas_width = max(frame.width for frame in prepared)
+        atlas_height = sum(frame.height for frame in prepared)
+        atlas = Image.new("RGB", (atlas_width, atlas_height))
+        shared_palette: Image.Image | None = None
+        quantized = []
+        try:
+            top = 0
+            for frame in prepared:
+                rgb = frame.convert("RGB")
+                try:
+                    atlas.paste(rgb, (0, top))
+                finally:
+                    rgb.close()
+                top += frame.height
+            shared_palette = atlas.quantize(
+                colors=png_palette_colors,
+                method=Image.Quantize.MEDIANCUT,
+            )
+            for frame in prepared:
+                rgb = frame.convert("RGB")
+                try:
+                    quantized.append(
+                        rgb.quantize(
+                            palette=shared_palette,
+                            dither=Image.Dither.FLOYDSTEINBERG,
+                        )
+                    )
+                finally:
+                    rgb.close()
+        except BaseException:
+            for frame in quantized:
+                frame.close()
+            raise
+        finally:
+            atlas.close()
+            if shared_palette is not None:
+                shared_palette.close()
+        for frame in prepared:
+            frame.close()
+        prepared = quantized
     kwargs: dict[str, object] = {
         "save_all": True,
         "append_images": prepared[1:],
@@ -136,7 +219,11 @@ def export_animation(
         "loop": sequence.loop,
     }
     if fmt == "WEBP":
-        kwargs.update(quality=max(1, min(100, quality)), method=6)
+        kwargs.update(
+            quality=max(1, min(100, quality)),
+            lossless=bool(webp_lossless),
+            method=6,
+        )
     if fmt == "PNG":
         kwargs.update(optimize=True, compress_level=9)
     descriptor, temporary_name = tempfile.mkstemp(

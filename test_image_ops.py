@@ -147,6 +147,62 @@ class ImageOpsTests(unittest.TestCase):
             self.assertGreater(high_size, target_size)
             self.assertLessEqual(target.stat().st_size, 80 * 1024)
 
+    def test_advanced_format_options_change_real_encoded_outputs(self) -> None:
+        with TemporaryDirectory() as raw_dir:
+            work = Path(raw_dir)
+            pattern = Image.new("RGB", (48, 32))
+            pixels = pattern.load()
+            assert pixels is not None
+            for y in range(pattern.height):
+                for x in range(pattern.width):
+                    pixels[x, y] = ((x * 17) % 256, (y * 29) % 256, ((x + y) * 11) % 256)
+
+            webp = work / "lossless.webp"
+            save_image(
+                pattern,
+                webp,
+                ExportOptions(output_format="WEBP", quality=25, webp_lossless=True),
+            )
+            with Image.open(webp) as decoded_webp:
+                self.assertEqual(decoded_webp.convert("RGB").tobytes(), pattern.tobytes())
+
+            transparent = Image.new("RGBA", (64, 40), (20, 80, 160, 255))
+            for y in range(transparent.height):
+                for x in range(transparent.width // 2):
+                    transparent.putpixel((x, y), (220, 50, 90, 0))
+            palette_png = work / "palette.png"
+            save_image(
+                transparent,
+                palette_png,
+                ExportOptions(output_format="PNG", png_palette_colors=16),
+            )
+            with Image.open(palette_png) as decoded_png:
+                self.assertEqual(decoded_png.mode, "P")
+                self.assertLessEqual(len(decoded_png.getcolors(maxcolors=256) or ()), 16)
+                alpha_extrema = decoded_png.convert("RGBA").getchannel("A").getextrema()
+                self.assertEqual(alpha_extrema, (0, 255))
+
+            raw_tiff = work / "raw.tif"
+            compressed_tiff = work / "compressed.tif"
+            flat = Image.new("RGB", (256, 192), "#456789")
+            save_image(flat, raw_tiff, ExportOptions(output_format="TIFF"))
+            save_image(
+                flat,
+                compressed_tiff,
+                ExportOptions(
+                    output_format="TIFF",
+                    tiff_compression="tiff_adobe_deflate",
+                ),
+            )
+            with Image.open(compressed_tiff) as decoded_tiff:
+                self.assertEqual(decoded_tiff.info.get("compression"), "tiff_adobe_deflate")
+                self.assertEqual(decoded_tiff.convert("RGB").getpixel((0, 0)), (69, 103, 137))
+            self.assertLess(compressed_tiff.stat().st_size, raw_tiff.stat().st_size)
+
+            pattern.close()
+            transparent.close()
+            flat.close()
+
     def test_filename_affix_validation_trims_and_rejects_windows_invalid_chars(self) -> None:
         self.assertEqual(validate_filename_affix("prefix", "  web_  "), "web_")
         with self.assertRaises(ValueError):

@@ -54,6 +54,9 @@ class ExportOptions:
     output_format: str
     quality: int = 85
     target_size_kb: int | None = None
+    webp_lossless: bool = False
+    png_palette_colors: int | None = None
+    tiff_compression: str = "raw"
     max_width: int | None = None
     max_height: int | None = None
     exact_width: int | None = None
@@ -269,7 +272,7 @@ def estimate_save_size(
     else:
         prepared = prepare_image(image, options)
     output_format = normalize_format(options.output_format)
-    converted = convert_for_format(prepared, output_format)
+    converted = convert_for_format(prepared, output_format, options)
     try:
         return len(encode_image(converted, output_format, options))
     finally:
@@ -284,10 +287,17 @@ def encode_image(
     options: ExportOptions,
     extra_kwargs: dict[str, object] | None = None,
 ) -> bytes:
-    kwargs = save_kwargs_for(output_format, options.quality)
+    kwargs = save_kwargs_for(
+        output_format,
+        options.quality,
+        webp_lossless=options.webp_lossless,
+        tiff_compression=options.tiff_compression,
+    )
     if extra_kwargs:
         kwargs.update(extra_kwargs)
     if options.target_size_kb and output_format in {"JPEG", "WEBP"}:
+        if output_format == "WEBP" and options.webp_lossless:
+            raise ValueError("WebP 无损不能与目标 KB 同时启用")
         return encode_to_target_size(
             image,
             output_format,
@@ -340,18 +350,33 @@ def encode_to_target_size(
     return buffer.getvalue()
 
 
-def save_kwargs_for(output_format: str, quality: int) -> dict[str, object]:
+def save_kwargs_for(
+    output_format: str,
+    quality: int,
+    *,
+    webp_lossless: bool = False,
+    tiff_compression: str = "raw",
+) -> dict[str, object]:
     kwargs: dict[str, object] = {}
     if output_format in {"JPEG", "WEBP", "AVIF"}:
         kwargs["quality"] = max(1, min(100, int(quality)))
         kwargs["optimize"] = True
+    if output_format == "WEBP":
+        kwargs["lossless"] = bool(webp_lossless)
+        kwargs["method"] = 6
     if output_format == "PNG":
         kwargs["optimize"] = True
         kwargs["compress_level"] = 9
+    if output_format == "TIFF":
+        kwargs["compression"] = tiff_compression
     return kwargs
 
 
-def convert_for_format(image: Image.Image, output_format: str) -> Image.Image:
+def convert_for_format(
+    image: Image.Image,
+    output_format: str,
+    options: ExportOptions | None = None,
+) -> Image.Image:
     if output_format == "JPEG" and image.mode in {"RGBA", "LA", "P"}:
         rgba = image.convert("RGBA") if image.mode == "P" else image
         background = Image.new("RGB", rgba.size, "white")
@@ -359,6 +384,20 @@ def convert_for_format(image: Image.Image, output_format: str) -> Image.Image:
         return background
     if output_format in {"BMP", "TIFF"} and image.mode == "P":
         return image.convert("RGB")
+    if output_format == "PNG" and options is not None and options.png_palette_colors is not None:
+        colors = int(options.png_palette_colors)
+        if not 2 <= colors <= 256:
+            raise ValueError("PNG 调色板颜色数必须位于 2 到 256 之间")
+        source = image if image.mode in {"RGB", "RGBA"} else image.convert("RGBA")
+        try:
+            return source.quantize(
+                colors=colors,
+                method=Image.Quantize.FASTOCTREE,
+                dither=Image.Dither.FLOYDSTEINBERG,
+            )
+        finally:
+            if source is not image:
+                source.close()
     return image
 
 
@@ -439,7 +478,7 @@ def save_image(
         prepared = render_image(image, timeline)
     else:
         prepared = prepare_image(image, options)
-    converted = convert_for_format(prepared, output_format)
+    converted = convert_for_format(prepared, output_format, options)
     metadata_kwargs = (
         metadata_save_kwargs(output_format, metadata)
         if options.preserve_metadata and metadata is not None
@@ -529,6 +568,9 @@ def _has_no_rendering_changes(options: ExportOptions) -> bool:
         and options.exact_width is None
         and options.exact_height is None
         and options.target_size_kb is None
+        and not options.webp_lossless
+        and options.png_palette_colors is None
+        and options.tiff_compression == "raw"
         and not options.watermark_text.strip()
     )
 

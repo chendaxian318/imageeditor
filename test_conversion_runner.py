@@ -309,6 +309,8 @@ class ConversionRunnerTests(unittest.TestCase):
                         export_profile=ExportProfile(
                             output_format=output_format,
                             quality=90,
+                            webp_lossless=output_format == "WEBP",
+                            png_palette_colors=16 if output_format == "PNG" else None,
                             preserve_animation=True,
                             rename_template="{stem}_animated",
                         ),
@@ -336,8 +338,50 @@ class ConversionRunnerTests(unittest.TestCase):
                             colors.append(decoded.convert("RGB").getpixel((3, 2)))
                         if output_format == "WEBP":
                             durations = _webp_durations(task.planned_output)
+                            self.assertEqual(
+                                colors,
+                                [(255, 0, 0), (0, 128, 0), (0, 0, 255)],
+                            )
                         self.assertEqual(durations, [80, 120, 160])
                         self.assertEqual(len(set(colors)), 3)
+
+    def test_advanced_format_profile_reaches_static_encoder(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _pattern(root / "source.png")
+            profiles = (
+                ExportProfile(output_format="WEBP", webp_lossless=True),
+                ExportProfile(output_format="PNG", png_palette_colors=16),
+                ExportProfile(output_format="TIFF", tiff_compression="tiff_lzw"),
+            )
+
+            for profile in profiles:
+                with self.subTest(output_format=profile.output_format):
+                    queue = ConversionQueue()
+                    queue.add_file(source)
+                    task = (
+                        ConversionRunner(
+                            queue,
+                            TransformRecipe(export_profile=profile),
+                            root / profile.output_format.casefold(),
+                        )
+                        .run()
+                        .tasks[0]
+                    )
+
+                    self.assertEqual(task.status, ConversionTaskStatus.SUCCEEDED, task.error)
+                    with Image.open(task.planned_output) as decoded:
+                        if profile.output_format == "WEBP":
+                            with Image.open(source) as original:
+                                self.assertEqual(
+                                    decoded.convert("RGB").tobytes(),
+                                    original.convert("RGB").tobytes(),
+                                )
+                        elif profile.output_format == "PNG":
+                            self.assertEqual(decoded.mode, "P")
+                            self.assertLessEqual(len(decoded.getcolors(maxcolors=256) or ()), 16)
+                        else:
+                            self.assertEqual(decoded.info.get("compression"), "tiff_lzw")
 
     def test_preserved_animation_rejects_non_animation_target_per_item(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

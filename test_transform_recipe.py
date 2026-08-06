@@ -58,6 +58,17 @@ class TransformStepTests(unittest.TestCase):
 
 
 class ExportProfileTests(unittest.TestCase):
+    def test_format_specific_advanced_options_round_trip(self) -> None:
+        profiles = (
+            ExportProfile(output_format="WEBP", webp_lossless=True),
+            ExportProfile(output_format="PNG", png_palette_colors=64),
+            ExportProfile(output_format="TIFF", tiff_compression="tiff_lzw"),
+        )
+
+        for profile in profiles:
+            with self.subTest(output_format=profile.output_format):
+                self.assertEqual(ExportProfile.from_json(profile.to_json()), profile)
+
     def test_export_profile_json_round_trip_and_normalization(self) -> None:
         profile = ExportProfile(
             output_format="jpg",
@@ -82,6 +93,13 @@ class ExportProfileTests(unittest.TestCase):
             lambda: ExportProfile(quality=0),
             lambda: ExportProfile(target_size_kb=0),
             lambda: ExportProfile(output_format="PNG", target_size_kb=100),
+            lambda: ExportProfile(output_format="WEBP", webp_lossless=True, target_size_kb=100),
+            lambda: ExportProfile(output_format="JPEG", webp_lossless=True),
+            lambda: ExportProfile(output_format="JPEG", png_palette_colors=64),
+            lambda: ExportProfile(output_format="PNG", png_palette_colors=1),
+            lambda: ExportProfile(output_format="PNG", png_palette_colors=257),
+            lambda: ExportProfile(output_format="JPEG", tiff_compression="tiff_lzw"),
+            lambda: ExportProfile(output_format="TIFF", tiff_compression="zip"),
             lambda: ExportProfile(preserve_metadata=1),  # type: ignore[arg-type]
             lambda: ExportProfile(backup_on_overwrite=1),  # type: ignore[arg-type]
             lambda: ExportProfile(transparency_background="white"),
@@ -111,6 +129,23 @@ class ExportProfileTests(unittest.TestCase):
 
 
 class TransformRecipeTests(unittest.TestCase):
+    def test_version_one_recipe_migrates_to_advanced_format_defaults(self) -> None:
+        payload = TransformRecipe(
+            name="旧版配方",
+            export_profile=ExportProfile(output_format="PNG"),
+        ).to_json()
+        payload["schema_version"] = 1
+        payload["export"].pop("webp_lossless")
+        payload["export"].pop("png_palette_colors")
+        payload["export"].pop("tiff_compression")
+
+        migrated = TransformRecipe.from_json(payload)
+
+        self.assertEqual(migrated.schema_version, TRANSFORM_RECIPE_SCHEMA_VERSION)
+        self.assertFalse(migrated.export_profile.webp_lossless)
+        self.assertIsNone(migrated.export_profile.png_palette_colors)
+        self.assertEqual(migrated.export_profile.tiff_compression, "raw")
+
     def test_full_recipe_json_round_trip_is_lossless(self) -> None:
         recipe = TransformRecipe(
             name="社交媒体配方",

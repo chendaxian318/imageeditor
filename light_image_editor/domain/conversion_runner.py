@@ -124,6 +124,9 @@ def _export_options(recipe: TransformRecipe) -> ExportOptions:
         output_format=profile.output_format,
         quality=profile.quality,
         target_size_kb=profile.target_size_kb,
+        webp_lossless=profile.webp_lossless,
+        png_palette_colors=profile.png_palette_colors,
+        tiff_compression=profile.tiff_compression,
         preserve_metadata=profile.preserve_metadata,
     )
 
@@ -723,6 +726,8 @@ class ConversionRunner:
                 staging,
                 profile.output_format,
                 quality=profile.quality,
+                webp_lossless=profile.webp_lossless,
+                png_palette_colors=profile.png_palette_colors,
             )
             self._raise_if_cancelled()
             if not source_fingerprint.matches(source_path):

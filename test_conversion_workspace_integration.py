@@ -108,6 +108,45 @@ class ConversionWorkspaceIntegrationTests(unittest.TestCase):
             finally:
                 self._close_app(app)
 
+    def test_advanced_format_controls_are_contextual_and_update_recipe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = self._create_app(directory)
+            try:
+                app.mode_buttons[ModeId.CONVERT].command()
+
+                app.format_var.set("WEBP")
+                app._format_changed()
+                self.assertTrue(app.webp_lossless_check.instate(("!disabled",)))
+                self.assertEqual(str(app.png_palette_box.cget("state")), "disabled")
+                app.target_size_var.set("80")
+                app.webp_lossless_var.set(True)
+                app._advanced_format_changed()
+                self.assertEqual(app.target_size_var.get(), "")
+                self.assertTrue(app.target_size_entry.instate(("disabled",)))
+                self.assertTrue(app.conversion_draft_history.current.export_profile.webp_lossless)
+
+                app.format_var.set("PNG")
+                app._format_changed()
+                self.assertFalse(app.webp_lossless_var.get())
+                self.assertEqual(str(app.png_palette_box.cget("state")), "readonly")
+                app.png_palette_var.set("64 色")
+                app._advanced_format_changed()
+                self.assertEqual(
+                    app.conversion_draft_history.current.export_profile.png_palette_colors,
+                    64,
+                )
+
+                app.format_var.set("TIFF")
+                app._format_changed()
+                self.assertEqual(str(app.tiff_compression_box.cget("state")), "readonly")
+                app.tiff_compression_var.set("Deflate")
+                app._advanced_format_changed()
+                profile = app.conversion_draft_history.current.export_profile
+                self.assertEqual(profile.output_format, "TIFF")
+                self.assertEqual(profile.tiff_compression, "tiff_adobe_deflate")
+            finally:
+                self._close_app(app)
+
     def test_conversion_edits_and_undo_never_mutate_the_edit_document(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
