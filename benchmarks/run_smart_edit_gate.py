@@ -130,6 +130,15 @@ class SmartEditGateThresholds:
     maximum_occluded_multi_plane_source_color_distance: int = 24
     minimum_occluded_multi_plane_axis_similarity: float = 0.996
     maximum_occluded_multi_plane_axis_similarity: float = 0.998
+    minimum_three_plane_candidates: int = 3
+    minimum_three_plane_coverage: float = 0.85
+    minimum_three_plane_containment: float = 0.65
+    minimum_three_plane_pairwise_region_iou: float = 0.01
+    minimum_three_plane_pairwise_ink_occlusion: float = 0.01
+    minimum_three_plane_peak_ink_occlusion: float = 0.15
+    minimum_three_plane_scale_delta: float = 0.02
+    maximum_three_plane_fill_color_error: int = 4
+    maximum_same_color_occluded_plane_candidates: int = 1
     minimum_curved_text_detection_cases: int = 6
     minimum_curved_text_detection_overlap: float = 0.85
     maximum_curved_text_curve_error: float = 0.12
@@ -2998,6 +3007,182 @@ def _run_text_detection_probe(
             if suggestion is None
             else _hex_color_error(suggestion.estimated_fill_color, fixture[2])
         )
+
+    three_plane_path = root / "text-detection-three-plane-overlap.png"
+    three_plane_size = (600, 420)
+    three_plane_scale = (
+        three_plane_size[0] / 1_000,
+        three_plane_size[1] / 700,
+    )
+    three_plane_fixtures = (
+        (
+            "平面一 PERSPECTIVE 2026",
+            (60.0, 70.0, 660.0, 40.0, 690.0, 300.0, 40.0, 250.0),
+            "#16324f",
+        ),
+        (
+            "平面三 PERSPECTIVE 2026",
+            (120.0, 190.0, 780.0, 75.0, 835.0, 335.0, 90.0, 315.0),
+            "#2f6b3d",
+        ),
+        (
+            "平面二 PERSPECTIVE 2026",
+            (260.0, 80.0, 900.0, 160.0, 930.0, 290.0, 220.0, 400.0),
+            "#8c3a1e",
+        ),
+    )
+    three_plane_source = Image.new("RGBA", three_plane_size, "white")
+    three_plane_expected_regions: list[tuple[float, float, float, float]] = []
+    three_plane_ink_masks: list[np.ndarray] = []
+    for text, destination, color in three_plane_fixtures:
+        layer = Image.new("RGBA", (312, 72), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).text(
+            (6, 7),
+            text,
+            font=_text_detection_font(28),
+            fill=color,
+        )
+        scaled_destination = tuple(
+            value * (three_plane_scale[0] if index % 2 == 0 else three_plane_scale[1])
+            for index, value in enumerate(destination)
+        )
+        warped = _warp_surface_to_quad(
+            layer,
+            output_size=three_plane_size,
+            destination=cast(Any, scaled_destination),
+        )
+        alpha = np.asarray(warped.getchannel("A"), dtype=np.uint8)
+        ink_mask = alpha > 32
+        y_indexes, x_indexes = np.nonzero(ink_mask)
+        three_plane_expected_regions.append(
+            (
+                float(np.min(x_indexes)) / three_plane_size[0],
+                float(np.min(y_indexes)) / three_plane_size[1],
+                (float(np.max(x_indexes)) + 1) / three_plane_size[0],
+                (float(np.max(y_indexes)) + 1) / three_plane_size[1],
+            )
+        )
+        three_plane_ink_masks.append(ink_mask.copy())
+        three_plane_source.alpha_composite(warped)
+        layer.close()
+        warped.close()
+    three_plane_region_ious = [
+        _region_intersection_over_union(
+            three_plane_expected_regions[first_index],
+            three_plane_expected_regions[second_index],
+        )
+        for first_index in range(len(three_plane_expected_regions))
+        for second_index in range(first_index + 1, len(three_plane_expected_regions))
+    ]
+    three_plane_ink_occlusions = [
+        int(
+            np.count_nonzero(
+                three_plane_ink_masks[first_index] & three_plane_ink_masks[second_index]
+            )
+        )
+        / max(
+            1,
+            min(
+                int(np.count_nonzero(three_plane_ink_masks[first_index])),
+                int(np.count_nonzero(three_plane_ink_masks[second_index])),
+            ),
+        )
+        for first_index in range(len(three_plane_ink_masks))
+        for second_index in range(first_index + 1, len(three_plane_ink_masks))
+    ]
+    three_plane_rendered = three_plane_source.convert("RGB")
+    three_plane_rendered.save(three_plane_path, "PNG")
+    three_plane_rendered.close()
+    three_plane_source.close()
+    three_plane_runs = []
+    three_plane_elapsed: list[float] = []
+    for _repetition in range(repetitions):
+        started = time.perf_counter()
+        suggestions = detect_text_regions(three_plane_path, max_suggestions=20)
+        duration_ms = (time.perf_counter() - started) * 1_000
+        three_plane_elapsed.append(duration_ms)
+        all_elapsed.append(duration_ms)
+        three_plane_runs.append(suggestions)
+    three_plane_candidates = [
+        suggestion for suggestion in three_plane_runs[0] if suggestion.perspective_quad is not None
+    ]
+    three_plane_matches = [
+        max(
+            three_plane_candidates,
+            key=lambda suggestion: _region_intersection_over_union(
+                suggestion.region,
+                expected,
+            ),
+            default=None,
+        )
+        for expected in three_plane_expected_regions
+    ]
+    three_plane_indexes = [
+        (-1 if suggestion is None else three_plane_candidates.index(suggestion))
+        for suggestion in three_plane_matches
+    ]
+    three_plane_distinct = min(three_plane_indexes) >= 0 and len(set(three_plane_indexes)) == len(
+        three_plane_expected_regions
+    )
+    three_plane_coverages = [
+        (0.0 if suggestion is None else _region_overlap(expected, suggestion.region))
+        for suggestion, expected in zip(three_plane_matches, three_plane_expected_regions)
+    ]
+    three_plane_containments = [
+        (0.0 if suggestion is None else _region_overlap(suggestion.region, expected))
+        for suggestion, expected in zip(three_plane_matches, three_plane_expected_regions)
+    ]
+    three_plane_scale_directions: list[float] = []
+    three_plane_fill_errors: list[int] = []
+    for suggestion, fixture in zip(three_plane_matches, three_plane_fixtures):
+        quad = None if suggestion is None else suggestion.perspective_quad
+        three_plane_scale_directions.append(
+            0.0 if quad is None else round((quad[5] - quad[3]) - (quad[7] - quad[1]), 6)
+        )
+        three_plane_fill_errors.append(
+            255
+            if suggestion is None
+            else _hex_color_error(suggestion.estimated_fill_color, fixture[2])
+        )
+
+    same_color_path = root / "text-detection-same-color-occluded-planes.png"
+    same_color_source = Image.new("RGBA", three_plane_size, "white")
+    for text, destination, _color in three_plane_fixtures:
+        layer = Image.new("RGBA", (312, 72), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).text(
+            (6, 7),
+            text,
+            font=_text_detection_font(28),
+            fill="#283c50",
+        )
+        scaled_destination = tuple(
+            value * (three_plane_scale[0] if index % 2 == 0 else three_plane_scale[1])
+            for index, value in enumerate(destination)
+        )
+        warped = _warp_surface_to_quad(
+            layer,
+            output_size=three_plane_size,
+            destination=cast(Any, scaled_destination),
+        )
+        same_color_source.alpha_composite(warped)
+        layer.close()
+        warped.close()
+    same_color_rendered = same_color_source.convert("RGB")
+    same_color_rendered.save(same_color_path, "PNG")
+    same_color_rendered.close()
+    same_color_source.close()
+    same_color_runs = []
+    same_color_elapsed: list[float] = []
+    for _repetition in range(repetitions):
+        started = time.perf_counter()
+        suggestions = detect_text_regions(same_color_path, max_suggestions=20)
+        duration_ms = (time.perf_counter() - started) * 1_000
+        same_color_elapsed.append(duration_ms)
+        all_elapsed.append(duration_ms)
+        same_color_runs.append(suggestions)
+    same_color_candidate_count = sum(
+        suggestion.perspective_quad is not None for suggestion in same_color_runs[0]
+    )
     return {
         "case_count": len(cases),
         "cases": cases,
@@ -3054,6 +3239,31 @@ def _run_text_detection_probe(
             "fill_color_errors": occluded_fill_errors,
             "deterministic": all(run == occluded_runs[0] for run in occluded_runs[1:]),
             "elapsed_ms": _metric(occluded_elapsed),
+        },
+        "three_plane_overlap": {
+            "detected": all(suggestion is not None for suggestion in three_plane_matches),
+            "candidate_count": len(three_plane_candidates),
+            "candidate_regions": [suggestion.region for suggestion in three_plane_candidates],
+            "distinct_planes": three_plane_distinct,
+            "reading_order": (
+                three_plane_distinct and three_plane_indexes == sorted(three_plane_indexes)
+            ),
+            "pairwise_region_ious": [round(value, 6) for value in three_plane_region_ious],
+            "pairwise_ink_occlusions": [round(value, 6) for value in three_plane_ink_occlusions],
+            "coverages": [round(value, 6) for value in three_plane_coverages],
+            "containments": [round(value, 6) for value in three_plane_containments],
+            "divergent_scale_directions": (
+                max(three_plane_scale_directions) > 0 and min(three_plane_scale_directions) < 0
+            ),
+            "scale_directions": three_plane_scale_directions,
+            "fill_color_errors": three_plane_fill_errors,
+            "deterministic": all(run == three_plane_runs[0] for run in three_plane_runs[1:]),
+            "elapsed_ms": _metric(three_plane_elapsed),
+            "same_color_safety": {
+                "perspective_candidate_count": same_color_candidate_count,
+                "deterministic": all(run == same_color_runs[0] for run in same_color_runs[1:]),
+                "elapsed_ms": _metric(same_color_elapsed),
+            },
         },
         "curved": {
             "case_count": len(curved_detection_cases),
@@ -3827,6 +4037,69 @@ def evaluate_smart_edit_gate(
     if float(occluded_multi_plane["elapsed_ms"]["p95"]) > limits.maximum_text_detection_p95_ms:
         violations.append("受控局部遮挡双色双平面检测 P95 超过性能门槛")
 
+    three_plane = detection["three_plane_overlap"]
+    if not bool(three_plane["detected"]):
+        violations.append("受控局部遮挡异色三平面文字未完整检出")
+    if int(three_plane["candidate_count"]) < limits.minimum_three_plane_candidates:
+        violations.append("受控局部遮挡异色三平面四边形候选数量不足")
+    if not bool(three_plane["distinct_planes"]):
+        violations.append("受控局部遮挡异色三平面被错误合并")
+    if not bool(three_plane["reading_order"]):
+        violations.append("受控局部遮挡异色三平面未按阅读顺序排列")
+    three_plane_region_ious = [float(value) for value in three_plane["pairwise_region_ious"]]
+    if (
+        len(three_plane_region_ious) != 3
+        or min(three_plane_region_ious) < limits.minimum_three_plane_pairwise_region_iou
+    ):
+        violations.append("受控局部遮挡异色三平面区域没有形成两两交叠")
+    three_plane_ink_occlusions = [float(value) for value in three_plane["pairwise_ink_occlusions"]]
+    if (
+        len(three_plane_ink_occlusions) != 3
+        or min(three_plane_ink_occlusions) < limits.minimum_three_plane_pairwise_ink_occlusion
+        or max(three_plane_ink_occlusions) < limits.minimum_three_plane_peak_ink_occlusion
+    ):
+        violations.append("受控局部遮挡异色三平面字形遮挡量不足")
+    three_plane_coverages = [float(value) for value in three_plane["coverages"]]
+    if (
+        len(three_plane_coverages) != 3
+        or min(three_plane_coverages) < limits.minimum_three_plane_coverage
+    ):
+        violations.append("受控局部遮挡异色三平面文字覆盖率不足")
+    three_plane_containments = [float(value) for value in three_plane["containments"]]
+    if (
+        len(three_plane_containments) != 3
+        or min(three_plane_containments) < limits.minimum_three_plane_containment
+    ):
+        violations.append("受控局部遮挡异色三平面候选范围过宽")
+    three_plane_directions = [float(value) for value in three_plane["scale_directions"]]
+    if (
+        len(three_plane_directions) != 3
+        or max(three_plane_directions) < limits.minimum_three_plane_scale_delta
+        or min(three_plane_directions) > -limits.minimum_three_plane_scale_delta
+        or not bool(three_plane["divergent_scale_directions"])
+    ):
+        violations.append("受控局部遮挡异色三平面未保留不同透视尺度方向")
+    three_plane_fill_errors = [int(value) for value in three_plane["fill_color_errors"]]
+    if (
+        len(three_plane_fill_errors) != 3
+        or max(three_plane_fill_errors) > limits.maximum_three_plane_fill_color_error
+    ):
+        violations.append("受控局部遮挡异色三平面主色估计误差过大")
+    if not bool(three_plane["deterministic"]):
+        violations.append("受控局部遮挡异色三平面检测结果不可复现")
+    if float(three_plane["elapsed_ms"]["p95"]) > limits.maximum_text_detection_p95_ms:
+        violations.append("受控局部遮挡异色三平面检测 P95 超过性能门槛")
+    same_color_safety = three_plane["same_color_safety"]
+    if (
+        int(same_color_safety["perspective_candidate_count"])
+        > limits.maximum_same_color_occluded_plane_candidates
+    ):
+        violations.append("同色遮挡多平面被启发式错误拆分")
+    if not bool(same_color_safety["deterministic"]):
+        violations.append("同色遮挡多平面安全回退结果不可复现")
+    if float(same_color_safety["elapsed_ms"]["p95"]) > limits.maximum_text_detection_p95_ms:
+        violations.append("同色遮挡多平面安全回退 P95 超过性能门槛")
+
     curved_detection = detection["curved"]
     if int(curved_detection["case_count"]) < limits.minimum_curved_text_detection_cases:
         violations.append("受控弧形文字检测样本数量不足")
@@ -4163,8 +4436,9 @@ def run(
         "scope_limit": (
             "离线确定性基线；文字区域检测以10°粗搜和1°局部精修覆盖"
             "-90°～+90°受控普通印刷体，精确竖排方向需要用户选择，"
-            "受控单平面、空间分离双平面及低色差不同色轴且有限局部遮挡的双平面梯形透视"
-            "可输出独立四角并按阅读顺序切换；同色或重度遮挡双平面不在基线内，"
+            "受控单平面、空间分离双平面、低色差不同色轴双平面及三种可区分色轴且有限"
+            "局部遮挡的三平面梯形透视可输出独立四角并按阅读顺序切换；完全同色样本"
+            "安全回退为合并候选，同色深度分层、重度遮挡和不可见文字恢复不在基线内，"
             "去背景贴边/渐变/半透明样本为受控合成图，不代表复杂毛发、"
             "像素蒙版来自离线颜色/Alpha 连通域与可见轮廓厚度启发式，只覆盖"
             "受控异色及同色可见中等宽接触分离，不代表语义分割、深度遮挡或不可见像素"
@@ -4178,7 +4452,7 @@ def run(
             "首选候选，并以同背景无字样本累计零候选约束误报；JPEG 仅验证单次 4:2:0 编码"
             "质量 95/75/50 下的水平纯色、发光、小字号、双行和有限局部遮挡；不代表真实照片"
             "语义内容、复杂自然对象、重复转码、更低质量或强遮挡下的精确参数还原，也不代表"
-            "任意重叠/遮挡多平面文字、多层/非均匀发光、纹理/三维/"
+            "任意色轴、层数或重度遮挡的多平面文字、多层/非均匀发光、纹理/三维/"
             "非线性变形艺术字、弧形文字真实识别准确率、复杂纹理修复或生产 OCR 质量"
         ),
     }

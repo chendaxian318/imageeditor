@@ -200,6 +200,26 @@ def _passing_result() -> dict[str, object]:
                 "deterministic": True,
                 "elapsed_ms": {"p95": 100.0},
             },
+            "three_plane_overlap": {
+                "detected": True,
+                "candidate_count": 3,
+                "distinct_planes": True,
+                "reading_order": True,
+                "pairwise_region_ious": [0.08, 0.10, 0.18],
+                "pairwise_ink_occlusions": [0.02, 0.04, 0.18],
+                "coverages": [0.9, 0.9, 0.9],
+                "containments": [0.75, 0.75, 0.75],
+                "divergent_scale_directions": True,
+                "scale_directions": [0.08, 0.04, -0.08],
+                "fill_color_errors": [1, 1, 1],
+                "deterministic": True,
+                "elapsed_ms": {"p95": 100.0},
+                "same_color_safety": {
+                    "perspective_candidate_count": 1,
+                    "deterministic": True,
+                    "elapsed_ms": {"p95": 100.0},
+                },
+            },
             "curved": {
                 "case_count": 6,
                 "cases": [
@@ -537,6 +557,23 @@ class SmartEditQualityGateTests(unittest.TestCase):
         occluded_multi_plane["fill_color_errors"] = [255, 255]
         occluded_multi_plane["deterministic"] = False
         occluded_multi_plane["elapsed_ms"]["p95"] = 2_000.0
+        three_plane = result["text_detection"]["three_plane_overlap"]  # type: ignore[index]
+        three_plane["detected"] = False
+        three_plane["candidate_count"] = 1
+        three_plane["distinct_planes"] = False
+        three_plane["reading_order"] = False
+        three_plane["pairwise_region_ious"] = [0.0]
+        three_plane["pairwise_ink_occlusions"] = [0.0]
+        three_plane["coverages"] = [0.0]
+        three_plane["containments"] = [0.0]
+        three_plane["divergent_scale_directions"] = False
+        three_plane["scale_directions"] = [0.0]
+        three_plane["fill_color_errors"] = [255]
+        three_plane["deterministic"] = False
+        three_plane["elapsed_ms"]["p95"] = 2_000.0
+        three_plane["same_color_safety"]["perspective_candidate_count"] = 3
+        three_plane["same_color_safety"]["deterministic"] = False
+        three_plane["same_color_safety"]["elapsed_ms"]["p95"] = 2_000.0
         result["text_detection"]["curved"]["case_count"] = 1  # type: ignore[index]
         result["text_detection"]["curved"]["cases"][0]["curve_error"] = 0.5  # type: ignore[index]
         result["text_detection"]["curved"]["cases"][1]["detected"] = False  # type: ignore[index]
@@ -613,6 +650,8 @@ class SmartEditQualityGateTests(unittest.TestCase):
         self.assertTrue(any("文字区域检测" in message for message in violations))
         self.assertTrue(any("双平面" in message for message in violations))
         self.assertTrue(any("局部遮挡双色双平面" in message for message in violations))
+        self.assertTrue(any("局部遮挡异色三平面" in message for message in violations))
+        self.assertTrue(any("同色遮挡多平面" in message for message in violations))
         self.assertTrue(any("复杂字效" in message for message in violations))
         self.assertTrue(any("参数估计" in message for message in violations))
         self.assertTrue(any("非均匀背景" in message for message in violations))
@@ -686,6 +725,25 @@ class SmartEditQualityGateTests(unittest.TestCase):
         self.assertGreaterEqual(min(occluded_multi_plane["coverages"]), 0.85)
         self.assertGreaterEqual(min(occluded_multi_plane["containments"]), 0.65)
         self.assertLessEqual(max(occluded_multi_plane["fill_color_errors"]), 4)
+        three_plane = result["text_detection"]["three_plane_overlap"]
+        self.assertTrue(three_plane["detected"])
+        self.assertEqual(three_plane["candidate_count"], 3)
+        self.assertTrue(three_plane["distinct_planes"])
+        self.assertTrue(three_plane["reading_order"])
+        self.assertEqual(len(three_plane["pairwise_region_ious"]), 3)
+        self.assertGreaterEqual(min(three_plane["pairwise_region_ious"]), 0.01)
+        self.assertGreaterEqual(min(three_plane["pairwise_ink_occlusions"]), 0.01)
+        self.assertGreaterEqual(max(three_plane["pairwise_ink_occlusions"]), 0.15)
+        self.assertGreaterEqual(min(three_plane["coverages"]), 0.85)
+        self.assertGreaterEqual(min(three_plane["containments"]), 0.65)
+        self.assertLessEqual(max(three_plane["fill_color_errors"]), 4)
+        self.assertTrue(three_plane["divergent_scale_directions"])
+        self.assertTrue(three_plane["deterministic"])
+        self.assertLessEqual(
+            three_plane["same_color_safety"]["perspective_candidate_count"],
+            1,
+        )
+        self.assertTrue(three_plane["same_color_safety"]["deterministic"])
         self.assertEqual(result["text_detection"]["styled"]["case_count"], 5)
         self.assertTrue(
             all(
