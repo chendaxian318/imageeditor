@@ -62,6 +62,11 @@ def _bounded_scale(width: float, height: float, dpi: int) -> float:
     return scale
 
 
+def _page_pixel_size(width: float, height: float, dpi: int) -> tuple[int, int]:
+    scale = _bounded_scale(width, height, dpi)
+    return max(1, math.ceil(width * scale)), max(1, math.ceil(height * scale))
+
+
 def render_pdf_page(
     path: str | Path,
     page_index: int = 0,
@@ -97,6 +102,16 @@ def render_pdf_page(
                     bitmap.close()
             finally:
                 page.close()
+            page_sizes = (
+                tuple(
+                    _page_pixel_size(float(width), float(height), dpi)
+                    for width, height in (
+                        document.get_page_size(index) for index in range(page_count)
+                    )
+                )
+                if page_index == 0
+                else ()
+            )
     except PdfSupportError:
         raise
     except FileNotFoundError:
@@ -111,6 +126,8 @@ def render_pdf_page(
     result.info["pdf_page_index"] = page_index
     result.info["pdf_page_count"] = page_count
     result.info["pdf_render_dpi"] = dpi
+    if page_sizes:
+        result.info["pdf_page_sizes"] = page_sizes
     return attach_source_metadata(
         result,
         SourceMetadata(

@@ -88,7 +88,33 @@ class QtViewerDocumentFormatTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail(f"PDF 第 {page_index + 1} 页未在限定时间内加载")
 
-    def test_pdf_navigation_and_markup_export_keep_source_read_only(self) -> None:
+    def test_document_view_requests_only_nearby_pages(self) -> None:
+        view = ImageView()
+        requests: list[int] = []
+        releases: list[int] = []
+        view.documentPagesRequested.connect(lambda pages: requests.extend(pages))
+        view.documentPagesReleased.connect(lambda pages: releases.extend(pages))
+        try:
+            view.resize(800, 600)
+            view.show()
+            first_page = QImage(600, 800, QImage.Format.Format_RGB32)
+            first_page.fill(Qt.GlobalColor.white)
+            view.set_document([(600, 800)] * 20, {0: first_page})
+            self.application.processEvents()
+
+            self.assertGreater(view.verticalScrollBar().maximum(), 0)
+            self.assertTrue(requests)
+            self.assertLess(len(set(requests)), 20)
+
+            view.scroll_to_document_page(10)
+            self.application.processEvents()
+            self.assertEqual(view.current_document_page, 10)
+            self.assertIn(10, requests)
+            self.assertIn(0, releases)
+        finally:
+            view.close()
+
+    def test_pdf_continuous_scroll_and_markup_export_keep_source_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "pages.pdf"
@@ -110,12 +136,16 @@ class QtViewerDocumentFormatTests(unittest.TestCase):
 
                 self.assertEqual(window._document_page_count, 2)
                 self.assertIn("第 1 / 2 页", window.info_label.text())
-                self.assertTrue(window.next_button.isVisible())
-                window.navigate(1)
+                self.assertTrue(window.image_view.document_mode)
+                self.assertGreater(window.image_view.verticalScrollBar().maximum(), 0)
+                self.assertFalse(window.previous_button.isVisible())
+                self.assertFalse(window.next_button.isVisible())
+                window.image_view.scroll_to_document_page(1)
                 self._wait_for_pdf_page(window, 1)
                 self.assertIn("第 2 / 2 页", window.info_label.text())
 
                 window.enter_markup()
+                self.assertFalse(window.image_view.document_mode)
                 self.assertEqual(window.markup_toolbar.replace_button.text(), "导出副本")
                 window.image_view.add_annotation(
                     AnnotationSpec("redact", QPointF(10, 10), QPointF(40, 35), size=6)
@@ -133,6 +163,8 @@ class QtViewerDocumentFormatTests(unittest.TestCase):
                 self.assertTrue(output.is_file())
                 self.assertEqual(source.read_bytes(), original_pdf)
                 self.assertFalse(window.markup_toolbar.isVisible())
+                self.assertTrue(window.image_view.document_mode)
+                self.assertEqual(window.image_view.current_document_page, 1)
             finally:
                 window.close()
                 self.application.processEvents()

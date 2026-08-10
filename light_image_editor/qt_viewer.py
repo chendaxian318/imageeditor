@@ -65,6 +65,7 @@ READ_ONLY_EDIT_SOURCE_EXTENSIONS = {PDF_EXTENSION, ".psd"}
 class _UiBridge(QObject):
     scheduleRequested = Signal(int, object)
     imageLoaded = Signal(str, object)
+    documentPageLoaded = Signal(str, int, object)
     thumbnailLoaded = Signal(str, object)
 
     def __init__(self) -> None:
@@ -91,6 +92,10 @@ class ViewerWindow(QMainWindow):
         self._document_path: Path | None = None
         self._document_page_index = 0
         self._document_page_count = 1
+        self._document_page_sizes: list[tuple[int, int]] = []
+        self._document_images: dict[int, Image.Image] = {}
+        self._document_pending: set[int] = set()
+        self._pdf_edit_mode = False
         self._load_generation = 0
         self._filmstrip_scope = "folder"
         self._shortcut_actions: list[QAction] = []
@@ -99,6 +104,7 @@ class ViewerWindow(QMainWindow):
 
         self.bridge = _UiBridge()
         self.bridge.imageLoaded.connect(self._finish_image_load)
+        self.bridge.documentPageLoaded.connect(self._finish_document_page_load)
         self.bridge.thumbnailLoaded.connect(self._finish_thumbnail_load)
 
         self.setWindowTitle("CSImage")
@@ -120,6 +126,9 @@ class ViewerWindow(QMainWindow):
         self.image_view = ImageView(self.root)
         self.image_view.zoomChanged.connect(self._sync_zoom_text)
         self.image_view.pointerMoved.connect(self._viewer_pointer_moved)
+        self.image_view.documentPageChanged.connect(self._document_visible_page_changed)
+        self.image_view.documentPagesRequested.connect(self._load_document_pages)
+        self.image_view.documentPagesReleased.connect(self._release_document_pages)
 
         self.empty_state = QWidget(self.root)
         self.empty_state.setObjectName("viewerEmptyState")
@@ -390,20 +399,29 @@ class ViewerWindow(QMainWindow):
         if self.markup_toolbar.isVisible():
             self.leave_markup()
         if path.suffix.casefold() == PDF_EXTENSION:
-            if self._document_path != path:
-                self._document_path = path
-                self._document_page_index = 0
-                self._document_page_count = 1
-            page_index: int | None = self._document_page_index
+            self._close_loaded_content()
+            self._document_path = path
+            self._document_page_index = 0
+            self._document_page_count = 1
+            self._document_page_sizes.clear()
+            self._document_pending.clear()
+            page_index: int | None = 0
         else:
+            self._close_loaded_content()
             self._document_path = None
             self._document_page_index = 0
             self._document_page_count = 1
+            self._document_page_sizes.clear()
+            self._document_pending.clear()
             page_index = None
         self._set_empty_state_visible(False)
         self._load_generation += 1
         generation = self._load_generation
-        preview = self.image_loader.cached_preview(path, page_index)
+        preview = (
+            None
+            if path.suffix.casefold() == PDF_EXTENSION
+            else self.image_loader.cached_preview(path, page_index)
+        )
         if preview is not None:
             try:
                 self.image_view.set_image(pil_to_qimage(preview), fit=True)
@@ -430,17 +448,135 @@ class ViewerWindow(QMainWindow):
             self._set_empty_state_visible(True)
             QMessageBox.warning(self, "无法打开图片", str(error))
             return
-        if self.current_image is not None:
-            self.current_image.close()
-        self.current_image = image
-        if Path(path_text).suffix.casefold() == PDF_EXTENSION:
-            self._document_page_index = int(
-                image.info.get("pdf_page_index", self._document_page_index)
-            )
+        path = Path(path_text)
+        if path.suffix.casefold() == PDF_EXTENSION:
+            self._close_loaded_content()
+            self._document_page_index = 0
             self._document_page_count = max(1, int(image.info.get("pdf_page_count", 1)))
-        self.image_view.set_image(pil_to_qimage(image), fit=True)
+            raw_sizes = image.info.get("pdf_page_sizes", ())
+            self._document_page_sizes = [
+                (max(1, int(width)), max(1, int(height)))
+                for width, height in raw_sizes
+                if isinstance(width, (int, float)) and isinstance(height, (int, float))
+            ]
+            if len(self._document_page_sizes) != self._document_page_count:
+                self._document_page_sizes = [image.size] * self._document_page_count
+            self._document_images[0] = image
+            self.current_image = image
+            self.image_view.set_document(
+                self._document_page_sizes,
+                {0: pil_to_qimage(image)},
+                current_index=0,
+            )
+        else:
+            if self.current_image is not None:
+                self.current_image.close()
+            self.current_image = image
+            self.image_view.set_image(pil_to_qimage(image), fit=True)
         self._set_empty_state_visible(False)
-        self._update_chrome(Path(path_text))
+        self._update_chrome(path)
+
+    def _close_loaded_content(self) -> None:
+        document_image_ids = {id(image) for image in self._document_images.values()}
+        if self.current_image is not None and id(self.current_image) not in document_image_ids:
+            self.current_image.close()
+        for image in self._document_images.values():
+            image.close()
+        self._document_images.clear()
+        self.current_image = None
+
+    def _load_document_pages(self, page_indices: object) -> None:
+        path = self.navigation.current
+        if (
+            self._pdf_edit_mode
+            or path is None
+            or path.suffix.casefold() != PDF_EXTENSION
+            or self._document_path != path
+        ):
+            return
+        if not isinstance(page_indices, tuple) or not all(
+            isinstance(index, int) for index in page_indices
+        ):
+            return
+        indices = cast(tuple[int, ...], page_indices)
+        generation = self._load_generation
+        for page_index in indices:
+            if (
+                not 0 <= page_index < self._document_page_count
+                or page_index in self._document_images
+                or page_index in self._document_pending
+            ):
+                continue
+            self._document_pending.add(page_index)
+            future = self.image_loader.load(path, page_index=page_index)
+
+            def completed(
+                result: Future[Image.Image],
+                index: int = page_index,
+                document_path: Path = path,
+                load_generation: int = generation,
+            ) -> None:
+                self.bridge.documentPageLoaded.emit(
+                    str(document_path), index, (load_generation, result)
+                )
+
+            future.add_done_callback(completed)
+
+    def _finish_document_page_load(
+        self,
+        path_text: str,
+        page_index: int,
+        payload: object,
+    ) -> None:
+        generation, future = cast(tuple[int, Future[Image.Image]], payload)
+        current_path = self.navigation.current
+        if (
+            generation != self._load_generation
+            or current_path != Path(path_text)
+            or self._document_path != current_path
+        ):
+            if future.done() and future.exception() is None:
+                future.result().close()
+            return
+        self._document_pending.discard(page_index)
+        try:
+            image = future.result()
+        except Exception:
+            return
+        old_image = self._document_images.pop(page_index, None)
+        if old_image is not None:
+            old_image.close()
+        self._document_images[page_index] = image
+        self.image_view.set_document_page(page_index, pil_to_qimage(image))
+        if page_index == self._document_page_index:
+            self.current_image = image
+            self._update_chrome(Path(path_text))
+
+    def _release_document_pages(self, page_indices: object) -> None:
+        if not isinstance(page_indices, tuple) or not all(
+            isinstance(index, int) for index in page_indices
+        ):
+            return
+        indices = cast(tuple[int, ...], page_indices)
+        for page_index in indices:
+            if page_index == self._document_page_index:
+                continue
+            image = self._document_images.pop(page_index, None)
+            if image is not None:
+                image.close()
+
+    def _document_visible_page_changed(self, page_index: int) -> None:
+        path = self.navigation.current
+        if (
+            self._pdf_edit_mode
+            or path is None
+            or path.suffix.casefold() != PDF_EXTENSION
+            or not 0 <= page_index < self._document_page_count
+        ):
+            return
+        self._document_page_index = page_index
+        self.current_image = self._document_images.get(page_index)
+        self._update_chrome(path)
 
     def _update_chrome(self, path: Path) -> None:
         is_pdf = path.suffix.casefold() == PDF_EXTENSION
@@ -457,7 +593,10 @@ class ViewerWindow(QMainWindow):
             size = path.stat().st_size
         except OSError:
             size = 0
-        if self.current_image is not None:
+        if is_pdf and 0 <= self._document_page_index < len(self._document_page_sizes):
+            width, height = self._document_page_sizes[self._document_page_index]
+            fmt = "PDF"
+        elif self.current_image is not None:
             width, height = self.current_image.size
             fmt = (self.current_image.format or path.suffix.lstrip(".")).upper()
         else:
@@ -524,20 +663,13 @@ class ViewerWindow(QMainWindow):
     def navigate(self, direction: int) -> None:
         if self.markup_toolbar.isVisible():
             return
-        path = self.navigation.current
-        if path is not None and path.suffix.casefold() == PDF_EXTENSION:
-            page_index = self._document_page_index + direction
-            if 0 <= page_index < self._document_page_count:
-                self._document_page_index = page_index
-                self.load_current()
-                return
-            if len(self.navigation.files) <= 1:
-                return
+        if len(self.navigation.files) <= 1:
+            return
         if self.navigation.target(direction) is not None:
             self.load_current()
 
     def _has_navigation_targets(self) -> bool:
-        return len(self.navigation.files) > 1 or self._document_page_count > 1
+        return len(self.navigation.files) > 1
 
     def select_path(self, path_text: str) -> None:
         path = Path(path_text)
@@ -599,12 +731,17 @@ class ViewerWindow(QMainWindow):
             self.refresh_filmstrip()
 
     def rotate_preview(self) -> None:
+        path = self.navigation.current
+        if path is not None and path.suffix.casefold() == PDF_EXTENSION:
+            return
         if self.current_image is None:
             return
+        zoom_percent = self.image_view.zoom_percent()
         rotated = self.current_image.transpose(Image.Transpose.ROTATE_270)
         self.current_image.close()
         self.current_image = rotated
-        self.image_view.set_image(pil_to_qimage(rotated), fit=True)
+        self.image_view.set_image(pil_to_qimage(rotated), fit=False)
+        self.image_view.set_zoom_percent(zoom_percent)
 
     def _sync_zoom_text(self, percent: int) -> None:
         if not self.zoom_edit.hasFocus():
@@ -671,6 +808,11 @@ class ViewerWindow(QMainWindow):
         path = self.navigation.current
         if self.current_image is None or path is None:
             return
+        if path.suffix.casefold() == PDF_EXTENSION:
+            self._pdf_edit_mode = True
+            self.image_view.set_image(pil_to_qimage(self.current_image), fit=True)
+        else:
+            self._pdf_edit_mode = False
         self.markup_toolbar.set_read_only_source(
             path.suffix.casefold() in READ_ONLY_EDIT_SOURCE_EXTENSIONS
         )
@@ -684,9 +826,27 @@ class ViewerWindow(QMainWindow):
         self.image_view.clear_annotations()
         self.image_view.set_annotation_tool("")
         self.markup_toolbar.hide()
+        restore_pdf = self._pdf_edit_mode
+        self._pdf_edit_mode = False
+        if restore_pdf:
+            self._restore_pdf_document()
         path = self.navigation.current
         if path is not None:
             self._update_chrome(path)
+
+    def _restore_pdf_document(self) -> None:
+        path = self.navigation.current
+        if path is None or path.suffix.casefold() != PDF_EXTENSION or not self._document_page_sizes:
+            return
+        page_images = {
+            page_index: pil_to_qimage(image) for page_index, image in self._document_images.items()
+        }
+        self.image_view.set_document(
+            self._document_page_sizes,
+            page_images,
+            current_index=self._document_page_index,
+        )
+        self.current_image = self._document_images.get(self._document_page_index)
 
     def _undo_in_viewer(self) -> None:
         if self.markup_toolbar.isVisible():
@@ -822,9 +982,7 @@ class ViewerWindow(QMainWindow):
         self.config.save(self.store, self._settings_base)
         self.image_loader.shutdown(wait=False)
         self.thumbnail_loader.shutdown(wait=False)
-        if self.current_image is not None:
-            self.current_image.close()
-            self.current_image = None
+        self._close_loaded_content()
         event.accept()
 
 

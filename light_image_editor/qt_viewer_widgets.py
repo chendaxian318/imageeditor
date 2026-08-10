@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsOpacityEffect,
     QGraphicsPixmapItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSceneHoverEvent,
     QGraphicsSceneMouseEvent,
@@ -213,20 +214,25 @@ class ViewerIconButton(QPushButton):
             painter.drawLine(cx - 7, cy + 7, cx - 3, cy + 6)
             painter.drawLine(cx + 4, cy - 6, cx + 7, cy - 3)
         elif name == "settings":
-            painter.setBrush(color)
+            points: list[QPointF] = []
+            tooth_count = 8
+            for index in range(tooth_count * 4):
+                angle = -math.pi / 2 + index * math.pi / (tooth_count * 2)
+                radius = 9.6 if index % 4 in {1, 2} else 6.7
+                points.append(
+                    QPointF(
+                        cx + math.cos(angle) * radius,
+                        cy + math.sin(angle) * radius,
+                    )
+                )
+            gear = QPainterPath()
+            gear.addPolygon(QPolygonF(points))
+            gear.closeSubpath()
+            gear.addEllipse(QPointF(cx, cy), 2.8, 2.8)
+            gear.setFillRule(Qt.FillRule.OddEvenFill)
             painter.setPen(Qt.PenStyle.NoPen)
-            for angle in range(0, 360, 45):
-                painter.save()
-                painter.translate(cx, cy)
-                painter.rotate(angle)
-                painter.drawRoundedRect(QRectF(-1.7, -9.5, 3.4, 4.5), 0.9, 0.9)
-                painter.restore()
-            gear_pen = QPen(color, 2.4)
-            gear_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(gear_pen)
-            painter.drawEllipse(QPointF(cx, cy), 6.4, 6.4)
-            painter.drawEllipse(QPointF(cx, cy), 2.3, 2.3)
+            painter.setBrush(color)
+            painter.drawPath(gear)
         painter.end()
 
 
@@ -894,6 +900,9 @@ class ImageView(QGraphicsView):
     annotationSizeSelected = Signal(int)
     annotationSelected = Signal(str, str, int)
     annotationSelectionCleared = Signal()
+    documentPageChanged = Signal(int)
+    documentPagesRequested = Signal(object)
+    documentPagesReleased = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -913,6 +922,11 @@ class ImageView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self._pixmap_item: QGraphicsPixmapItem | None = None
         self._source_qimage: QImage | None = None
+        self._document_mode = False
+        self._document_page_rects: list[QRectF] = []
+        self._document_page_items: dict[int, QGraphicsPixmapItem] = {}
+        self._document_background_items: list[QGraphicsRectItem] = []
+        self._current_document_page = 0
         self._fit_mode = True
         self._annotation_tool = ""
         self._annotation_start: QPointF | None = None
@@ -930,10 +944,23 @@ class ImageView(QGraphicsView):
         self._text_editor_color = self._annotation_color
         self._text_editor_size = self._annotation_font_size
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.verticalScrollBar().valueChanged.connect(self._document_viewport_changed)
 
     @property
     def has_image(self) -> bool:
-        return self._pixmap_item is not None
+        return self._pixmap_item is not None or bool(self._document_page_rects)
+
+    @property
+    def document_mode(self) -> bool:
+        return self._document_mode
+
+    @property
+    def current_document_page(self) -> int:
+        return self._current_document_page
+
+    @property
+    def loaded_document_pages(self) -> tuple[int, ...]:
+        return tuple(sorted(self._document_page_items))
 
     @property
     def annotation_tool(self) -> str:
@@ -949,7 +976,15 @@ class ImageView(QGraphicsView):
 
     def set_image(self, image: QImage, *, fit: bool = True) -> None:
         self._cancel_inline_text_editor()
+        self._pixmap_item = None
         self.scene().clear()
+        self._document_mode = False
+        self._document_page_rects.clear()
+        self._document_page_items.clear()
+        self._document_background_items.clear()
+        self._current_document_page = 0
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._source_qimage = image.copy()
         self._pixmap_item = self.scene().addPixmap(QPixmap.fromImage(image))
         self._pixmap_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
@@ -965,20 +1000,126 @@ class ImageView(QGraphicsView):
         else:
             self.actual_size()
 
-    def clear_image(self) -> None:
+    def set_document(
+        self,
+        page_sizes: Sequence[tuple[int, int]],
+        page_images: Mapping[int, QImage] | None = None,
+        *,
+        current_index: int = 0,
+    ) -> None:
+        """Display PDF pages in one vertically scrolling, lazily populated scene."""
+
+        normalized = [(max(1, int(width)), max(1, int(height))) for width, height in page_sizes]
+        if not normalized:
+            self.clear_image()
+            return
         self._cancel_inline_text_editor()
+        self._pixmap_item = None
         self.scene().clear()
+        self._document_mode = True
+        self._document_page_rects.clear()
+        self._document_page_items.clear()
+        self._document_background_items.clear()
+        self._current_document_page = max(0, min(len(normalized) - 1, int(current_index)))
         self._pixmap_item = None
         self._source_qimage = None
+        self._clear_annotation_state()
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        margin = 32.0
+        gap = 24.0
+        maximum_width = float(max(width for width, _height in normalized))
+        y = margin
+        for width, height in normalized:
+            x = margin + (maximum_width - width) / 2
+            rect = QRectF(x, y, float(width), float(height))
+            self._document_page_rects.append(rect)
+            background = self.scene().addRect(rect, QPen(QColor(BORDER), 1), QColor("#ffffff"))
+            background.setZValue(0)
+            self._document_background_items.append(background)
+            y += height + gap
+        self.scene().setSceneRect(0, 0, maximum_width + margin * 2, y - gap + margin)
+
+        for page_index, image in (page_images or {}).items():
+            self.set_document_page(page_index, image)
+        self.fit_to_window()
+        self.scroll_to_document_page(self._current_document_page)
+        self._update_visible_document_pages()
+
+    def set_document_page(self, page_index: int, image: QImage) -> None:
+        if not self._document_mode or not 0 <= page_index < len(self._document_page_rects):
+            return
+        old_item = self._document_page_items.pop(page_index, None)
+        if old_item is not None:
+            self.scene().removeItem(old_item)
+        rect = self._document_page_rects[page_index]
+        item = self.scene().addPixmap(QPixmap.fromImage(image))
+        item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        item.setPos(rect.topLeft())
+        if image.width() > 0:
+            item.setScale(rect.width() / image.width())
+        item.setZValue(1)
+        self._document_page_items[page_index] = item
+        if self._pixmap_item is None:
+            self._pixmap_item = item
+
+    def clear_document_page(self, page_index: int) -> None:
+        item = self._document_page_items.pop(page_index, None)
+        if item is None:
+            return
+        self.scene().removeItem(item)
+        if self._pixmap_item is item:
+            self._pixmap_item = next(iter(self._document_page_items.values()), None)
+
+    def scroll_to_document_page(self, page_index: int) -> None:
+        if not self._document_mode or not 0 <= page_index < len(self._document_page_rects):
+            return
+        changed = page_index != self._current_document_page
+        self._current_document_page = page_index
+        rect = self._document_page_rects[page_index]
+        scale = max(0.01, abs(self.transform().m11()))
+        visible_height = self.viewport().height() / scale
+        self.centerOn(rect.center().x(), rect.top() + visible_height / 2)
+        if changed:
+            self.documentPageChanged.emit(page_index)
+        self._update_visible_document_pages()
+
+    def _clear_annotation_state(self) -> None:
         self._annotations.clear()
         self._annotation_items.clear()
         self._annotation_history.clear()
         self._pending_annotation_history = None
         self._draft_item = None
         self._annotation_start = None
+
+    def clear_image(self) -> None:
+        self._cancel_inline_text_editor()
+        self._pixmap_item = None
+        self.scene().clear()
+        self._source_qimage = None
+        self._document_mode = False
+        self._document_page_rects.clear()
+        self._document_page_items.clear()
+        self._document_background_items.clear()
+        self._current_document_page = 0
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._clear_annotation_state()
         self.zoomChanged.emit(100)
 
     def fit_to_window(self) -> None:
+        if self._document_mode and self._document_page_rects:
+            self._fit_mode = True
+            current_page = self._current_document_page
+            maximum_width = max(rect.width() for rect in self._document_page_rects)
+            available_width = max(1.0, self.viewport().width() - 64.0)
+            scale = max(0.1, min(8.0, available_width / maximum_width))
+            self.resetTransform()
+            self.scale(scale, scale)
+            self.scroll_to_document_page(current_page)
+            self.zoomChanged.emit(self.zoom_percent())
+            return
         if self._pixmap_item is None:
             return
         self._fit_mode = True
@@ -988,6 +1129,13 @@ class ImageView(QGraphicsView):
         self.zoomChanged.emit(self.zoom_percent())
 
     def actual_size(self) -> None:
+        if self._document_mode and self._document_page_rects:
+            self._fit_mode = False
+            current_page = self._current_document_page
+            self.resetTransform()
+            self.scroll_to_document_page(current_page)
+            self.zoomChanged.emit(100)
+            return
         if self._pixmap_item is None:
             return
         self._fit_mode = False
@@ -1000,12 +1148,16 @@ class ImageView(QGraphicsView):
         return max(1, min(800, round(self.transform().m11() * 100)))
 
     def set_zoom_percent(self, percent: int) -> None:
-        if self._pixmap_item is None:
+        if self._pixmap_item is None and not self._document_page_rects:
             return
         bounded = max(10, min(800, int(percent)))
         self._fit_mode = False
+        center = self.mapToScene(self.viewport().rect().center())
         self.resetTransform()
         self.scale(bounded / 100.0, bounded / 100.0)
+        if self._document_mode:
+            self.centerOn(center)
+            self._update_visible_document_pages()
         self._refresh_inline_text_editor()
         self.zoomChanged.emit(bounded)
 
@@ -1265,17 +1417,72 @@ class ImageView(QGraphicsView):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        if self._fit_mode and self._pixmap_item is not None:
+        if self._fit_mode and self._document_mode and self._document_page_rects:
+            self.fit_to_window()
+        elif self._fit_mode and self._pixmap_item is not None:
             self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
             self._refresh_inline_text_editor()
             self.zoomChanged.emit(self.zoom_percent())
+        if self._document_mode:
+            self._update_visible_document_pages()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
+        if self._document_mode:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                direction = 1 if event.angleDelta().y() > 0 else -1
+                self.step_zoom(direction * 10)
+                event.accept()
+                return
+            super().wheelEvent(event)
+            self._update_visible_document_pages()
+            return
         if self._pixmap_item is None:
             return
         direction = 1 if event.angleDelta().y() > 0 else -1
         self.step_zoom(direction * 10)
         event.accept()
+
+    def _document_viewport_changed(self, _value: int) -> None:
+        if self._document_mode:
+            self._update_visible_document_pages()
+
+    def _update_visible_document_pages(self) -> None:
+        if not self._document_mode or not self._document_page_rects:
+            return
+        viewport_rect = self.mapToScene(self.viewport().rect()).boundingRect()
+        if viewport_rect.height() <= 0:
+            desired = {self._current_document_page}
+        else:
+            center_y = viewport_rect.center().y()
+            page_index = min(
+                range(len(self._document_page_rects)),
+                key=lambda index: abs(self._document_page_rects[index].center().y() - center_y),
+            )
+            if page_index != self._current_document_page:
+                self._current_document_page = page_index
+                self.documentPageChanged.emit(page_index)
+            preload_rect = viewport_rect.adjusted(
+                0,
+                -viewport_rect.height(),
+                0,
+                viewport_rect.height(),
+            )
+            desired = {
+                index
+                for index, rect in enumerate(self._document_page_rects)
+                if rect.intersects(preload_rect)
+            }
+            desired.add(self._current_document_page)
+
+        loaded = set(self._document_page_items)
+        releases = tuple(sorted(loaded - desired))
+        for page_index in releases:
+            self.clear_document_page(page_index)
+        if releases:
+            self.documentPagesReleased.emit(releases)
+        requests = tuple(sorted(desired - set(self._document_page_items)))
+        if requests:
+            self.documentPagesRequested.emit(requests)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         self.pointerMoved.emit(round(event.position().y()))

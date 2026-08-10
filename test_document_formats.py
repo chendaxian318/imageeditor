@@ -60,6 +60,8 @@ class DocumentFormatTests(unittest.TestCase):
             loader = ImageLoader(max_workers=1, cache_size=3)
             try:
                 self.assertEqual(first.info["pdf_page_count"], 2)
+                self.assertEqual(len(first.info["pdf_page_sizes"]), 2)
+                self.assertEqual(first.info["pdf_page_sizes"][0], first.size)
                 self.assertEqual(second.info["pdf_page_index"], 1)
                 self.assertNotEqual(first.getpixel((20, 20)), second.getpixel((20, 20)))
                 cached_first = loader.load(path, page_index=0).result(timeout=5)
