@@ -9,8 +9,10 @@ substitute for the authoritative licence text distributed by each component.
 - Platform: Windows x64
 - Python: 3.12.10
 - Pillow: 11.3.0
+- attrs: 26.1.0
 - NumPy: 2.5.1
 - pypdfium2: 5.12.1 (bundled PDFium Windows x64 binary)
+- psd-tools: 1.17.4
 - PyInstaller: 6.17.0
 - Source of version data: installed metadata in `.venv` plus `pip freeze --all`
 - Application artifacts checked: `release/LightImageEditor/ImageEditor.exe`,
@@ -28,8 +30,10 @@ process can copy them into a distributable notice bundle.
 | Python | 3.12.10 | Embedded interpreter/runtime | PSF License Version 2 and bundled notices | Python installation `LICENSE.txt` |
 | Tcl/Tk | 8.6 | Tkinter GUI runtime | Tcl/Tk licence | Python installation `tcl`/`tk` licence files; verify during packaging |
 | Pillow | 11.3.0 | Image decode, processing and encode | MIT-CMU, plus bundled native-library terms | `.venv/Lib/site-packages/pillow-11.3.0.dist-info/licenses/LICENSE` |
+| attrs | 26.1.0 | Runtime data-model dependency of psd-tools | MIT | `.venv/Lib/site-packages/attrs-26.1.0.dist-info/licenses/LICENSE` |
 | NumPy | 2.5.1 | Float32 colour processing, curves, histograms and analysis | BSD-3-Clause, plus bundled third-party terms | `.venv/Lib/site-packages/numpy-2.5.1.dist-info/licenses/` |
 | pypdfium2 / PDFium | 5.12.1 | Multi-page PDF inspection and raster rendering | pypdfium2: Apache-2.0 OR BSD-3-Clause; PDFium: BSD-style, plus bundled native dependency terms | `.venv/Lib/site-packages/pypdfium2-5.12.1.dist-info/licenses/` |
+| psd-tools | 1.17.4 | Read-only PSD/PSDT parsing and flattened composite rendering | MIT | `.venv/Lib/site-packages/psd_tools-1.17.4.dist-info/licenses/LICENSE` |
 | PyInstaller | 6.17.0 | Build tool and embedded bootloader/runtime hooks | GPL-2.0-or-later WITH Bootloader-exception; runtime hooks Apache-2.0 | `.venv/Lib/site-packages/pyinstaller-6.17.0.dist-info/licenses/COPYING.txt` |
 | pyinstaller-hooks-contrib | 2026.6 | PyInstaller hook set | Standard hooks GPL-2.0-or-later; runtime hooks Apache-2.0 | `.venv/Lib/site-packages/pyinstaller_hooks_contrib-2026.6.dist-info/licenses/LICENSE` |
 | Inno Setup | 7.0.2 | Windows installer compiler | Free for non-commercial use; commercial use requires a licence | Verified compiler under `.tools/inno`; authoritative terms at `jrsoftware.org` |
@@ -143,6 +147,13 @@ This directory includes the pypdfium2 licence texts and PDFium
 `BUILD_LICENSES` notices for components such as Abseil, FreeType, ICU, Little
 CMS, libjpeg-turbo, OpenJPEG, libpng, LibTIFF, simdutf and zlib. Do not replace
 those exact texts with this summary.
+
+## Photoshop document parser notices
+
+The base application includes `psd-tools==1.17.4` and its `attrs==26.1.0`
+runtime dependency for bounded, read-only PSD/PSDT composite previews. Their
+MIT licence texts are copied into `licenses/psd-tools/` and `licenses/attrs/`
+by both PyInstaller recipes and must remain in installed and portable builds.
 
 ## Reproducible audit command
 

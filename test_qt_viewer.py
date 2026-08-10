@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import struct
 import tempfile
 import time
 import unittest
@@ -26,6 +27,14 @@ from light_image_editor.qt_viewer_widgets import (
 from light_image_editor.settings import SettingsStore
 
 
+def _write_minimal_psd(path: Path) -> None:
+    header = b"8BPS" + struct.pack(">H", 1) + b"\0" * 6
+    header += struct.pack(">HIIHH", 3, 2, 2, 8, 3)
+    sections = struct.pack(">III", 0, 0, 0)
+    planes = bytes((255, 0, 0, 255)) + bytes((0, 255, 0, 255)) + bytes((0, 0, 255, 255))
+    path.write_bytes(header + sections + struct.pack(">H", 0) + planes)
+
+
 class QtViewerEmptyStateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -45,7 +54,7 @@ class QtViewerEmptyStateTests(unittest.TestCase):
                 self.assertEqual(window.empty_open_button.text(), "打开文件")
                 self.assertEqual(
                     window.empty_hint.text(),
-                    "点击按钮选择图片、PSD 或 PDF，也可以直接拖放到这里",
+                    "点击按钮选择图片、PSD/PSDT 或 PDF，也可以直接拖放到这里",
                 )
                 self.assertFalse(window.previous_button.isVisible())
                 self.assertFalse(window.next_button.isVisible())
@@ -113,6 +122,28 @@ class QtViewerDocumentFormatTests(unittest.TestCase):
             self.assertIn(0, releases)
         finally:
             view.close()
+
+    def test_psdt_opens_as_a_read_only_composite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "template.psdt"
+            _write_minimal_psd(source)
+            window = ViewerWindow(SettingsStore(root / "settings.json"))
+            try:
+                window.show()
+                window.open_path(source)
+                deadline = time.monotonic() + 5
+                while window.current_image is None and time.monotonic() < deadline:
+                    self.application.processEvents()
+                    time.sleep(0.01)
+
+                self.assertIsNotNone(window.current_image)
+                self.assertIn("PSDT 合成预览", window.info_label.text())
+                window.enter_markup()
+                self.assertEqual(window.markup_toolbar.replace_button.text(), "导出副本")
+            finally:
+                window.close()
+                self.application.processEvents()
 
     def test_pdf_continuous_scroll_and_markup_export_keep_source_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

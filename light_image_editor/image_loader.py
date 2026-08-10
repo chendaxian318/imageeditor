@@ -20,6 +20,7 @@ from .document import (
 )
 from .formats import HEIF_EXTENSIONS, AnimationSequence, decode_animation, register_optional_heif
 from .pdf_support import PDF_EXTENSION, PdfSupportError, render_pdf_page
+from .psd_support import PSD_EXTENSIONS, PsdSupportError, render_psd_composite
 
 MAX_DECODE_PIXELS = 120_000_000
 MAX_IMAGE_DIMENSION = 100_000
@@ -64,6 +65,8 @@ def friendly_load_failure(path: str | Path, error: BaseException) -> ImageLoadFa
         return ImageLoadFailure(image_path, "permission", "没有权限读取这个文件。")
     if isinstance(error, PdfSupportError):
         return ImageLoadFailure(image_path, "pdf", str(error))
+    if isinstance(error, PsdSupportError):
+        return ImageLoadFailure(image_path, "psd", str(error))
     if isinstance(error, (Image.DecompressionBombError, Image.DecompressionBombWarning)):
         return ImageLoadFailure(image_path, "too_large", "图片尺寸过大，已停止解码以保护内存。")
     if isinstance(error, UnidentifiedImageError):
@@ -82,6 +85,8 @@ def decode_image(path: str | Path, page_index: int = 0) -> Image.Image:
     try:
         if image_path.suffix.casefold() == PDF_EXTENSION:
             return render_pdf_page(image_path, page_index)
+        if image_path.suffix.casefold() in PSD_EXTENSIONS:
+            return render_psd_composite(image_path)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", Image.DecompressionBombWarning)
             with Image.open(image_path) as source:

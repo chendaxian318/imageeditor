@@ -40,6 +40,7 @@ from image_ops import ConflictPolicy, ExportOptions, save_image
 from .image_loader import ImageLoader
 from .navigation import NavigationSession
 from .pdf_support import PDF_EXTENSION
+from .psd_support import PSD_EXTENSIONS
 from .qt_viewer_config import QtViewerConfig, parse_window_geometry
 from .qt_viewer_widgets import (
     CANVAS,
@@ -59,7 +60,7 @@ from .qt_viewer_widgets import (
 from .settings import SettingsStore
 from .thumbnails import ThumbnailLoader
 
-READ_ONLY_EDIT_SOURCE_EXTENSIONS = {PDF_EXTENSION, ".psd"}
+READ_ONLY_EDIT_SOURCE_EXTENSIONS = {PDF_EXTENSION, *PSD_EXTENSIONS}
 
 
 class _UiBridge(QObject):
@@ -163,7 +164,7 @@ class ViewerWindow(QMainWindow):
         self.empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_title.setStyleSheet("color: #f5f7fa; font: 600 20px 'Microsoft YaHei UI';")
         self.empty_hint = QLabel(
-            "点击按钮选择图片、PSD 或 PDF，也可以直接拖放到这里", self.empty_state
+            "点击按钮选择图片、PSD/PSDT 或 PDF，也可以直接拖放到这里", self.empty_state
         )
         self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_hint.setStyleSheet(f"color: {MUTED}; font: 13px 'Microsoft YaHei UI';")
@@ -227,7 +228,10 @@ class ViewerWindow(QMainWindow):
 
     def _build_toolbar(self) -> None:
         self.open_button = ViewerIconButton(
-            text="打开", tooltip="打开图片、PSD 或 PDF（Ctrl+O）", parent=self.toolbar, width=58
+            text="打开",
+            tooltip="打开图片、PSD/PSDT 或 PDF（Ctrl+O）",
+            parent=self.toolbar,
+            width=58,
         )
         self.open_button.clicked.connect(self.choose_images)
         self.toolbar.add_button(self.open_button)
@@ -360,7 +364,7 @@ class ViewerWindow(QMainWindow):
 
     def choose_images(self) -> None:
         image_patterns = (
-            "*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff *.avif *.heic *.heif *.psd"
+            "*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff *.avif *.heic *.heif *.psd *.psdt"
         )
         paths, _ = QFileDialog.getOpenFileNames(
             self,
@@ -606,9 +610,10 @@ class ViewerWindow(QMainWindow):
         if is_pdf:
             file_position = f"  ·  文件 {position[0]} / {position[1]}" if position[1] > 1 else ""
             info = f"PDF  ·  {width} × {height}  ·  {size_text}  ·  {page_position}{file_position}"
-        elif path.suffix.casefold() == ".psd":
+        elif path.suffix.casefold() in PSD_EXTENSIONS:
+            photoshop_format = path.suffix.lstrip(".").upper()
             info = (
-                f"PSD 合成预览  ·  {width} × {height}  ·  {size_text}"
+                f"{photoshop_format} 合成预览  ·  {width} × {height}  ·  {size_text}"
                 f"  ·  第 {position[0]} / {position[1]} 张"
             )
         else:
@@ -914,7 +919,7 @@ class ViewerWindow(QMainWindow):
         try:
             if output_path.resolve() == source_path.resolve():
                 QMessageBox.warning(
-                    self, "无法导出", "PSD 和 PDF 源文件只读，请选择新的图片文件名。"
+                    self, "无法导出", "PSD、PSDT 和 PDF 源文件只读，请选择新的图片文件名。"
                 )
                 return
         except OSError:

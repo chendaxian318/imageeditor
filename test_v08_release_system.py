@@ -209,7 +209,20 @@ class ReleaseArtifactTests(unittest.TestCase):
         self.assertEqual(sbom["bomFormat"], "CycloneDX")
         components = cast(list[dict[str, Any]], sbom["components"])
         names = {str(item["name"]).casefold() for item in components}
-        self.assertEqual(names, {"numpy", "pillow"})
+        self.assertEqual(
+            names,
+            {
+                "attrs",
+                "numpy",
+                "pillow",
+                "psd-tools",
+                "pypdfium2",
+                "pyside6",
+                "pyside6-addons",
+                "pyside6-essentials",
+                "shiboken6",
+            },
+        )
         for name in ("image_editor.spec", "image_editor_portable.spec"):
             source = (ROOT / "packaging" / "windows" / name).read_text(encoding="utf-8")
             self.assertIn('"resources/update"', source)

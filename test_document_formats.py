@@ -4,6 +4,7 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -11,6 +12,8 @@ from image_ops import SUPPORTED_INPUTS, VIEWER_INPUTS
 from light_image_editor.document import metadata_from_image
 from light_image_editor.image_loader import ImageLoader, decode_image
 from light_image_editor.pdf_support import PdfSupportError, pdf_page_count, render_pdf_page
+from light_image_editor.psd_support import render_psd_composite
+from light_image_editor.thumbnails import generate_thumbnail
 
 
 def _write_minimal_psd(path: Path) -> None:
@@ -48,6 +51,61 @@ class DocumentFormatTests(unittest.TestCase):
 
         self.assertIn(".psd", SUPPORTED_INPUTS)
         self.assertIn(".psd", VIEWER_INPUTS)
+
+    def test_psdt_uses_the_dedicated_photoshop_decoder(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "template.psdt"
+            _write_minimal_psd(path)
+
+            with patch(
+                "light_image_editor.image_loader.Image.open",
+                side_effect=OSError("attempt to seek outside sequence"),
+            ):
+                decoded = decode_image(path)
+            try:
+                metadata = metadata_from_image(decoded)
+                self.assertEqual(decoded.size, (2, 2))
+                self.assertEqual(metadata.original_format, "PSDT")
+            finally:
+                decoded.close()
+            thumbnail = generate_thumbnail(path)
+            try:
+                self.assertEqual(thumbnail.size, (66, 48))
+                self.assertEqual(thumbnail.mode, "RGB")
+            finally:
+                thumbnail.close()
+
+        self.assertIn(".psdt", SUPPORTED_INPUTS)
+        self.assertIn(".psdt", VIEWER_INPUTS)
+
+    def test_psd_rebuilds_from_layers_when_cached_preview_is_invalid(self) -> None:
+        class FakeDocument:
+            size = (20, 10)
+
+            def __init__(self) -> None:
+                self.calls: list[bool] = []
+
+            def composite(
+                self,
+                *,
+                ignore_preview: bool = False,
+                apply_icc: bool = True,
+            ) -> Image.Image:
+                del apply_icc
+                self.calls.append(ignore_preview)
+                if not ignore_preview:
+                    raise OSError("attempt to seek outside sequence")
+                return Image.new("RGBA", self.size, (10, 20, 30, 128))
+
+        document = FakeDocument()
+        with patch("light_image_editor.psd_support.PSDImage.open", return_value=document):
+            decoded = render_psd_composite("broken-preview.psd")
+        try:
+            self.assertEqual(decoded.size, document.size)
+            self.assertEqual(decoded.getpixel((0, 0)), (10, 20, 30, 128))
+            self.assertEqual(document.calls, [False, True])
+        finally:
+            decoded.close()
 
     def test_pdf_pages_render_independently_and_are_page_cached(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

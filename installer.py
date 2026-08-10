@@ -36,11 +36,16 @@ SUPPORTED_EXTENSIONS = (
     ".tiff",
     ".gif",
     ".psd",
+    ".psdt",
     ".pdf",
 )
 PROJECT_EXTENSION = ".lieproj"
 PROJECT_PROG_ID = "LightImageEditor.Project"
 CONTEXT_MENU_KEY = r"Software\Classes\SystemFileAssociations\image\shell\LightImageEditor"
+CONTEXT_MENU_EXTENSION_KEYS = tuple(
+    rf"Software\Classes\SystemFileAssociations\{extension}\shell\LightImageEditor"
+    for extension in (".psd", ".psdt")
+)
 CAPABILITIES_KEY = rf"Software\{APP_REGISTRY_NAME}\Capabilities"
 REGISTERED_APPLICATIONS_KEY = r"Software\RegisteredApplications"
 PROG_ID_KEY = rf"Software\Classes\{PROG_ID}"
@@ -77,11 +82,12 @@ def request_app_shutdown() -> None:
 
 
 def register_context_menu(target: Path) -> None:
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, CONTEXT_MENU_KEY) as key:
-        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"用{APP_NAME}编辑")
-        winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, str(target))
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, CONTEXT_MENU_KEY + r"\command") as key:
-        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'"{target}" "%1"')
+    for menu_key in (CONTEXT_MENU_KEY, *CONTEXT_MENU_EXTENSION_KEYS):
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, menu_key) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"用{APP_NAME}查看")
+            winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, str(target))
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, menu_key + r"\command") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'"{target}" "%1"')
 
 
 def open_command(target: Path) -> str:
@@ -183,7 +189,8 @@ def delete_registry_tree(root, subkey: str) -> None:
 
 
 def unregister_context_menu() -> None:
-    delete_registry_tree(winreg.HKEY_CURRENT_USER, CONTEXT_MENU_KEY)
+    for menu_key in (CONTEXT_MENU_KEY, *CONTEXT_MENU_EXTENSION_KEYS):
+        delete_registry_tree(winreg.HKEY_CURRENT_USER, menu_key)
 
 
 def delete_registry_value(root, subkey: str, value_name: str) -> None:

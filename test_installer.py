@@ -3,6 +3,7 @@ from pathlib import Path
 
 from installer import (
     APP_REGISTRY_NAME,
+    CONTEXT_MENU_EXTENSION_KEYS,
     LEGAL_DOCUMENTS,
     PROJECT_EXTENSION,
     PROJECT_PROG_ID,
@@ -54,9 +55,26 @@ class InstallerTests(unittest.TestCase):
                 ".tiff",
                 ".gif",
                 ".psd",
+                ".psdt",
                 ".pdf",
             ),
         )
+
+    def test_photoshop_formats_have_explicit_context_menu_keys(self) -> None:
+        self.assertEqual(
+            CONTEXT_MENU_EXTENSION_KEYS,
+            (
+                r"Software\Classes\SystemFileAssociations\.psd\shell\LightImageEditor",
+                r"Software\Classes\SystemFileAssociations\.psdt\shell\LightImageEditor",
+            ),
+        )
+        script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
+        for extension in (".psd", ".psdt"):
+            self.assertIn(
+                rf"Software\Classes\SystemFileAssociations\{extension}\shell\LightImageEditor",
+                script,
+            )
+            self.assertIn(f'ValueName: "{extension}"; ValueData: "{{#ProgId}}"', script)
 
     def test_open_command_quotes_executable_and_file(self) -> None:
         target = Path(r"C:\Users\Test User\LightImageEditor\ImageEditor.exe")

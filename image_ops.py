@@ -31,6 +31,7 @@ SUPPORTED_INPUTS = {
     ".heic",
     ".heif",
     ".psd",
+    ".psdt",
 }
 
 DOCUMENT_INPUTS = {".pdf"}

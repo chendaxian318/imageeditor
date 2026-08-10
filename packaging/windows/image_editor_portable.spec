@@ -12,6 +12,10 @@ UPDATE_KEYS = ROOT / "resources" / "update"
 PYPDFIUM_LICENSES = (
     ROOT / ".venv" / "Lib" / "site-packages" / "pypdfium2-5.12.1.dist-info" / "licenses"
 )
+PSDTOOLS_LICENSES = (
+    ROOT / ".venv" / "Lib" / "site-packages" / "psd_tools-1.17.4.dist-info" / "licenses"
+)
+ATTRS_LICENSES = ROOT / ".venv" / "Lib" / "site-packages" / "attrs-26.1.0.dist-info" / "licenses"
 
 a = Analysis(
     [str(ROOT / "image_editor.py")],
@@ -21,6 +25,8 @@ a = Analysis(
         (str(LOCALES), "resources/locales"),
         (str(UPDATE_KEYS), "resources/update"),
         (str(PYPDFIUM_LICENSES), "licenses/pypdfium2"),
+        (str(PSDTOOLS_LICENSES), "licenses/psd-tools"),
+        (str(ATTRS_LICENSES), "licenses/attrs"),
     ],
     hiddenimports=[],
     hookspath=[],

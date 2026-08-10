@@ -18,6 +18,7 @@ from .image_loader import (
     friendly_load_failure,
 )
 from .pdf_support import PDF_EXTENSION, render_pdf_page
+from .psd_support import PSD_EXTENSIONS, render_psd_composite
 
 THUMBNAIL_SIZE = (66, 48)
 
@@ -34,6 +35,22 @@ def generate_thumbnail(
     try:
         if image_path.suffix.casefold() == PDF_EXTENSION:
             rendered = render_pdf_page(image_path, dpi=72)
+            try:
+                rgba = rendered.convert("RGBA")
+                try:
+                    contained = ImageOps.contain(rgba, size, Image.Resampling.LANCZOS)
+                finally:
+                    rgba.close()
+            finally:
+                rendered.close()
+            result = Image.new("RGBA", size, background)
+            offset = ((size[0] - contained.width) // 2, (size[1] - contained.height) // 2)
+            result.alpha_composite(contained, offset)
+            rgb = result.convert("RGB")
+            result.close()
+            return rgb
+        if image_path.suffix.casefold() in PSD_EXTENSIONS:
+            rendered = render_psd_composite(image_path)
             try:
                 rgba = rendered.convert("RGBA")
                 try:

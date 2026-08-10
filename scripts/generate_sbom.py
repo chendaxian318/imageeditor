@@ -26,12 +26,7 @@ def component(name: str, version: str) -> dict[str, object]:
 
 def create_sbom(lock_path: Path) -> dict[str, object]:
     dependencies = read_lock(lock_path)
-    runtime_names = {"pillow", "numpy"}
-    components = [
-        component(name, version)
-        for name, version in sorted(dependencies.items())
-        if name in runtime_names
-    ]
+    components = [component(name, version) for name, version in sorted(dependencies.items())]
     fingerprint = hashlib.sha256(
         json.dumps(components, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
