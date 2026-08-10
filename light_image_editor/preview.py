@@ -60,6 +60,7 @@ def render_preview(
     comparison_labels: tuple[str, str] | None = None,
     display_proxy: Image.Image | None = None,
     conversion_recipe: TransformRecipe | None = None,
+    allow_fit_upscale: bool = False,
 ) -> PreviewFrame:
     """Apply edits and resize without touching Tk from the worker thread."""
 
@@ -92,6 +93,7 @@ def render_preview(
             left_icc_profile=metadata_from_image(original).icc_profile,
             right_icc_profile=metadata_from_image(comparison_image).icc_profile,
             labels=comparison_labels or ("当前图片", "对比图片"),
+            allow_fit_upscale=allow_fit_upscale,
         )
     if split_compare and not compare_original:
         return _render_split_preview(
@@ -104,9 +106,11 @@ def render_preview(
             left_icc_profile=metadata_from_image(original).icc_profile,
             right_icc_profile=metadata_from_image(original).icc_profile,
             labels=("编辑前", "编辑后"),
+            allow_fit_upscale=allow_fit_upscale,
         )
     if zoom_percent is None:
-        scale = min(canvas_w / working.width, canvas_h / working.height, 1.0)
+        fit_scale = min(canvas_w / working.width, canvas_h / working.height)
+        scale = min(fit_scale, 8.0 if allow_fit_upscale else 1.0)
     else:
         scale = zoom_percent / 100.0
 
@@ -178,6 +182,7 @@ def _render_split_preview(
     left_icc_profile: bytes | None,
     right_icc_profile: bytes | None,
     labels: tuple[str, str],
+    allow_fit_upscale: bool = False,
 ) -> PreviewFrame:
     """Render two complete images at one common scale in equal-width panels."""
 
@@ -186,7 +191,11 @@ def _render_split_preview(
     max_height = max(left_image.height, right_image.height)
     if zoom_percent is None:
         available_panel_width = max(1, (canvas_size[0] - gap) // 2)
-        scale = min(available_panel_width / max_width, canvas_size[1] / max_height, 1.0)
+        fit_scale = min(
+            available_panel_width / max_width,
+            canvas_size[1] / max_height,
+        )
+        scale = min(fit_scale, 8.0 if allow_fit_upscale else 1.0)
     else:
         scale = zoom_percent / 100.0
     panel_width = max(1, round(max_width * scale))
@@ -277,6 +286,7 @@ class PreviewRenderer:
         comparison_labels: tuple[str, str] | None = None,
         display_proxy: Image.Image | None = None,
         conversion_recipe: TransformRecipe | None = None,
+        allow_fit_upscale: bool = False,
     ) -> Future[PreviewFrame]:
         with self._lock:
             if self._pending is not None and not self._pending.running():
@@ -294,6 +304,7 @@ class PreviewRenderer:
                 comparison_labels=comparison_labels,
                 display_proxy=display_proxy,
                 conversion_recipe=conversion_recipe,
+                allow_fit_upscale=allow_fit_upscale,
             )
             self._pending = future
             return future

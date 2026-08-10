@@ -116,14 +116,14 @@ def extension_for_format(output_format: str) -> str:
     return "." + fmt.lower()
 
 
-def natural_sort_key(path: str | Path) -> tuple[object, ...]:
+def natural_sort_key(path: str | Path) -> tuple[tuple[int, int | str], ...]:
     name = Path(path).name.lower()
-    parts: list[object] = []
+    parts: list[tuple[int, int | str]] = []
     for part in _NATURAL_PARTS.split(name):
         if part.isdigit():
-            parts.append(int(part))
+            parts.append((0, int(part)))
         elif part:
-            parts.append(part)
+            parts.append((1, part))
     return tuple(parts)
 
 

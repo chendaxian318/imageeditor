@@ -83,6 +83,13 @@ class MaterialWindowButton(tk.Canvas):
         center_y = height / 2
 
         def paint(draw: ImageDraw.ImageDraw, scale: int) -> None:
+            # Tk can composite transparent PhotoImage pixels as black on some
+            # Windows/DPI combinations. Paint the title-bar surface first so
+            # the control margins always blend into the surrounding bar.
+            draw.rectangle(
+                (0, 0, width * scale, height * scale),
+                fill=self._surface,
+            )
             line_width = max(2, round(1.5 * scale))
             draw.rounded_rectangle(
                 (2 * scale, 2 * scale, (width - 2) * scale, (height - 2) * scale),
@@ -93,9 +100,9 @@ class MaterialWindowButton(tk.Canvas):
                 draw.line(
                     (
                         round((center_x - 6) * scale),
-                        round((center_y + 4) * scale),
+                        round(center_y * scale),
                         round((center_x + 6) * scale),
-                        round((center_y + 4) * scale),
+                        round(center_y * scale),
                     ),
                     fill=foreground,
                     width=line_width,
@@ -184,7 +191,7 @@ class MaterialTitleBar(tk.Frame):
         controller: BorderlessWindowController,
         close_command: Callable[[], None],
     ) -> None:
-        super().__init__(master, height=46, borderwidth=0, highlightthickness=0)
+        super().__init__(master, height=42, borderwidth=0, highlightthickness=0)
         self.controller = controller
         self.pack_propagate(False)
         self._surface = "#f7f2fa"
@@ -194,7 +201,7 @@ class MaterialTitleBar(tk.Frame):
         self._border = "#ddd8df"
 
         self.content = tk.Frame(self, borderwidth=0, highlightthickness=0)
-        self.content.pack(fill="both", expand=True, padx=(12, 7), pady=(5, 5))
+        self.content.pack(fill="both", expand=True, padx=(12, 7), pady=(4, 4))
         self.app_mark = tk.Canvas(
             self.content,
             width=26,
@@ -264,6 +271,7 @@ class MaterialTitleBar(tk.Frame):
         self._muted = muted
         self._accent = accent
         self._border = border
+        self.controller.set_titlebar_handle_background(surface)
         for widget in (self, self.content, self.drag_space):
             widget.configure(background=surface)
         self.app_mark.configure(background=surface)
@@ -288,6 +296,12 @@ class MaterialTitleBar(tk.Frame):
 
     def _draw_mark(self) -> None:
         def paint(draw: ImageDraw.ImageDraw, scale: int) -> None:
+            # Keep the antialiased mark opaque at its outer pixels. Transparent
+            # margins can otherwise show up as a black square in Tk on Windows.
+            draw.rectangle(
+                (0, 0, 26 * scale, 26 * scale),
+                fill=self._surface,
+            )
             draw.ellipse(
                 (2 * scale, 2 * scale, 24 * scale, 24 * scale),
                 fill=self._accent,

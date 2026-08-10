@@ -138,7 +138,11 @@ class FeaturePaletteUiTests(unittest.TestCase):
                 assert palette is not None
                 self.assertTrue(palette.winfo_ismapped())
                 self.assertEqual(len(palette.items), len(app.feature_registry))
-                self.assertEqual(len(palette.tree.get_children()), 135)
+                self.assertEqual(palette.scope_var.get(), FeaturePaletteScope.CURRENT.value)
+                expected_current_items = sum(
+                    feature.mode in {None, ModeId.VIEWER} for feature in app.feature_registry
+                )
+                self.assertEqual(len(palette.tree.get_children()), expected_current_items)
                 self.assertEqual(
                     palette.search_field.placeholder.cget("text"),
                     "搜索功能、模块、入口或快捷键",
@@ -148,16 +152,17 @@ class FeaturePaletteUiTests(unittest.TestCase):
                 app._show_feature_palette()
                 self.assertIs(app._feature_palette_window, palette)
 
-                palette.query_var.set("智能改图")
+                palette.query_var.set("资源库")
                 app.update_idletasks()
                 self.assertGreaterEqual(len(palette.tree.get_children()), 1)
-                self.assertEqual(palette.tree.get_children()[0], "edit.smart")
-                self.assertEqual(palette.tree.selection(), ("edit.smart",))
+                self.assertEqual(palette.tree.get_children()[0], "viewer.library")
+                self.assertEqual(palette.tree.selection(), ("viewer.library",))
                 palette._invoke_selected()
                 app.update_idletasks()
                 self.assertIsNone(app._feature_palette_window)
-                self.assertEqual(app.mode_router.active_mode, ModeId.EDIT)
-                self.assertEqual(app.active_inspector_tab, "smart")
+                self.assertEqual(app.mode_router.active_mode, ModeId.VIEWER)
+                self.assertFalse(app.thumbnail_sidebar.winfo_ismapped())
+                self.assertTrue(app.thumbnail_filmstrip.winfo_ismapped())
             finally:
                 self._close_app(app)
 

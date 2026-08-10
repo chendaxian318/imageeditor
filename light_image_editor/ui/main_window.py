@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -184,9 +185,10 @@ from ..windows_effects import (
     RoundedWindowEffect,
     should_use_borderless_chrome,
 )
+from .antialias import render_photo
 from .conversion_workspace import ConversionWorkspace
 from .curve_editor import CurveEditor
-from .feature_palette import FeatureCommandPalette
+from .feature_palette import FeatureCommandPalette, FeaturePaletteScope
 from .generation_workspace import GenerationCandidateGrid, GenerationCandidateItem
 from .material import (
     MaterialButton,
@@ -202,6 +204,7 @@ from .task_tray import (
     UnifiedTaskKind,
     UnifiedTaskStatus,
 )
+from .thumbnail_filmstrip import ThumbnailFilmstrip
 from .thumbnail_sidebar import ThumbnailSidebar
 from .window_chrome import MaterialTitleBar
 
@@ -209,7 +212,6 @@ APP_NAME = PRODUCT_NAME_ZH
 ZOOM_LEVELS = ("适应", "50%", "100%", "150%", "200%")
 MIN_ZOOM_PERCENT = 10
 MAX_ZOOM_PERCENT = 800
-ZOOM_STEP_FACTOR = 1.1
 ANIMATION_SPEED_FACTORS = {
     "0.5×": 0.5,
     "1×": 1.0,
@@ -356,6 +358,41 @@ ACTION_CATALOG = (
     ("rectangle", "矩形", "<Key-r>"),
     ("mosaic", "马赛克", "<Key-m>"),
     ("blur", "模糊", "<Key-b>"),
+)
+
+VIEWER_SHORTCUT_DEFAULTS: dict[str, tuple[str, ...]] = {
+    "previous": ("<Key-a>", "<Left>", "<KP_Left>"),
+    "next": ("<Key-d>", "<Right>", "<KP_Right>"),
+    "zoom_in": ("<Key-w>", "<Up>"),
+    "zoom_out": ("<Key-s>", "<Down>"),
+    "toggle_toolbar": ("<Key-h>",),
+    "toggle_clean": ("<Tab>",),
+    "toggle_topmost": ("<Key-p>",),
+    "toggle_favorite": ("<Key-f>",),
+}
+VIEWER_SHORTCUT_LABELS: dict[str, str] = {
+    "previous": "上一张图片",
+    "next": "下一张图片",
+    "zoom_in": "放大图片",
+    "zoom_out": "缩小图片",
+    "toggle_toolbar": "显示或隐藏工具栏",
+    "toggle_clean": "纯净阅图模式",
+    "toggle_topmost": "窗口置顶",
+    "toggle_favorite": "收藏当前图片",
+}
+VIEWER_TOOLBAR_MODE_LABELS = {
+    "fixed": "固定显示",
+    "auto": "自动隐藏（移到顶部显示）",
+}
+DEFAULT_VIEWER_ZOOM_PRESETS = (
+    "适应",
+    "25%",
+    "50%",
+    "75%",
+    "100%",
+    "125%",
+    "150%",
+    "200%",
 )
 
 
@@ -620,6 +657,9 @@ class ImageEditorApp(tk.Tk):
         self.animation_speed_var = tk.StringVar(value="1×")
         self._ratio_lock = False
         self._preview_job: str | None = None
+        self._window_resize_idle_job: str | None = None
+        self._viewer_resize_preview_pending = False
+        self._last_canvas_configure_size = (0, 0)
         self._preview_poll_jobs: set[str] = set()
         self._annotation_preview_job: str | None = None
         self._preview_generation = 0
@@ -629,6 +669,7 @@ class ImageEditorApp(tk.Tk):
         self._saved_geometry = ""
         self._is_fullscreen = False
         self._is_immersive = False
+        self._zoom_preset_visible = False
         self._slideshow_job: str | None = None
         self._autosave_job: str | None = None
         self._source_monitor_job: str | None = None
@@ -657,6 +698,7 @@ class ImageEditorApp(tk.Tk):
         self.crop_action_hint_var = tk.StringVar(value="拖动图片创建裁剪框")
         self.status_var = tk.StringVar(value="打开一张图片开始编辑")
         self.info_var = tk.StringVar(value="未载入图片")
+        self.viewer_footer_var = tk.StringVar(value="未载入图片")
         self.crop_var = tk.StringVar(value="未设置裁剪")
         self.size_var = tk.StringVar(value="预计输出大小：-")
         self.mode_hint_var = tk.StringVar(value=MODE_HINTS[ModeId.VIEWER])
@@ -716,6 +758,9 @@ class ImageEditorApp(tk.Tk):
         self.smart_text_history = TextReplacementHistory()
         self.edit_panel_visible_var = tk.BooleanVar(value=True)
         self.thumbnail_sidebar_visible_var = tk.BooleanVar(value=True)
+        self.viewer_toolbar_visible_var = tk.BooleanVar(value=True)
+        self.viewer_toolbar_mode_var = tk.StringVar(value="fixed")
+        self.viewer_topmost_var = tk.BooleanVar(value=False)
         self.slideshow_interval_var = tk.DoubleVar(value=3.0)
         self.slideshow_loop_var = tk.BooleanVar(value=True)
         self.preserve_metadata_var = tk.BooleanVar(value=True)
@@ -744,6 +789,17 @@ class ImageEditorApp(tk.Tk):
         self._last_failed_path: Path | None = None
         self._onboarding_window: tk.Toplevel | None = None
         self._feature_palette_window: FeatureCommandPalette | None = None
+        self._viewer_settings_window: tk.Toplevel | None = None
+        self._viewer_clean_mode = False
+        self._viewer_toolbar_auto_visible = False
+        self._viewer_toolbar_auto_hide_job: str | None = None
+        self._viewer_toolbar_fade_job: str | None = None
+        self._viewer_toolbar_fade_target: float | None = None
+        self._viewer_toolbar_opacity = 1.0
+        self._viewer_markup_active = False
+        self._viewer_markup_tool = "rectangle"
+        self._viewer_markup_timeline_snapshot: EditTimeline | None = None
+        self._viewer_gallery_scope = "folder"
         self._services_shutdown = False
 
         self.rotation = 0
@@ -814,12 +870,23 @@ class ImageEditorApp(tk.Tk):
             key: shortcut for key, _label, shortcut in ACTION_CATALOG
         }
         self._custom_bound_sequences: set[str] = set()
+        self.viewer_shortcuts: dict[str, list[str]] = {
+            action: list(sequences) for action, sequences in VIEWER_SHORTCUT_DEFAULTS.items()
+        }
+        self._viewer_bound_sequences: set[str] = set()
+        self.viewer_zoom_step_percent = 10
+        self.viewer_zoom_presets = list(DEFAULT_VIEWER_ZOOM_PRESETS)
+        self.viewer_favorite_paths: list[str] = []
         self.restore_workspace = True
         self.restore_workspace_var = tk.BooleanVar(value=True)
         self.last_project = ""
         self.clean_signature: tuple[object, ...] | None = None
 
         self._load_config()
+        self._set_viewer_topmost(self.viewer_topmost_var.get())
+        # The approved viewer shell uses one fixed, high-contrast dark palette.
+        self.theme_mode_var.set("dark")
+        self.thumbnail_sidebar_visible_var.set(False)
         self._bind_document_variables()
         self.dpi_manager.refresh()
         scale = dpi_scale(self.dpi_manager.current_dpi)
@@ -830,6 +897,10 @@ class ImageEditorApp(tk.Tk):
         if should_use_borderless_chrome():
             self.window_controller = BorderlessWindowController(self)
         self._build_ui()
+        self._viewer_info_trace = self.info_var.trace_add(
+            "write", lambda *_args: self._update_viewer_footer_info()
+        )
+        self._update_viewer_footer_info()
         self.after_idle(self._restore_task_tray_history)
         self.after_idle(self._restore_ai_job_summary)
         self.after_idle(self._restore_generation_candidate_history)
@@ -837,7 +908,7 @@ class ImageEditorApp(tk.Tk):
         self.after_idle(self._update_generation_provider_capability_label)
         self.rounded_window_effect = RoundedWindowEffect(
             self,
-            radius=28,
+            radius=8,
             allow_region_fallback=self.window_controller is not None,
             maximized_provider=(
                 (lambda: self.window_controller.maximized)
@@ -849,12 +920,43 @@ class ImageEditorApp(tk.Tk):
                 if self.window_controller is not None
                 else None
             ),
+            resizing_provider=(
+                (lambda: self.window_controller.resizing)
+                if self.window_controller is not None
+                else None
+            ),
+            moving_provider=(
+                (lambda: self.window_controller.moving)
+                if self.window_controller is not None
+                else None
+            ),
         )
         self._setup_experience()
         self._bind_shortcuts()
         self._drop_target = WindowsFileDrop(self, self.open_paths)
         self._startup_jobs.append(self.after(0, self._drop_target.enable))
         self.bind("<Configure>", self._on_configure, add="+")
+        if self.window_controller is not None:
+            self.bind(
+                "<<WindowMoveStarted>>",
+                self._on_window_interaction_started,
+                add="+",
+            )
+            self.bind(
+                "<<WindowResizeStarted>>",
+                self._on_window_interaction_started,
+                add="+",
+            )
+            self.bind(
+                "<<WindowMoveFinished>>",
+                self._on_window_move_finished,
+                add="+",
+            )
+            self.bind(
+                "<<WindowResizeFinished>>",
+                self._on_window_resize_finished,
+                add="+",
+            )
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._autosave_job = self.after(2000, self._autosave_session)
         self._source_monitor_job = self.after(2000, self._monitor_source_file)
@@ -947,6 +1049,25 @@ class ImageEditorApp(tk.Tk):
             accent=tokens.accent,
             border=tokens.border,
         )
+        if hasattr(self, "thumbnail_filmstrip"):
+            self.thumbnail_filmstrip.apply_palette(
+                surface=tokens.canvas,
+                surface_alt=tokens.canvas,
+                accent=tokens.accent,
+                border=tokens.canvas,
+            )
+        if hasattr(self, "viewer_gallery_scope_bar"):
+            self.viewer_gallery_scope_bar.apply_palette(
+                background=tokens.canvas,
+                container=tokens.surface,
+                border=tokens.border,
+                shadow=tokens.canvas,
+            )
+        if self.window_controller is not None:
+            self.window_controller.set_resize_handle_backgrounds(
+                titlebar=tokens.surface,
+                body=tokens.canvas,
+            )
         if hasattr(self, "conversion_workspace"):
             self.conversion_workspace.apply_tokens(tokens)
         if hasattr(self, "task_tray"):
@@ -959,9 +1080,19 @@ class ImageEditorApp(tk.Tk):
                 self._feature_palette_window = None
         if hasattr(self, "command_dock"):
             self.command_dock.apply_palette(
-                background=tokens.surface_container,
-                container=tokens.surface,
-                border=tokens.border,
+                background=tokens.canvas,
+                container=tokens.surface_alt,
+                border=tokens.surface_high,
+            )
+        if hasattr(self, "dock_zoom_percent_entry"):
+            self.dock_zoom_percent_entry.configure(
+                background=tokens.canvas,
+                foreground=tokens.foreground,
+                insertbackground=tokens.foreground,
+                highlightbackground=tokens.canvas,
+                highlightcolor=tokens.foreground,
+                selectbackground=tokens.surface_high,
+                selectforeground=tokens.foreground,
             )
         if hasattr(self, "canvas_tools"):
             self.canvas_tools.apply_palette(
@@ -979,6 +1110,20 @@ class ImageEditorApp(tk.Tk):
             )
         if hasattr(self, "crop_action_bar"):
             self.crop_action_bar.apply_palette(
+                background=tokens.canvas,
+                container=tokens.surface,
+                border=tokens.border,
+                shadow=tokens.surface_high,
+            )
+        if hasattr(self, "zoom_preset_bar"):
+            self.zoom_preset_bar.apply_palette(
+                background=tokens.canvas,
+                container=tokens.surface,
+                border=tokens.border,
+                shadow=tokens.surface_high,
+            )
+        if hasattr(self, "viewer_markup_bar"):
+            self.viewer_markup_bar.apply_palette(
                 background=tokens.canvas,
                 container=tokens.surface,
                 border=tokens.border,
@@ -1090,7 +1235,7 @@ class ImageEditorApp(tk.Tk):
             width // 2,
             height // 2 + 52,
             text=f"  {self.localizer.gettext('empty_open')}  ",
-            fill="#ffffff",
+            fill=tokens.on_accent,
             font=("Microsoft YaHei UI", 10, "bold"),
             tags=("empty_open",),
         )
@@ -1273,8 +1418,8 @@ class ImageEditorApp(tk.Tk):
         set_accessible_name(viewer_next, "下一张图片")
         viewer_fit = MaterialButton(
             self.viewer_mode_actions,
-            text="适应",
-            width=48,
+            text="适合窗口",
+            width=76,
             height=30,
             command=self.reset_view,
         )
@@ -1317,6 +1462,17 @@ class ImageEditorApp(tk.Tk):
         )
         self.viewer_to_edit_button.grid(row=0, column=7, padx=1)
         set_accessible_name(self.viewer_to_edit_button, "将当前图片送到改图模式")
+        self._viewer_secondary_action_widgets = (
+            viewer_previous,
+            viewer_next,
+            viewer_fit,
+            viewer_actual,
+            self.viewer_file_compare_button,
+            self.viewer_to_convert_button,
+            self.viewer_to_edit_button,
+        )
+        for widget in self._viewer_secondary_action_widgets:
+            widget.grid_remove()
         mode_status_area = ttk.Frame(self.mode_bar, style="Surface.TFrame")
         mode_status_area.grid(row=0, column=2, sticky="e", padx=(12, 0))
         ttk.Label(
@@ -1341,6 +1497,9 @@ class ImageEditorApp(tk.Tk):
             pady=(4, 0),
         )
         self._refresh_favorite_toolbar()
+        # Favorites remain available from workflow settings and the command
+        # palette, but no longer consume a permanent row in the primary shell.
+        self.favorite_toolbar.grid_remove()
         set_accessible_name(self.mode_bar, "四模式导航")
 
         self.thumbnail_sidebar = ThumbnailSidebar(
@@ -1368,7 +1527,7 @@ class ImageEditorApp(tk.Tk):
         self.conversion_workspace.grid(row=2, column=0, sticky="nsew")
         self.conversion_workspace.grid_remove()
 
-        canvas_frame = ttk.Frame(self, style="CanvasShell.TFrame", padding=(0, 0, 0, 66))
+        canvas_frame = ttk.Frame(self, style="CanvasShell.TFrame", padding=(0, 0, 0, 0))
         self.canvas_frame = canvas_frame
         canvas_frame.grid(row=2, column=1, sticky="nsew")
         canvas_frame.rowconfigure(0, weight=1)
@@ -1388,6 +1547,7 @@ class ImageEditorApp(tk.Tk):
         self.canvas.bind("<B1-Motion>", self._canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._canvas_release)
         self.canvas.bind("<Motion>", self._canvas_motion)
+        self.canvas.bind("<Leave>", self._canvas_leave)
         self.canvas.bind("<MouseWheel>", self._zoom_with_wheel)
         self.canvas.bind("<Control-MouseWheel>", self._zoom_with_wheel)
         self.canvas.bind("<ButtonPress-2>", self._start_pan)
@@ -3536,24 +3696,29 @@ class ImageEditorApp(tk.Tk):
         self.dock_open_button = MaterialButton(
             dock,
             text="打开",
-            width=58,
-            variant="filled",
+            width=64,
+            height=42,
+            variant="ghost",
+            text_size=11,
             command=self.open_file,
         )
         self.dock_open_button.grid(row=0, column=0, padx=(0, 2))
-        MaterialButton(
+        self.dock_save_button = MaterialButton(
             dock,
             text="保存",
             width=48,
             command=self.save_as,
-        ).grid(row=0, column=1, padx=2)
-        MaterialButton(
+        )
+        self.dock_save_button.grid(row=0, column=1, padx=2)
+        self.dock_export_button = MaterialButton(
             dock,
             text="导出",
             width=48,
             command=self.quick_export,
-        ).grid(row=0, column=2, padx=(2, 8))
-        ttk.Separator(dock, orient="vertical").grid(row=0, column=3, sticky="ns", padx=4)
+        )
+        self.dock_export_button.grid(row=0, column=2, padx=(2, 8))
+        self.dock_primary_separator = ttk.Separator(dock, orient="vertical")
+        self.dock_primary_separator.grid(row=0, column=3, sticky="ns", padx=4)
         self.dock_undo_button = MaterialButton(
             dock,
             text="↶",
@@ -3588,13 +3753,36 @@ class ImageEditorApp(tk.Tk):
         self.dock_rotate_button = MaterialButton(
             dock,
             text="↻",
-            width=38,
-            height=38,
+            width=42,
+            height=42,
             variant="icon",
+            icon_size=16,
             command=self._rotate_from_dock,
         )
-        self.dock_rotate_button.grid(row=0, column=7, padx=1)
+        self.dock_rotate_button.grid(row=0, column=9, padx=1)
         set_accessible_name(self.dock_rotate_button, "向右旋转")
+        self.dock_favorite_button = MaterialButton(
+            dock,
+            text="☆",
+            width=42,
+            height=42,
+            variant="icon",
+            icon_size=18,
+            command=self.toggle_viewer_favorite,
+        )
+        self.dock_favorite_button.grid(row=0, column=10, padx=1)
+        set_accessible_name(self.dock_favorite_button, "收藏当前图片（F）")
+        self.dock_markup_button = MaterialButton(
+            dock,
+            text="✎",
+            width=42,
+            height=42,
+            variant="icon",
+            icon_size=17,
+            command=self.toggle_viewer_markup,
+        )
+        self.dock_markup_button.grid(row=0, column=11, padx=1)
+        set_accessible_name(self.dock_markup_button, "轻标注：矩形框与指向箭头")
         self.dock_compare_button = MaterialButton(
             dock,
             text="◐",
@@ -3622,26 +3810,272 @@ class ImageEditorApp(tk.Tk):
             "write",
             lambda *_args: self.dock_split_button.set_selected(self.split_compare_var.get()),
         )
-        ttk.Separator(dock, orient="vertical").grid(row=0, column=10, sticky="ns", padx=4)
+        self.dock_edit_separator = ttk.Separator(dock, orient="vertical")
+        self.dock_edit_separator.grid(row=0, column=12, sticky="ns", padx=4)
         self.dock_fullscreen_button = MaterialButton(
             dock,
             text="⛶",
-            width=38,
-            height=38,
+            width=42,
+            height=42,
             variant="icon",
+            icon_size=16,
+            icon_name="overlapping_rectangles",
             command=self.toggle_fullscreen,
         )
-        self.dock_fullscreen_button.grid(row=0, column=11, padx=1)
+        self.dock_fullscreen_button.grid(row=0, column=13, padx=1)
         set_accessible_name(self.dock_fullscreen_button, "全屏")
         self.dock_menu_button = MaterialButton(
             dock,
-            text="全部功能",
-            width=82,
+            text="更多",
+            width=62,
             variant="filled",
             command=self._show_feature_palette,
         )
-        self.dock_menu_button.grid(row=0, column=12, padx=(4, 1))
-        set_accessible_name(self.dock_menu_button, "打开全部功能搜索")
+        self.dock_menu_button.grid(row=0, column=14, padx=(4, 1))
+        set_accessible_name(self.dock_menu_button, "打开看图更多功能")
+
+        self.dock_previous_button = MaterialButton(
+            dock,
+            text="‹",
+            width=38,
+            height=38,
+            variant="icon",
+            command=lambda: self.navigate_folder(-1),
+        )
+        self.dock_previous_button.grid(row=0, column=1, padx=1)
+        set_accessible_name(self.dock_previous_button, "上一张图片")
+        self.dock_next_button = MaterialButton(
+            dock,
+            text="›",
+            width=38,
+            height=38,
+            variant="icon",
+            command=lambda: self.navigate_folder(1),
+        )
+        self.dock_next_button.grid(row=0, column=2, padx=1)
+        set_accessible_name(self.dock_next_button, "下一张图片")
+        self.dock_zoom_out_button = MaterialButton(
+            dock,
+            text="−",
+            width=42,
+            height=42,
+            variant="icon",
+            icon_size=16,
+            command=lambda: self.step_zoom(-1),
+        )
+        self.dock_zoom_out_button.grid(row=0, column=4, padx=(7, 1))
+        set_accessible_name(self.dock_zoom_out_button, "缩小图片")
+        self.dock_zoom_percent_button = MaterialButton(
+            dock,
+            text="100%",
+            width=64,
+            height=42,
+            text_size=11,
+            command=self._begin_inline_zoom_edit,
+        )
+        self.dock_zoom_percent_button.grid(row=0, column=5, padx=1)
+        set_accessible_name(self.dock_zoom_percent_button, "当前缩放比例，点击输入任意比例")
+        self.viewer_zoom_input_var = tk.StringVar(value="100")
+        self.dock_zoom_percent_entry = tk.Entry(
+            dock,
+            textvariable=self.viewer_zoom_input_var,
+            width=6,
+            justify="center",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            font=("Microsoft YaHei UI", 10),
+        )
+        self.dock_zoom_percent_entry.bind("<Return>", self._commit_inline_zoom_edit)
+        self.dock_zoom_percent_entry.bind("<KP_Enter>", self._commit_inline_zoom_edit)
+        self.dock_zoom_percent_entry.bind("<Escape>", self._cancel_inline_zoom_edit)
+        self.dock_zoom_percent_entry.bind("<FocusOut>", self._commit_inline_zoom_edit)
+        set_accessible_name(self.dock_zoom_percent_entry, "输入缩放比例，范围 10 到 800")
+        self._viewer_zoom_editing = False
+        self.dock_fit_button = MaterialButton(
+            dock,
+            text="适窗",
+            width=52,
+            height=42,
+            variant="icon",
+            icon_size=13,
+            command=self.reset_view,
+        )
+        self.dock_fit_button.grid(row=0, column=7, padx=1)
+        set_accessible_name(self.dock_fit_button, "快速适合当前窗口")
+        self.dock_actual_size_button = MaterialButton(
+            dock,
+            text="100%",
+            width=56,
+            height=42,
+            variant="icon",
+            icon_size=13,
+            command=lambda: self._set_zoom_percent(100),
+        )
+        self.dock_actual_size_button.grid(row=0, column=8, padx=1)
+        set_accessible_name(self.dock_actual_size_button, "立即恢复到 100% 缩放")
+        self.dock_zoom_in_button = MaterialButton(
+            dock,
+            text="＋",
+            width=42,
+            height=42,
+            variant="icon",
+            icon_size=16,
+            command=lambda: self.step_zoom(1),
+        )
+        self.dock_zoom_in_button.grid(row=0, column=6, padx=1)
+        set_accessible_name(self.dock_zoom_in_button, "放大图片")
+        for viewer_toolbar_button in (
+            self.dock_open_button,
+            self.dock_zoom_out_button,
+            self.dock_zoom_percent_button,
+            self.dock_zoom_in_button,
+            self.dock_fit_button,
+            self.dock_actual_size_button,
+            self.dock_rotate_button,
+            self.dock_favorite_button,
+            self.dock_markup_button,
+            self.dock_fullscreen_button,
+        ):
+            viewer_toolbar_button.material_role = "viewer-toolbar"
+
+        self._dock_widgets = (
+            self.dock_open_button,
+            self.dock_save_button,
+            self.dock_export_button,
+            self.dock_primary_separator,
+            self.dock_undo_button,
+            self.dock_redo_button,
+            self.dock_crop_button,
+            self.dock_rotate_button,
+            self.dock_compare_button,
+            self.dock_split_button,
+            self.dock_edit_separator,
+            self.dock_fullscreen_button,
+            self.dock_menu_button,
+            self.dock_previous_button,
+            self.dock_next_button,
+            self.dock_zoom_out_button,
+            self.dock_zoom_percent_button,
+            self.dock_zoom_in_button,
+            self.dock_fit_button,
+            self.dock_actual_size_button,
+            self.dock_favorite_button,
+            self.dock_markup_button,
+        )
+        self._dock_widgets_by_mode = {
+            ModeId.VIEWER: (
+                self.dock_open_button,
+                self.dock_primary_separator,
+                self.dock_zoom_out_button,
+                self.dock_zoom_percent_button,
+                self.dock_zoom_in_button,
+                self.dock_fit_button,
+                self.dock_actual_size_button,
+                self.dock_rotate_button,
+                self.dock_favorite_button,
+                self.dock_markup_button,
+                self.dock_edit_separator,
+                self.dock_fullscreen_button,
+            ),
+            ModeId.CONVERT: (
+                self.dock_open_button,
+                self.dock_export_button,
+                self.dock_primary_separator,
+                self.dock_crop_button,
+                self.dock_rotate_button,
+                self.dock_menu_button,
+            ),
+            ModeId.EDIT: (
+                self.dock_open_button,
+                self.dock_save_button,
+                self.dock_export_button,
+                self.dock_primary_separator,
+                self.dock_undo_button,
+                self.dock_redo_button,
+                self.dock_compare_button,
+                self.dock_fullscreen_button,
+                self.dock_menu_button,
+            ),
+            ModeId.GENERATE: (),
+        }
+
+        self.zoom_preset_bar = MaterialFloatingBar(self, max_width=540)
+        self.zoom_preset_buttons: dict[str, MaterialButton] = {}
+        self._rebuild_zoom_preset_buttons()
+        self.zoom_preset_bar.place_forget()
+
+        self.viewer_markup_bar = MaterialFloatingBar(canvas_frame, max_width=500)
+        markup_content = self.viewer_markup_bar.content
+        self.viewer_markup_tool_buttons: dict[str, MaterialButton] = {}
+        for column, (tool, label, accessible_name) in enumerate(
+            (
+                ("rectangle", "▭", "绘制矩形框"),
+                ("arrow", "↗", "绘制指向箭头"),
+            )
+        ):
+            button = MaterialButton(
+                markup_content,
+                text=label,
+                width=42,
+                height=34,
+                variant="icon",
+                icon_size=17,
+                command=partial(self._set_viewer_markup_tool, tool),
+            )
+            button.grid(row=0, column=column, padx=1)
+            button.set_selected(tool == self._viewer_markup_tool)
+            set_accessible_name(button, accessible_name)
+            self.viewer_markup_tool_buttons[tool] = button
+        self.viewer_markup_color_button = MaterialButton(
+            markup_content,
+            text="颜色",
+            width=54,
+            height=34,
+            command=lambda: self._choose_annotation_color("stroke"),
+        )
+        self.viewer_markup_color_button.grid(row=0, column=2, padx=(5, 1))
+        set_accessible_name(self.viewer_markup_color_button, "选择标注颜色")
+        self.viewer_markup_undo_button = MaterialButton(
+            markup_content,
+            text="↶",
+            width=38,
+            height=34,
+            variant="icon",
+            icon_size=16,
+            command=self._undo_viewer_markup,
+        )
+        self.viewer_markup_undo_button.grid(row=0, column=3, padx=1)
+        set_accessible_name(self.viewer_markup_undo_button, "撤销上一处标注")
+        self.viewer_markup_copy_button = MaterialButton(
+            markup_content,
+            text="仅复制",
+            width=64,
+            height=34,
+            command=self._finish_viewer_markup_copy,
+        )
+        self.viewer_markup_copy_button.grid(row=0, column=4, padx=(5, 1))
+        set_accessible_name(self.viewer_markup_copy_button, "复制标注结果且不修改原图")
+        self.viewer_markup_replace_button = MaterialButton(
+            markup_content,
+            text="替换原图",
+            width=78,
+            height=34,
+            variant="tonal",
+            command=self._finish_viewer_markup_replace,
+        )
+        self.viewer_markup_replace_button.grid(row=0, column=5, padx=1)
+        set_accessible_name(self.viewer_markup_replace_button, "确认后用标注结果替换原图")
+        self.viewer_markup_cancel_button = MaterialButton(
+            markup_content,
+            text="取消修改",
+            width=78,
+            height=34,
+            command=self._cancel_viewer_markup,
+        )
+        self.viewer_markup_cancel_button.grid(row=0, column=6, padx=1)
+        set_accessible_name(self.viewer_markup_cancel_button, "取消本次全部轻标注")
+        self.viewer_markup_bar.place_forget()
 
         self.status_label = ttk.Label(
             canvas_frame,
@@ -3650,6 +4084,98 @@ class ImageEditorApp(tk.Tk):
             anchor="w",
             padding=(0, 0),
         )
+        self.viewer_file_details = ttk.Label(
+            canvas_frame,
+            textvariable=self.viewer_footer_var,
+            style="ViewerStatus.TLabel",
+            anchor="w",
+            padding=(0, 0),
+        )
+        self.viewer_gallery_button = MaterialButton(
+            canvas_frame,
+            text="▦ 图库",
+            width=92,
+            height=34,
+            variant="tonal",
+            command=self.toggle_thumbnail_sidebar_from_shortcut,
+        )
+        set_accessible_name(self.viewer_gallery_button, "预览当前文件夹的全部图片")
+        self.viewer_settings_button = MaterialButton(
+            canvas_frame,
+            text="⚙",
+            width=38,
+            height=38,
+            variant="icon",
+            icon_size=17,
+            command=self.open_viewer_settings,
+        )
+        set_accessible_name(self.viewer_settings_button, "看图设置")
+        self.viewer_topmost_button = MaterialButton(
+            canvas_frame,
+            text="",
+            width=38,
+            height=38,
+            variant="icon",
+            icon_size=18,
+            icon_name="pin",
+            command=self.toggle_viewer_topmost,
+        )
+        self.viewer_topmost_button.material_role = "emphasized-toggle"
+        self.viewer_topmost_button.inactive_foreground = "#737b86"
+        self.viewer_topmost_button.selected_fill = None
+        self.viewer_topmost_button.selected_foreground = "#ffffff"
+        self.viewer_topmost_button.selected_outline = None
+        set_accessible_name(self.viewer_topmost_button, "窗口置顶（P）")
+        self.viewer_topmost_button.set_selected(self.viewer_topmost_var.get())
+        self.thumbnail_filmstrip = ThumbnailFilmstrip(
+            canvas_frame,
+            self._activate_thumbnail,
+        )
+        self.thumbnail_filmstrip.place_forget()
+        self.viewer_gallery_scope_bar = MaterialFloatingBar(canvas_frame, max_width=250)
+        gallery_scope_content = self.viewer_gallery_scope_bar.content
+        self.viewer_gallery_folder_button = MaterialButton(
+            gallery_scope_content,
+            text="当前文件夹",
+            width=104,
+            height=32,
+            variant="ghost",
+            text_size=9,
+            command=lambda: self._set_viewer_gallery_scope("folder"),
+        )
+        self.viewer_gallery_folder_button.grid(row=0, column=0, padx=(0, 2))
+        self.viewer_gallery_favorites_button = MaterialButton(
+            gallery_scope_content,
+            text="我的收藏",
+            width=92,
+            height=32,
+            variant="ghost",
+            text_size=9,
+            command=lambda: self._set_viewer_gallery_scope("favorites"),
+        )
+        self.viewer_gallery_favorites_button.grid(row=0, column=1, padx=(2, 0))
+        for gallery_scope_button in (
+            self.viewer_gallery_folder_button,
+            self.viewer_gallery_favorites_button,
+        ):
+            gallery_scope_button.material_role = "viewer-toolbar"
+        set_accessible_name(self.viewer_gallery_folder_button, "显示当前文件夹图片")
+        set_accessible_name(self.viewer_gallery_favorites_button, "显示我的收藏图片")
+        self.viewer_gallery_scope_bar.place_forget()
+        self._sync_viewer_gallery_scope_buttons()
+        self._viewer_navigation_visible = False
+        self._viewer_navigation_geometry = (104, 152, 42)
+        self._viewer_navigation_hover: int | None = None
+        self._viewer_navigation_pressed: int | None = None
+        self._viewer_navigation_tooltip_job: str | None = None
+        self._viewer_navigation_fade_job: str | None = None
+        self._viewer_navigation_hide_job: str | None = None
+        self._viewer_navigation_opacity = 1.0
+        self._viewer_navigation_photos: dict[int, ImageTk.PhotoImage] = {}
+        self._viewer_navigation_photo_cache: dict[
+            tuple[int, int, str, int], ImageTk.PhotoImage
+        ] = {}
+        self._update_viewer_gallery_button()
         self._place_canvas_status()
         if not self.edit_panel_visible_var.get():
             self.panel_shell.grid_remove()
@@ -4033,7 +4559,7 @@ class ImageEditorApp(tk.Tk):
             "toggle_file_comparison": self._toggle_file_comparison,
             "toggle_slideshow": self.toggle_slideshow,
             "toggle_split_compare": self._toggle_dock_split_compare,
-            "toggle_thumbnail_sidebar": self.toggle_thumbnail_sidebar,
+            "toggle_thumbnail_sidebar": self.toggle_thumbnail_sidebar_from_shortcut,
             "undo": self.undo,
             "update_watermark": self._watermark_changed,
             "zoom_150": lambda: self.set_zoom("150%"),
@@ -4128,7 +4654,6 @@ class ImageEditorApp(tk.Tk):
         self._set_annotation_tool(tool)
 
     def _rotate_from_dock(self) -> None:
-        self.mode_router.switch(ModeId.CONVERT)
         self.rotate(90)
 
     def _on_mode_transition(self, transition: ModeTransition) -> None:
@@ -4166,6 +4691,14 @@ class ImageEditorApp(tk.Tk):
         for candidate, button in self.mode_buttons.items():
             button.set_selected(candidate is mode)
         self.mode_hint_var.set(MODE_HINTS[mode])
+        # The current product surface is intentionally a single-task viewer.
+        # Other workspaces remain implemented, but their switcher is not part
+        # of the default viewing shell.
+        self.mode_bar.grid_remove()
+        self.canvas_frame.configure(
+            padding=(0, 48, 0, 0) if mode is ModeId.VIEWER else (0, 0, 0, 66)
+        )
+        self.canvas.configure(highlightthickness=0 if mode is ModeId.VIEWER else 1)
         if mode is ModeId.CONVERT:
             self._apply_conversion_draft_to_controls()
         elif mode is ModeId.EDIT and self.document is not None:
@@ -4176,6 +4709,9 @@ class ImageEditorApp(tk.Tk):
             self.viewer_mode_actions.grid()
         else:
             self.viewer_mode_actions.grid_remove()
+        self.favorite_toolbar.grid_remove()
+        self._update_command_dock_for_mode(mode)
+        self._update_viewer_gallery_button()
 
         sidebar_titles = {
             ModeId.VIEWER: "资源库",
@@ -4185,7 +4721,15 @@ class ImageEditorApp(tk.Tk):
         }
         self.thumbnail_sidebar.title_var.set(sidebar_titles[mode])
 
-        show_side_area = self.thumbnail_sidebar_visible_var.get() and not self._is_immersive
+        show_side_area = (
+            mode is not ModeId.VIEWER
+            and (mode is ModeId.CONVERT or self.thumbnail_sidebar_visible_var.get())
+        ) and not self._is_immersive
+        self.columnconfigure(0, minsize=220 if show_side_area else 0)
+        self.columnconfigure(
+            2,
+            minsize=296 if mode in {ModeId.CONVERT, ModeId.EDIT} else 0,
+        )
         if mode is ModeId.CONVERT:
             self.thumbnail_sidebar.grid_remove()
             if show_side_area:
@@ -4217,10 +4761,18 @@ class ImageEditorApp(tk.Tk):
             self.generate_workspace.grid()
             self.generate_workspace.tkraise()
 
-        if mode is ModeId.GENERATE:
+        if mode in {ModeId.VIEWER, ModeId.GENERATE}:
             self.canvas_tools.place_forget()
-            self.status_label.place_forget()
-            self.canvas_metadata.place_forget()
+            if mode is ModeId.GENERATE:
+                self.status_label.place_forget()
+                self.canvas_metadata.place_forget()
+                self.viewer_file_details.place_forget()
+                self.viewer_gallery_button.place_forget()
+                self.viewer_gallery_scope_bar.place_forget()
+                self.thumbnail_filmstrip.place_forget()
+                self._hide_viewer_navigation()
+            elif not self._is_immersive:
+                self._place_canvas_status()
         elif not self._is_immersive:
             self.canvas_tools.place(x=14, y=14, anchor="nw")
             self._place_canvas_status()
@@ -4233,6 +4785,120 @@ class ImageEditorApp(tk.Tk):
         else:
             self._schedule_preview()
         self._update_crop_action_bar()
+
+    def _update_command_dock_for_mode(self, mode: ModeId) -> None:
+        """Expose only the commands needed for the active workflow."""
+
+        if mode is not ModeId.VIEWER and hasattr(self, "_viewer_zoom_editing"):
+            self._viewer_zoom_editing = False
+            self.dock_zoom_percent_entry.grid_remove()
+        visible = set(self._dock_widgets_by_mode[mode])
+        for widget in self._dock_widgets:
+            if widget in visible:
+                widget.grid()
+            else:
+                widget.grid_remove()
+        if (
+            mode is ModeId.VIEWER
+            and getattr(self, "_viewer_zoom_editing", False)
+            and hasattr(self, "dock_zoom_percent_entry")
+        ):
+            self.dock_zoom_percent_button.grid_remove()
+            self.dock_zoom_percent_entry.grid(row=0, column=5, padx=1, ipady=6)
+        elif hasattr(self, "dock_zoom_percent_entry"):
+            self.dock_zoom_percent_entry.grid_remove()
+        viewer_toolbar_shown = (
+            self.viewer_toolbar_visible_var.get()
+            and not self._viewer_clean_mode
+            and (self.viewer_toolbar_mode_var.get() == "fixed" or self._viewer_toolbar_auto_visible)
+        )
+        if (
+            mode is ModeId.GENERATE
+            or self._is_immersive
+            or (mode is ModeId.VIEWER and not viewer_toolbar_shown)
+        ):
+            self._hide_zoom_preset_popup()
+            self.command_dock.place_forget()
+            return
+        if mode is not ModeId.VIEWER:
+            self._hide_zoom_preset_popup()
+        if mode is ModeId.VIEWER:
+            if self.viewer_toolbar_mode_var.get() == "fixed":
+                self._viewer_toolbar_opacity = 1.0
+                self._set_viewer_toolbar_visual_opacity(1.0)
+            self.command_dock.set_profile("top")
+            self.command_dock.update_idletasks()
+            toolbar_width = min(
+                560,
+                max(420, self.command_dock.content.winfo_reqwidth() + 28),
+            )
+            titlebar_height = (
+                self.window_titlebar.winfo_reqheight() if self.window_titlebar is not None else 0
+            )
+            self.command_dock.place(
+                in_=self,
+                relx=0.5,
+                rely=0.0,
+                x=0,
+                y=(titlebar_height + 6 - round((1.0 - self._viewer_toolbar_opacity) * 18)),
+                anchor="n",
+                relwidth=0.0,
+                relheight=0.0,
+                width=toolbar_width,
+                height=56,
+            )
+            self.command_dock._layout()
+            self.command_dock.tk.call("raise", self.command_dock._w)
+            return
+        self.command_dock.set_profile("capsule")
+        widths = {
+            ModeId.CONVERT: 420,
+            ModeId.EDIT: 590,
+        }
+        self.command_dock.place(
+            in_=self,
+            relx=0.5,
+            rely=1.0,
+            y=-12,
+            anchor="s",
+            width=widths[mode],
+            height=64,
+        )
+        self.command_dock._layout()
+
+    def _toggle_zoom_preset_popup(self) -> None:
+        if self._zoom_preset_visible:
+            self._hide_zoom_preset_popup()
+            return
+        if self.mode_router.active_mode is not ModeId.VIEWER or self._is_immersive:
+            return
+        current = self.zoom_mode.get()
+        for value, button in self.zoom_preset_buttons.items():
+            button.set_selected(value == current)
+        top = self.command_dock.winfo_y() + self.command_dock.winfo_height() + 8
+        self.zoom_preset_bar.place(
+            relx=0.5,
+            y=top,
+            anchor="n",
+            width=526,
+            height=52,
+        )
+        self.zoom_preset_bar._layout()
+        self.zoom_preset_bar.tk.call("raise", self.zoom_preset_bar._w)
+        self._zoom_preset_visible = True
+
+    def _hide_zoom_preset_popup(self) -> None:
+        if not hasattr(self, "zoom_preset_bar"):
+            return
+        self.zoom_preset_bar.place_forget()
+        self._zoom_preset_visible = False
+
+    def _select_zoom_preset(self, value: str) -> None:
+        self._hide_zoom_preset_popup()
+        if value == "适应":
+            self.reset_view()
+        else:
+            self.set_zoom(value)
 
     def _choose_smart_text_color(self) -> None:
         selected = colorchooser.askcolor(
@@ -8678,15 +9344,459 @@ class ImageEditorApp(tk.Tk):
             in_=self,
             relx=0.5,
             rely=1.0,
+            x=0,
             y=-12,
             anchor="s",
+            relwidth=0.0,
+            relheight=0.0,
             width=690,
             height=64,
         )
 
+    def _rebuild_zoom_preset_buttons(self) -> None:
+        if not hasattr(self, "zoom_preset_bar"):
+            return
+        content = self.zoom_preset_bar.content
+        for child in content.winfo_children():
+            child.destroy()
+        self.zoom_preset_buttons.clear()
+        for column, value in enumerate(self.viewer_zoom_presets):
+            label = "适合窗口" if value == "适应" else value
+            width = 76 if value == "适应" else max(50, len(label) * 10 + 18)
+            button = MaterialButton(
+                content,
+                text=label,
+                width=width,
+                height=34,
+                variant="tonal",
+                command=partial(self._select_zoom_preset, value),
+            )
+            button.grid(row=0, column=column, padx=1)
+            set_accessible_name(button, f"缩放到{label}")
+            self.zoom_preset_buttons[value] = button
+        self.zoom_preset_bar._layout()
+
     def _place_canvas_status(self) -> None:
-        self.status_label.place(relx=0.0, rely=1.0, x=16, y=-16, anchor="sw")
-        self.canvas_metadata.place(relx=1.0, rely=1.0, x=-16, y=-16, anchor="se")
+        if self.mode_router.active_mode is ModeId.VIEWER:
+            self.status_label.place_forget()
+            self.canvas_metadata.place_forget()
+            if self._viewer_clean_mode:
+                self.viewer_file_details.place_forget()
+                self.viewer_gallery_button.place_forget()
+                self.viewer_settings_button.place_forget()
+                self.viewer_topmost_button.place_forget()
+                self.viewer_markup_bar.place_forget()
+                self.viewer_gallery_scope_bar.place_forget()
+                self.thumbnail_filmstrip.place_forget()
+            else:
+                self.viewer_file_details.place(relx=0.0, rely=1.0, x=16, y=-18, anchor="sw")
+                self.viewer_gallery_button.place(
+                    relx=1.0,
+                    rely=1.0,
+                    x=-16,
+                    y=-12,
+                    anchor="se",
+                )
+                self.viewer_settings_button.place(
+                    relx=1.0,
+                    rely=0.0,
+                    x=-14,
+                    y=14,
+                    anchor="ne",
+                )
+                self.viewer_settings_button.tk.call("raise", self.viewer_settings_button._w)
+                self.viewer_topmost_button.place(
+                    relx=1.0,
+                    rely=0.0,
+                    x=-58,
+                    y=14,
+                    anchor="ne",
+                )
+                self.viewer_topmost_button.tk.call("raise", self.viewer_topmost_button._w)
+                if self._viewer_markup_active:
+                    self.viewer_markup_bar.place(
+                        relx=0.5,
+                        rely=0.0,
+                        x=0,
+                        y=68,
+                        anchor="n",
+                    )
+                    self.viewer_markup_bar._layout()
+                    self.viewer_markup_bar.tk.call("raise", self.viewer_markup_bar._w)
+                else:
+                    self.viewer_markup_bar.place_forget()
+            if (
+                not self._viewer_clean_mode
+                and self.thumbnail_sidebar_visible_var.get()
+                and not self._is_immersive
+            ):
+                self.thumbnail_filmstrip.place(
+                    relx=0.5,
+                    rely=1.0,
+                    y=-12,
+                    anchor="s",
+                    relwidth=0.56,
+                    height=78,
+                )
+                self.thumbnail_filmstrip.tk.call("raise", self.thumbnail_filmstrip._w)
+                self.viewer_gallery_scope_bar.place(
+                    relx=0.5,
+                    rely=1.0,
+                    y=-91,
+                    anchor="s",
+                )
+                self.viewer_gallery_scope_bar._layout()
+                self.viewer_gallery_scope_bar.tk.call("raise", self.viewer_gallery_scope_bar._w)
+            else:
+                self.viewer_gallery_scope_bar.place_forget()
+                self.thumbnail_filmstrip.place_forget()
+        else:
+            self.viewer_file_details.place_forget()
+            self.viewer_gallery_button.place_forget()
+            self.viewer_settings_button.place_forget()
+            self.viewer_topmost_button.place_forget()
+            self.viewer_markup_bar.place_forget()
+            self.viewer_gallery_scope_bar.place_forget()
+            self.thumbnail_filmstrip.place_forget()
+            self._hide_viewer_navigation()
+            self.status_label.place(relx=0.0, rely=1.0, x=16, y=-16, anchor="sw")
+            self.canvas_metadata.place(relx=1.0, rely=1.0, x=-16, y=-16, anchor="se")
+        self._update_viewer_navigation_buttons()
+
+    def _update_viewer_gallery_button(self) -> None:
+        if not hasattr(self, "viewer_gallery_button"):
+            return
+        gallery_paths = self._viewer_gallery_paths()
+        image_count = len(gallery_paths)
+        if tuple(self.thumbnail_filmstrip.paths) != gallery_paths:
+            self.thumbnail_filmstrip.set_paths(
+                gallery_paths,
+                self.navigation.current,
+            )
+        else:
+            self.thumbnail_filmstrip.select(self.navigation.current, reveal=False)
+        self._sync_viewer_gallery_scope_buttons()
+        self.viewer_gallery_button.set_text("▦ 此文件夹")
+        self.viewer_gallery_button.set_selected(
+            self.thumbnail_sidebar_visible_var.get()
+            and self.mode_router.active_mode is ModeId.VIEWER
+        )
+        scope_label = "当前文件夹" if self._viewer_gallery_scope == "folder" else "我的收藏"
+        set_accessible_name(
+            self.viewer_gallery_button,
+            f"预览{scope_label}图片，共 {image_count} 张"
+            if image_count
+            else f"预览{scope_label}图片",
+        )
+        self._update_viewer_navigation_buttons()
+
+    def _viewer_gallery_paths(self) -> tuple[Path, ...]:
+        if self._viewer_gallery_scope == "folder":
+            return tuple(self.navigation.files)
+        favorites: list[Path] = []
+        for saved_path in self.viewer_favorite_paths:
+            path = Path(saved_path)
+            if path.suffix.lower() not in SUPPORTED_INPUTS:
+                continue
+            try:
+                available = path.is_file()
+            except OSError:
+                available = False
+            if not available:
+                continue
+            if any(self._viewer_paths_match(path, existing) for existing in favorites):
+                continue
+            favorites.append(path)
+        return tuple(favorites)
+
+    def _sync_viewer_gallery_scope_buttons(self) -> None:
+        if not hasattr(self, "viewer_gallery_folder_button"):
+            return
+        self.viewer_gallery_folder_button.set_selected(self._viewer_gallery_scope == "folder")
+        self.viewer_gallery_favorites_button.set_selected(self._viewer_gallery_scope == "favorites")
+
+    def _set_viewer_gallery_scope(self, scope: str) -> str:
+        if scope not in {"folder", "favorites"}:
+            raise ValueError("未知的图片预览范围")
+        self._viewer_gallery_scope = scope
+        self._update_viewer_gallery_button()
+        if self.thumbnail_sidebar_visible_var.get():
+            self._place_canvas_status()
+        if scope == "folder":
+            self.status_var.set(f"当前文件夹 · {len(self.navigation.files)} 张")
+        else:
+            count = len(self.thumbnail_filmstrip.paths)
+            self.status_var.set(f"我的收藏 · {count} 张" if count else "我的收藏中暂无图片")
+        return "break"
+
+    def _update_viewer_navigation_buttons(self) -> None:
+        if not hasattr(self, "_viewer_navigation_visible"):
+            return
+        canvas_width = max(1, self.canvas_frame.winfo_width())
+        canvas_height = max(1, self.canvas_frame.winfo_height())
+        navigation_geometry = self._viewer_navigation_dimensions(
+            canvas_width,
+            canvas_height,
+        )
+        self._viewer_navigation_geometry = navigation_geometry
+        should_show = (
+            self.mode_router.active_mode is ModeId.VIEWER
+            and not self._is_immersive
+            and not self._viewer_clean_mode
+            and not self._viewer_markup_active
+            and len(self.navigation.files) > 1
+        )
+        if should_show:
+            newly_visible = not self._viewer_navigation_visible
+            self._viewer_navigation_visible = True
+            if newly_visible:
+                self._viewer_navigation_opacity = 1.0
+            self._draw_viewer_navigation()
+            self._schedule_viewer_navigation_fade()
+        else:
+            self._hide_viewer_navigation()
+
+    def _draw_viewer_navigation(self) -> None:
+        self.canvas.delete("viewer-navigation")
+        self.canvas.delete("viewer-navigation-tooltip")
+        if not self._viewer_navigation_visible:
+            return
+        width = max(1, self.canvas.winfo_width())
+        height = max(1, self.canvas.winfo_height())
+        button_width, _button_height, icon_size = self._viewer_navigation_geometry
+        opacity_step = max(0, min(10, round(self._viewer_navigation_opacity * 10)))
+        if opacity_step == 0:
+            self._viewer_navigation_photos.clear()
+            return
+        arrow_y = height / 2
+        positions = {-1: 8 + button_width / 2, 1: width - 8 - button_width / 2}
+        for direction, arrow_x in positions.items():
+            color = (
+                self.theme_manager.tokens.foreground
+                if self._viewer_navigation_hover == direction
+                else self.theme_manager.tokens.muted
+            )
+            cache_key = (direction, icon_size, color, opacity_step)
+            arrow_photo = self._viewer_navigation_photo_cache.get(cache_key)
+            if arrow_photo is None:
+                arrow_height = max(72, round(icon_size * 0.78))
+                arrow_width = max(38, round(arrow_height * 0.43))
+                stroke_width = max(4, round(arrow_height * 0.06))
+                padding = stroke_width * 2
+                image_width = arrow_width + padding * 2
+                image_height = arrow_height + padding * 2
+                red, green, blue = ImageColor.getrgb(color)
+                arrow_fill = (red, green, blue, round(255 * opacity_step / 10))
+
+                def paint_arrow(
+                    draw: object,
+                    scale: int,
+                    *,
+                    side: int = direction,
+                    arrow_color: tuple[int, int, int, int] = arrow_fill,
+                ) -> None:
+                    scaled_stroke = stroke_width * scale
+                    radius = scaled_stroke / 2
+                    top = padding * scale
+                    middle = image_height * scale / 2
+                    bottom = (image_height - padding) * scale
+                    left = padding * scale
+                    right = (image_width - padding) * scale
+                    points = (
+                        ((right, top), (left, middle), (right, bottom))
+                        if side < 0
+                        else ((left, top), (right, middle), (left, bottom))
+                    )
+                    draw.line(
+                        points,
+                        fill=arrow_color,
+                        width=scaled_stroke,
+                        joint="curve",
+                    )
+                    for point_x, point_y in points:
+                        draw.ellipse(
+                            (
+                                point_x - radius,
+                                point_y - radius,
+                                point_x + radius,
+                                point_y + radius,
+                            ),
+                            fill=arrow_color,
+                        )
+
+                arrow_photo = render_photo(
+                    image_width,
+                    image_height,
+                    paint_arrow,
+                    master=self.canvas,
+                )
+                self._viewer_navigation_photo_cache[cache_key] = arrow_photo
+            self._viewer_navigation_photos[direction] = arrow_photo
+            self.canvas.create_image(
+                arrow_x,
+                arrow_y,
+                image=arrow_photo,
+                tags=("viewer-navigation", f"viewer-navigation-{direction}"),
+            )
+        self.canvas.tag_raise("viewer-navigation")
+
+    def _hide_viewer_navigation(self) -> None:
+        if not hasattr(self, "canvas"):
+            return
+        self._viewer_navigation_visible = False
+        self._viewer_navigation_hover = None
+        self._viewer_navigation_pressed = None
+        for job_name in ("_viewer_navigation_fade_job", "_viewer_navigation_hide_job"):
+            job = getattr(self, job_name, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except tk.TclError:
+                    pass
+                setattr(self, job_name, None)
+        self._cancel_viewer_navigation_tooltip()
+        self.canvas.delete("viewer-navigation")
+        self.canvas.delete("viewer-navigation-tooltip")
+        self._viewer_navigation_photos.clear()
+
+    def _viewer_navigation_direction_at(self, x: int, y: int) -> int | None:
+        if not self._viewer_navigation_visible:
+            return None
+        button_width, button_height, _icon_size = self._viewer_navigation_geometry
+        canvas_width = max(1, self.canvas.winfo_width())
+        canvas_height = max(1, self.canvas.winfo_height())
+        if abs(y - canvas_height / 2) > button_height / 2:
+            return None
+        if x <= button_width + 8:
+            return -1
+        if x >= canvas_width - button_width - 8:
+            return 1
+        return None
+
+    def _set_viewer_navigation_hover(self, direction: int | None) -> None:
+        if self._viewer_navigation_hover == direction:
+            return
+        self._viewer_navigation_hover = direction
+        self._cancel_viewer_navigation_tooltip()
+        if direction is not None:
+            if self._viewer_navigation_hide_job is not None:
+                try:
+                    self.after_cancel(self._viewer_navigation_hide_job)
+                except tk.TclError:
+                    pass
+                self._viewer_navigation_hide_job = None
+            self._animate_viewer_navigation_opacity(1.0)
+            self._viewer_navigation_tooltip_job = self.after(
+                450,
+                lambda selected=direction: self._show_viewer_navigation_tooltip(selected),
+            )
+        else:
+            self._draw_viewer_navigation()
+            self._schedule_viewer_navigation_fade()
+
+    def _schedule_viewer_navigation_fade(self) -> None:
+        if not self._viewer_navigation_visible or self._viewer_navigation_hover is not None:
+            return
+        if self._viewer_navigation_hide_job is not None:
+            try:
+                self.after_cancel(self._viewer_navigation_hide_job)
+            except tk.TclError:
+                pass
+        self._viewer_navigation_hide_job = self.after(
+            1100,
+            lambda: self._animate_viewer_navigation_opacity(0.0),
+        )
+
+    def _animate_viewer_navigation_opacity(self, target: float) -> None:
+        self._viewer_navigation_hide_job = None
+        if self._viewer_navigation_fade_job is not None:
+            try:
+                self.after_cancel(self._viewer_navigation_fade_job)
+            except tk.TclError:
+                pass
+            self._viewer_navigation_fade_job = None
+        bounded_target = max(0.0, min(1.0, float(target)))
+
+        def step() -> None:
+            self._viewer_navigation_fade_job = None
+            delta = bounded_target - self._viewer_navigation_opacity
+            if abs(delta) <= 0.01:
+                self._viewer_navigation_opacity = bounded_target
+                self._draw_viewer_navigation()
+                return
+            self._viewer_navigation_opacity += max(-0.10, min(0.10, delta))
+            self._draw_viewer_navigation()
+            self._viewer_navigation_fade_job = self.after(16, step)
+
+        step()
+
+    def _cancel_viewer_navigation_tooltip(self) -> None:
+        if self._viewer_navigation_tooltip_job is not None:
+            try:
+                self.after_cancel(self._viewer_navigation_tooltip_job)
+            except tk.TclError:
+                pass
+            self._viewer_navigation_tooltip_job = None
+        if hasattr(self, "canvas"):
+            self.canvas.delete("viewer-navigation-tooltip")
+
+    def _show_viewer_navigation_tooltip(self, direction: int) -> None:
+        self._viewer_navigation_tooltip_job = None
+        if self._viewer_navigation_hover != direction or not self._viewer_navigation_visible:
+            return
+        width = max(1, self.canvas.winfo_width())
+        height = max(1, self.canvas.winfo_height())
+        button_width, _button_height, _icon_size = self._viewer_navigation_geometry
+        arrow_x = 8 + button_width / 2 if direction < 0 else width - 8 - button_width / 2
+        tooltip_x = arrow_x + 58 if direction < 0 else arrow_x - 58
+        tooltip_y = height / 2 + 54
+        label = "上一张图片" if direction < 0 else "下一张图片"
+        text_id = self.canvas.create_text(
+            tooltip_x,
+            tooltip_y,
+            text=label,
+            fill=self.theme_manager.tokens.foreground,
+            font=("Microsoft YaHei UI", 9),
+            tags=("viewer-navigation-tooltip",),
+        )
+        bounds = self.canvas.bbox(text_id)
+        if bounds is not None:
+            left, top, right, bottom = bounds
+            background_id = self.canvas.create_rectangle(
+                left - 9,
+                top - 6,
+                right + 9,
+                bottom + 6,
+                fill=self.theme_manager.tokens.surface_high,
+                outline="",
+                tags=("viewer-navigation-tooltip",),
+            )
+            self.canvas.tag_lower(background_id, text_id)
+        self.canvas.tag_raise("viewer-navigation-tooltip")
+
+    @staticmethod
+    def _viewer_navigation_dimensions(width: int, height: int) -> tuple[int, int, int]:
+        """Scale edge-navigation targets and arrows with the viewer viewport."""
+
+        short_edge = max(1, min(int(width), int(height)))
+        button_width = max(156, min(232, round(short_edge * 0.16)))
+        button_height = max(240, min(380, round(short_edge * 0.30)))
+        icon_size = max(76, min(128, round(short_edge * 0.11)))
+        icon_size = round(icon_size / 4) * 4
+        return button_width, button_height, icon_size
+
+    @staticmethod
+    def _viewer_fit_render_size(canvas_width: int, canvas_height: int) -> tuple[int, int]:
+        """Use nearly all of the viewer while preserving compact UI breathing room."""
+
+        safe_width = max(100, int(canvas_width))
+        safe_height = max(100, int(canvas_height))
+        horizontal_margin = max(24, min(48, round(safe_width * 0.025)))
+        vertical_margin = max(64, min(96, round(safe_height * 0.083)))
+        return (
+            max(100, safe_width - horizontal_margin),
+            max(100, safe_height - vertical_margin),
+        )
 
     def _show_app_menu(self) -> None:
         anchor = (
@@ -8716,6 +9826,7 @@ class ImageEditorApp(tk.Tk):
             active_mode=self.mode_router.active_mode,
             on_invoke=self.invoke_feature,
             on_closed=self._feature_palette_closed,
+            initial_scope=FeaturePaletteScope.CURRENT,
         )
         self._fit_dialog(self._feature_palette_window, 860, 650)
         tokens = self.theme_manager.apply(self.theme_mode_var.get())
@@ -8821,7 +9932,7 @@ class ImageEditorApp(tk.Tk):
             label="最后一张", accelerator="End", command=lambda: self.navigate_folder_to("last")
         )
         view_menu.add_separator()
-        view_menu.add_command(label="适应视图", accelerator="Ctrl+0", command=self.reset_view)
+        view_menu.add_command(label="适合窗口", accelerator="Ctrl+0", command=self.reset_view)
         view_menu.add_command(label="50%", command=lambda: self.set_zoom("50%"))
         view_menu.add_command(
             label="100%", accelerator="Ctrl+1", command=lambda: self.set_zoom("100%")
@@ -8999,9 +10110,10 @@ class ImageEditorApp(tk.Tk):
         set_accessible_name(configure_button, "配置收藏工具与快捷键")
 
     def _apply_custom_shortcuts(self) -> None:
-        for sequence in self._custom_bound_sequences:
+        for sequence in self._custom_bound_sequences | self._viewer_bound_sequences:
             self.unbind(sequence)
         self._custom_bound_sequences.clear()
+        self._viewer_bound_sequences.clear()
         valid_actions = {key for key, _label, _shortcut in ACTION_CATALOG}
         for action, sequence in self.custom_shortcuts.items():
             if action not in valid_actions or not sequence:
@@ -9014,8 +10126,80 @@ class ImageEditorApp(tk.Tk):
             except tk.TclError:
                 continue
             self._custom_bound_sequences.add(sequence)
+        for action, sequences in self.viewer_shortcuts.items():
+            if action not in VIEWER_SHORTCUT_DEFAULTS:
+                continue
+            for sequence in sequences:
+                if not sequence:
+                    continue
+                try:
+                    self.bind(
+                        sequence,
+                        lambda event, current=action, bound=sequence: self._invoke_viewer_shortcut(
+                            current, bound, event
+                        ),
+                    )
+                except tk.TclError:
+                    continue
+                self._viewer_bound_sequences.add(sequence)
+
+    def _invoke_viewer_shortcut(
+        self,
+        action: str,
+        sequence: str,
+        event: tk.Event,
+    ) -> str | None:
+        if self._text_input_has_focus():
+            return None
+        if self.mode_router.active_mode is ModeId.VIEWER:
+            if action == "previous":
+                self.navigate_folder(-1)
+            elif action == "next":
+                self.navigate_folder(1)
+            elif action == "zoom_in":
+                self.step_zoom(1)
+            elif action == "zoom_out":
+                self.step_zoom(-1)
+            elif action == "toggle_toolbar":
+                self.toggle_viewer_toolbar()
+            elif action == "toggle_clean":
+                self.toggle_viewer_clean_mode()
+            elif action == "toggle_topmost":
+                self.toggle_viewer_topmost()
+            elif action == "toggle_favorite":
+                self.toggle_viewer_favorite()
+            return "break"
+
+        custom_action = next(
+            (
+                current
+                for current, custom_sequence in self.custom_shortcuts.items()
+                if custom_sequence == sequence
+            ),
+            None,
+        )
+        if custom_action is not None:
+            return self._invoke_custom_shortcut(custom_action, event)
+        if sequence in {"<Left>", "<KP_Left>"}:
+            return self._navigation_key(event, -1)
+        if sequence in {"<Right>", "<KP_Right>"}:
+            return self._navigation_key(event, 1)
+        return None
 
     def _invoke_custom_shortcut(self, action: str, event: tk.Event) -> str | None:
+        # Undo/redo are contextual document commands.  Routing them through the
+        # feature registry would select ``edit.undo``/``edit.redo`` and switch a
+        # viewer-only window into the full edit workspace before doing the work.
+        # Keep the active shell unchanged, matching the toolbar's direct undo.
+        if action == "undo":
+            if self.mode_router.active_mode is ModeId.VIEWER and self._viewer_markup_active:
+                self._undo_viewer_markup()
+            else:
+                self.undo()
+            return "break"
+        if action == "redo":
+            self.redo()
+            return "break"
         if action in {"select", "crop", "text", "arrow", "rectangle", "mosaic", "blur"}:
             widget_class = event.widget.winfo_class() if event.widget is not None else ""
             if widget_class in {"Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox"}:
@@ -9088,6 +10272,646 @@ class ImageEditorApp(tk.Tk):
         buttons.pack(fill="x")
         ttk.Button(buttons, text="保存", command=save_workflow).pack(side="right")
         ttk.Button(buttons, text="取消", command=window.destroy).pack(side="right", padx=(0, 8))
+
+    @staticmethod
+    def _viewer_shortcut_display(sequences: Sequence[str]) -> str:
+        labels = {
+            "<Left>": "←",
+            "<Right>": "→",
+            "<Up>": "↑",
+            "<Down>": "↓",
+            "<KP_Left>": "小键盘←",
+            "<KP_Right>": "小键盘→",
+            "<KP_Up>": "小键盘↑",
+            "<KP_Down>": "小键盘↓",
+        }
+        values: list[str] = []
+        for sequence in sequences:
+            if sequence in labels:
+                values.append(labels[sequence])
+            elif sequence.startswith("<Key-") and sequence.endswith(">"):
+                values.append(sequence[5:-1].upper())
+            elif sequence.startswith("<") and sequence.endswith(">"):
+                values.append(sequence[1:-1])
+            else:
+                values.append(sequence)
+        return "，".join(values)
+
+    @staticmethod
+    def _normalize_viewer_shortcut_token(token: str) -> str:
+        value = token.strip()
+        aliases = {
+            "←": "<Left>",
+            "左": "<Left>",
+            "LEFT": "<Left>",
+            "→": "<Right>",
+            "右": "<Right>",
+            "RIGHT": "<Right>",
+            "↑": "<Up>",
+            "上": "<Up>",
+            "UP": "<Up>",
+            "↓": "<Down>",
+            "下": "<Down>",
+            "DOWN": "<Down>",
+            "小键盘←": "<KP_Left>",
+            "小键盘→": "<KP_Right>",
+            "小键盘↑": "<KP_Up>",
+            "小键盘↓": "<KP_Down>",
+        }
+        if not value:
+            raise ValueError("按键不能为空")
+        aliased = aliases.get(value.upper(), aliases.get(value))
+        if aliased is not None:
+            return aliased
+        if value.startswith("<") and value.endswith(">"):
+            return value
+        if len(value) == 1 and value.isprintable():
+            return f"<Key-{value.lower()}>"
+        if value.upper().startswith("F") and value[1:].isdigit():
+            return f"<{value.upper()}>"
+        raise ValueError(f"无法识别按键：{value}")
+
+    @classmethod
+    def _parse_viewer_shortcut_text(cls, text: str) -> list[str]:
+        normalized = text.replace("、", ",").replace("，", ",").replace("；", ",")
+        values: list[str] = []
+        for token in normalized.split(","):
+            if not token.strip():
+                continue
+            sequence = cls._normalize_viewer_shortcut_token(token)
+            if sequence not in values:
+                values.append(sequence)
+        return values
+
+    @staticmethod
+    def _parse_viewer_zoom_presets(text: str) -> list[str]:
+        normalized = text.replace("、", ",").replace("，", ",").replace("；", ",")
+        values: list[str] = []
+        for token in normalized.split(","):
+            value = token.strip()
+            if not value:
+                continue
+            if value in {"适应", "适合", "适合窗口"}:
+                preset = "适应"
+            else:
+                raw_percent = value.removesuffix("%").strip()
+                try:
+                    percent = int(raw_percent)
+                except ValueError as error:
+                    raise ValueError(f"无效缩放刻度：{value}") from error
+                if not MIN_ZOOM_PERCENT <= percent <= MAX_ZOOM_PERCENT:
+                    raise ValueError(
+                        f"缩放刻度需在 {MIN_ZOOM_PERCENT}% 至 {MAX_ZOOM_PERCENT}% 之间"
+                    )
+                preset = f"{percent}%"
+            if preset not in values:
+                values.append(preset)
+        if "适应" not in values:
+            values.insert(0, "适应")
+        else:
+            values.remove("适应")
+            values.insert(0, "适应")
+        if len(values) > 8:
+            raise ValueError("缩放刻度最多设置 8 个")
+        return values
+
+    def _apply_viewer_preferences(
+        self,
+        *,
+        shortcuts: dict[str, list[str]],
+        zoom_step_percent: int,
+        zoom_presets: list[str],
+        toolbar_visible: bool,
+        toolbar_mode: str | None = None,
+        topmost_enabled: bool | None = None,
+        save: bool = True,
+    ) -> None:
+        self.viewer_shortcuts = {
+            action: list(shortcuts.get(action, [])) for action in VIEWER_SHORTCUT_DEFAULTS
+        }
+        self.viewer_zoom_step_percent = max(1, min(100, int(zoom_step_percent)))
+        self.viewer_zoom_presets = list(zoom_presets)
+        self.viewer_toolbar_visible_var.set(bool(toolbar_visible))
+        if toolbar_mode in VIEWER_TOOLBAR_MODE_LABELS:
+            self.viewer_toolbar_mode_var.set(toolbar_mode)
+        if topmost_enabled is not None:
+            self._set_viewer_topmost(bool(topmost_enabled))
+        self._viewer_toolbar_auto_visible = False
+        self._apply_custom_shortcuts()
+        self._rebuild_zoom_preset_buttons()
+        self._update_command_dock_for_mode(self.mode_router.active_mode)
+        self._place_canvas_status()
+        if save:
+            self._save_config()
+
+    def toggle_viewer_toolbar(self) -> str:
+        self.viewer_toolbar_visible_var.set(not self.viewer_toolbar_visible_var.get())
+        if self.viewer_toolbar_visible_var.get():
+            self._viewer_toolbar_auto_visible = self.viewer_toolbar_mode_var.get() == "auto"
+        self._update_command_dock_for_mode(self.mode_router.active_mode)
+        self.status_var.set(
+            "已显示顶部工具栏" if self.viewer_toolbar_visible_var.get() else "已隐藏顶部工具栏"
+        )
+        self._save_config()
+        return "break"
+
+    def toggle_viewer_clean_mode(self) -> str:
+        if self.mode_router.active_mode is not ModeId.VIEWER:
+            return "break"
+        if not self._viewer_clean_mode and self._viewer_markup_active:
+            self.status_var.set("请先在轻标注栏选择：仅复制、替换原图或取消修改")
+            return "break"
+        self._viewer_clean_mode = not self._viewer_clean_mode
+        self._hide_zoom_preset_popup()
+        self._update_command_dock_for_mode(self.mode_router.active_mode)
+        self._place_canvas_status()
+        self.status_var.set(
+            "已进入纯净阅图，按 Tab 或 Esc 恢复界面"
+            if self._viewer_clean_mode
+            else "已退出纯净阅图"
+        )
+        return "break"
+
+    def _set_viewer_markup_tool(self, tool: str) -> None:
+        if tool not in {"rectangle", "arrow"}:
+            return
+        self._viewer_markup_tool = tool
+        self._set_annotation_tool(tool)
+        for name, button in self.viewer_markup_tool_buttons.items():
+            button.set_selected(name == tool)
+        self.status_var.set(f"轻标注：拖动绘制{ANNOTATION_TOOL_LABELS[tool]}")
+
+    def _set_viewer_markup_active(self, enabled: bool) -> bool:
+        active = bool(enabled)
+        if active and self.document is None:
+            self.status_var.set("请先打开一张图片，再使用轻标注")
+            return False
+        if self._viewer_markup_active == active:
+            return True
+        if active and self.document is not None:
+            self._viewer_markup_timeline_snapshot = copy.deepcopy(self.document.timeline)
+        self._viewer_markup_active = active
+        self.dock_markup_button.set_selected(active)
+        set_accessible_name(
+            self.dock_markup_button,
+            "退出轻标注" if active else "轻标注：矩形框与指向箭头",
+        )
+        self._clear_annotation_drag(redraw=False)
+        self.selected_annotation_id = None
+        if active:
+            self._set_viewer_markup_tool(self._viewer_markup_tool)
+        else:
+            self._set_annotation_tool("select")
+        self._place_canvas_status()
+        return True
+
+    def _close_viewer_markup_ui(self, message: str) -> None:
+        self._viewer_markup_active = False
+        self._viewer_markup_timeline_snapshot = None
+        self.dock_markup_button.set_selected(False)
+        set_accessible_name(
+            self.dock_markup_button,
+            "轻标注：矩形框与指向箭头",
+        )
+        self._clear_annotation_drag(redraw=False)
+        self.selected_annotation_id = None
+        self._set_annotation_tool("select")
+        self._place_canvas_status()
+        self.status_var.set(message)
+
+    def _restore_viewer_markup_snapshot(self) -> None:
+        if self.document is None or self._viewer_markup_timeline_snapshot is None:
+            return
+        self.document.timeline = copy.deepcopy(self._viewer_markup_timeline_snapshot)
+        self._sync_controls_from_timeline()
+        self._refresh_history_panel()
+        self._refresh_preview()
+
+    def _undo_viewer_markup(self) -> None:
+        if self.document is None or self._viewer_markup_timeline_snapshot is None:
+            return
+        baseline = self._viewer_markup_timeline_snapshot.cursor
+        if self.document.timeline.cursor <= baseline:
+            self.status_var.set("本次轻标注没有可撤销的内容")
+            return
+        self.document.undo_command()
+        self._refresh_history_panel()
+        self._refresh_preview()
+        self.status_var.set("已撤销上一处轻标注")
+
+    def _cancel_viewer_markup(self) -> None:
+        self._restore_viewer_markup_snapshot()
+        self._close_viewer_markup_ui("已取消本次全部修改")
+
+    def _finish_viewer_markup_copy(self) -> None:
+        if self.original is None or self.document is None:
+            return
+        result: Image.Image | None = None
+        try:
+            result = render_image(self.original, self.document.timeline)
+            copy_image_to_clipboard(result)
+            result_size = result.size
+        except Exception as error:
+            messagebox.showerror(APP_NAME, f"复制失败：{error}")
+            return
+        finally:
+            if result is not None:
+                result.close()
+        self._restore_viewer_markup_snapshot()
+        self._close_viewer_markup_ui(
+            f"已复制标注结果：{result_size[0]} × {result_size[1]}，原图未修改"
+        )
+
+    def _finish_viewer_markup_replace(self) -> None:
+        if self.document is None or self.original is None or self.image_path is None:
+            self.status_var.set("当前图片没有可替换的本地原文件")
+            return
+        source_format = (self.document.metadata.original_format or "").upper()
+        source_format = {"JPG": "JPEG", "TIF": "TIFF"}.get(source_format, source_format)
+        if source_format not in {"JPEG", "PNG", "WEBP", "AVIF", "BMP", "TIFF", "GIF"}:
+            messagebox.showinfo(
+                APP_NAME,
+                "当前原图格式不支持安全写回，请使用“仅复制”。",
+            )
+            return
+        options = self._read_options()
+        if options is None:
+            return
+        options = replace(options, output_format=source_format, target_size_kb=None)
+        saved = self._save_document_image(self.image_path, options)
+        if saved is None:
+            return
+        self._mark_clean(saved)
+        self.session_store.clear()
+        self._close_viewer_markup_ui("已替换原图，并保留安全备份设置")
+        self.open_path(saved, confirm=False)
+
+    def toggle_viewer_markup(self) -> str:
+        if self.mode_router.active_mode is not ModeId.VIEWER:
+            return "break"
+        if self._viewer_markup_active:
+            self._place_canvas_status()
+            self.status_var.set("请在轻标注栏选择：仅复制、替换原图或取消修改")
+        else:
+            self._set_viewer_markup_active(True)
+        return "break"
+
+    def _set_viewer_topmost(self, enabled: bool) -> None:
+        self.viewer_topmost_var.set(bool(enabled))
+        try:
+            self.attributes("-topmost", bool(enabled))
+        except tk.TclError:
+            pass
+        if hasattr(self, "viewer_topmost_button"):
+            self.viewer_topmost_button.set_selected(bool(enabled))
+            set_accessible_name(
+                self.viewer_topmost_button,
+                "窗口已置顶，点击取消（P）" if enabled else "窗口置顶（P）",
+            )
+
+    def toggle_viewer_topmost(self) -> str:
+        enabled = not self.viewer_topmost_var.get()
+        self._set_viewer_topmost(enabled)
+        self.status_var.set("窗口已置顶" if enabled else "已取消窗口置顶")
+        self._save_config()
+        return "break"
+
+    @staticmethod
+    def _viewer_favorite_key(path: Path) -> str:
+        return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+    @classmethod
+    def _viewer_paths_match(cls, left: Path, right: Path) -> bool:
+        if cls._viewer_favorite_key(left) == cls._viewer_favorite_key(right):
+            return True
+        try:
+            return os.path.samefile(left, right)
+        except (OSError, ValueError):
+            return False
+
+    def _viewer_image_is_favorite(self, path: Path | None = None) -> bool:
+        selected = self.image_path if path is None else path
+        if selected is None:
+            return False
+        return any(
+            self._viewer_paths_match(Path(saved_path), selected)
+            for saved_path in self.viewer_favorite_paths
+        )
+
+    def _update_viewer_favorite_button(self) -> None:
+        if not hasattr(self, "dock_favorite_button"):
+            return
+        available = self.image_path is not None
+        selected = available and self._viewer_image_is_favorite()
+        self.dock_favorite_button.state(("!disabled",) if available else ("disabled",))
+        self.dock_favorite_button.set_selected(bool(selected))
+        self.dock_favorite_button.set_text("★" if selected else "☆")
+        set_accessible_name(
+            self.dock_favorite_button,
+            "取消收藏当前图片（F）" if selected else "收藏当前图片（F）",
+        )
+
+    def toggle_viewer_favorite(self) -> str:
+        if self.mode_router.active_mode is not ModeId.VIEWER:
+            return "break"
+        path = self.image_path
+        if path is None:
+            self.status_var.set("当前图片没有可收藏的文件路径")
+            return "break"
+        matching = [
+            saved_path
+            for saved_path in self.viewer_favorite_paths
+            if self._viewer_paths_match(Path(saved_path), path)
+        ]
+        if matching:
+            self.viewer_favorite_paths = [
+                saved_path
+                for saved_path in self.viewer_favorite_paths
+                if not self._viewer_paths_match(Path(saved_path), path)
+            ]
+            message = f"已取消收藏 · {path.name}"
+        else:
+            self.viewer_favorite_paths.insert(0, os.path.abspath(os.fspath(path)))
+            del self.viewer_favorite_paths[2000:]
+            message = f"已收藏 · {path.name}"
+        self._update_viewer_favorite_button()
+        self._update_viewer_gallery_button()
+        self.status_var.set(message)
+        self._save_config()
+        return "break"
+
+    def _update_viewer_toolbar_auto_visibility(self, pointer_y: int) -> None:
+        if (
+            self.mode_router.active_mode is not ModeId.VIEWER
+            or self.viewer_toolbar_mode_var.get() != "auto"
+            or not self.viewer_toolbar_visible_var.get()
+            or self._viewer_clean_mode
+        ):
+            return
+        if pointer_y <= 96:
+            if self._viewer_toolbar_auto_hide_job is not None:
+                try:
+                    self.after_cancel(self._viewer_toolbar_auto_hide_job)
+                except tk.TclError:
+                    pass
+                self._viewer_toolbar_auto_hide_job = None
+            self._animate_auto_viewer_toolbar(True)
+            return
+        if self._viewer_toolbar_auto_visible and self._viewer_toolbar_auto_hide_job is None:
+            self._viewer_toolbar_auto_hide_job = self.after(
+                700,
+                self._hide_auto_viewer_toolbar,
+            )
+
+    def _hide_auto_viewer_toolbar(self) -> None:
+        self._viewer_toolbar_auto_hide_job = None
+        if self.viewer_toolbar_mode_var.get() != "auto" or self._viewer_clean_mode:
+            return
+        self._animate_auto_viewer_toolbar(False)
+
+    def _set_viewer_toolbar_visual_opacity(self, opacity: float) -> None:
+        bounded = max(0.0, min(1.0, float(opacity)))
+        # On Windows the complete dock subtree is faded by DWM.  This avoids
+        # regenerating ten PIL/ImageTk button surfaces on every animation frame
+        # and lets the compositor sustain high-refresh displays smoothly.
+        if self.command_dock.set_visual_opacity(bounded):
+            return
+        for widget in self._dock_widgets_by_mode.get(ModeId.VIEWER, ()):
+            if isinstance(widget, MaterialButton):
+                widget.set_visual_opacity(bounded)
+
+        tokens = self.theme_manager.tokens
+        canvas_rgb = ImageColor.getrgb(tokens.canvas)
+        border_rgb = ImageColor.getrgb(tokens.border)
+        separator_rgb = tuple(
+            round(canvas_rgb[index] + (border_rgb[index] - canvas_rgb[index]) * bounded)
+            for index in range(3)
+        )
+        separator_color = "#{:02x}{:02x}{:02x}".format(*separator_rgb)
+        ttk.Style(self).configure(
+            "ViewerToolbarFade.TSeparator",
+            background=separator_color,
+        )
+        for separator in (self.dock_primary_separator, self.dock_edit_separator):
+            separator.configure(style="ViewerToolbarFade.TSeparator")
+
+    def _animate_auto_viewer_toolbar(self, show: bool) -> None:
+        if self.viewer_toolbar_mode_var.get() != "auto":
+            return
+        target = 1.0 if show else 0.0
+        if self._viewer_toolbar_fade_job is not None and self._viewer_toolbar_fade_target == target:
+            return
+        if self._viewer_toolbar_fade_job is not None:
+            try:
+                self.after_cancel(self._viewer_toolbar_fade_job)
+            except tk.TclError:
+                pass
+            self._viewer_toolbar_fade_job = None
+        if show and not self._viewer_toolbar_auto_visible:
+            self._viewer_toolbar_auto_visible = True
+            self._viewer_toolbar_opacity = 0.0
+            self._set_viewer_toolbar_visual_opacity(0.0)
+            self._update_command_dock_for_mode(self.mode_router.active_mode)
+
+        self._viewer_toolbar_fade_target = target
+        start_opacity = self._viewer_toolbar_opacity
+        started_at = time.perf_counter()
+        duration_seconds = max(0.08, 0.24 * abs(target - start_opacity))
+
+        def position_only() -> None:
+            if not self.command_dock.winfo_ismapped():
+                return
+            titlebar_height = (
+                self.window_titlebar.winfo_reqheight() if self.window_titlebar is not None else 0
+            )
+            self.command_dock.place_configure(
+                y=(titlebar_height + 6 - round((1.0 - self._viewer_toolbar_opacity) * 18))
+            )
+
+        def step() -> None:
+            self._viewer_toolbar_fade_job = None
+            progress = min(
+                1.0,
+                max(0.0, (time.perf_counter() - started_at) / duration_seconds),
+            )
+            eased = progress * progress * (3.0 - 2.0 * progress)
+            self._viewer_toolbar_opacity = start_opacity + (target - start_opacity) * eased
+            self._set_viewer_toolbar_visual_opacity(self._viewer_toolbar_opacity)
+            position_only()
+            if progress >= 1.0:
+                self._viewer_toolbar_fade_target = None
+                self._viewer_toolbar_opacity = target
+                self._set_viewer_toolbar_visual_opacity(target)
+                if not show:
+                    self._viewer_toolbar_auto_visible = False
+                    self._update_command_dock_for_mode(self.mode_router.active_mode)
+                return
+            # DWM now composites the complete dock, so an 8 ms cadence can feed
+            # 120 Hz displays without rebuilding every child control.
+            self._viewer_toolbar_fade_job = self.after(8, step)
+
+        step()
+
+    def open_viewer_settings(self) -> None:
+        existing = self._viewer_settings_window
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        window = tk.Toplevel(self)
+        self._viewer_settings_window = window
+        window.title("看图设置")
+        window.transient(self)
+        window.resizable(False, False)
+        self._fit_dialog(window, 620, 700)
+
+        body = ttk.Frame(window, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="按键绑定", style="SectionTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            body,
+            text="每个功能可填写多个按键，用逗号分隔，例如：A，←",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(3, 10))
+
+        shortcut_frame = ttk.Frame(body)
+        shortcut_frame.pack(fill="x")
+        shortcut_frame.columnconfigure(1, weight=1)
+        shortcut_vars: dict[str, tk.StringVar] = {}
+        first_entry: ttk.Entry | None = None
+        for row, action in enumerate(VIEWER_SHORTCUT_DEFAULTS):
+            ttk.Label(shortcut_frame, text=VIEWER_SHORTCUT_LABELS[action]).grid(
+                row=row,
+                column=0,
+                sticky="w",
+                padx=(0, 18),
+                pady=5,
+            )
+            variable = tk.StringVar(
+                value=self._viewer_shortcut_display(self.viewer_shortcuts[action])
+            )
+            shortcut_vars[action] = variable
+            entry = ttk.Entry(shortcut_frame, textvariable=variable)
+            entry.grid(row=row, column=1, sticky="ew", pady=5)
+            if first_entry is None:
+                first_entry = entry
+
+        display_frame = ttk.LabelFrame(body, text="工具栏与缩放", padding=12)
+        display_frame.pack(fill="x", pady=(18, 0))
+        display_frame.columnconfigure(1, weight=1)
+        toolbar_mode = tk.StringVar(value=self.viewer_toolbar_mode_var.get())
+        topmost_enabled = tk.BooleanVar(value=self.viewer_topmost_var.get())
+        ttk.Label(
+            display_frame,
+            text="工具栏显示方式",
+        ).grid(row=0, column=0, sticky="w", padx=(0, 18), pady=5)
+        toolbar_mode_choices = ttk.Frame(display_frame)
+        toolbar_mode_choices.grid(row=0, column=1, sticky="w", pady=5)
+        for mode, label in VIEWER_TOOLBAR_MODE_LABELS.items():
+            ttk.Radiobutton(
+                toolbar_mode_choices,
+                text=label,
+                variable=toolbar_mode,
+                value=mode,
+            ).pack(side="left", padx=(0, 18))
+        ttk.Label(display_frame, text="窗口显示").grid(
+            row=1, column=0, sticky="w", padx=(0, 18), pady=5
+        )
+        ttk.Checkbutton(
+            display_frame,
+            text="始终置于其他窗口上方",
+            variable=topmost_enabled,
+        ).grid(row=1, column=1, sticky="w", pady=5)
+        ttk.Label(display_frame, text="每次缩放幅度（%）").grid(
+            row=2, column=0, sticky="w", padx=(0, 18), pady=5
+        )
+        zoom_step = tk.IntVar(value=self.viewer_zoom_step_percent)
+        ttk.Entry(
+            display_frame,
+            textvariable=zoom_step,
+            width=8,
+        ).grid(row=2, column=1, sticky="w", pady=5)
+        ttk.Label(display_frame, text="缩放刻度").grid(
+            row=3, column=0, sticky="w", padx=(0, 18), pady=5
+        )
+        zoom_presets = tk.StringVar(value="，".join(self.viewer_zoom_presets))
+        ttk.Entry(display_frame, textvariable=zoom_presets).grid(
+            row=3, column=1, sticky="ew", pady=5
+        )
+        ttk.Label(
+            display_frame,
+            text="支持 10% 至 800%，最多 8 个；“适应”会自动保留。",
+            style="Muted.TLabel",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(3, 0))
+
+        def restore_defaults() -> None:
+            for action, sequences in VIEWER_SHORTCUT_DEFAULTS.items():
+                shortcut_vars[action].set(self._viewer_shortcut_display(sequences))
+            zoom_step.set(10)
+            zoom_presets.set("，".join(DEFAULT_VIEWER_ZOOM_PRESETS))
+            toolbar_mode.set("fixed")
+            topmost_enabled.set(False)
+
+        def close_window() -> None:
+            self._viewer_settings_window = None
+            window.destroy()
+
+        def save_settings() -> None:
+            try:
+                shortcuts = {
+                    action: self._parse_viewer_shortcut_text(variable.get())
+                    for action, variable in shortcut_vars.items()
+                }
+                all_sequences = [
+                    sequence for sequences in shortcuts.values() for sequence in sequences
+                ]
+                if len(all_sequences) != len(set(all_sequences)):
+                    raise ValueError("同一个按键不能同时绑定多个看图功能")
+                for sequence in all_sequences:
+                    probe = window.bind(sequence, lambda _event: None)
+                    window.unbind(sequence, probe)
+                step = max(1, min(100, int(zoom_step.get())))
+                presets = self._parse_viewer_zoom_presets(zoom_presets.get())
+                selected_toolbar_mode = toolbar_mode.get()
+                if selected_toolbar_mode not in VIEWER_TOOLBAR_MODE_LABELS:
+                    raise ValueError("请选择有效的工具栏显示方式")
+            except (ValueError, tk.TclError) as error:
+                messagebox.showerror(APP_NAME, str(error), parent=window)
+                return
+            self._apply_viewer_preferences(
+                shortcuts=shortcuts,
+                zoom_step_percent=step,
+                zoom_presets=presets,
+                toolbar_visible=True,
+                toolbar_mode=selected_toolbar_mode,
+                topmost_enabled=topmost_enabled.get(),
+            )
+            self.status_var.set("看图设置已保存")
+            close_window()
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(18, 0))
+        ttk.Button(buttons, text="恢复默认", command=restore_defaults).pack(side="left")
+        ttk.Button(
+            buttons,
+            text="进入纯净阅图",
+            command=lambda: (close_window(), self.toggle_viewer_clean_mode()),
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="保存", command=save_settings, style="Accent.TButton").pack(
+            side="right"
+        )
+        ttk.Button(buttons, text="取消", command=close_window).pack(side="right", padx=(0, 8))
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        window.bind("<Escape>", lambda _event: close_window())
+        window.bind("<Control-Return>", lambda _event: save_settings())
+        self._name_interactive_widgets(window)
+        if first_entry is not None:
+            first_entry.focus_set()
 
     def open_settings(self) -> None:
         window = tk.Toplevel(self)
@@ -10325,6 +12149,45 @@ class ImageEditorApp(tk.Tk):
                     if action in known_actions and isinstance(sequence, str)
                 }
             )
+        viewer_shortcuts = data.get("viewer_shortcuts", {})
+        if isinstance(viewer_shortcuts, dict):
+            for action in VIEWER_SHORTCUT_DEFAULTS:
+                sequences = viewer_shortcuts.get(action)
+                if isinstance(sequences, list):
+                    self.viewer_shortcuts[action] = [
+                        str(sequence)
+                        for sequence in sequences
+                        if isinstance(sequence, str) and sequence
+                    ][:6]
+        self.viewer_zoom_step_percent = _bounded_setting_int(
+            data.get("viewer_zoom_step_percent", 10),
+            10,
+            1,
+            100,
+        )
+        saved_zoom_presets = data.get("viewer_zoom_presets", [])
+        if isinstance(saved_zoom_presets, list) and saved_zoom_presets:
+            try:
+                self.viewer_zoom_presets = self._parse_viewer_zoom_presets(
+                    ",".join(str(value) for value in saved_zoom_presets)
+                )
+            except ValueError:
+                self.viewer_zoom_presets = list(DEFAULT_VIEWER_ZOOM_PRESETS)
+        self.viewer_toolbar_visible_var.set(bool(data.get("viewer_toolbar_visible", True)))
+        toolbar_mode = str(data.get("viewer_toolbar_mode", "fixed"))
+        self.viewer_toolbar_mode_var.set(
+            toolbar_mode if toolbar_mode in VIEWER_TOOLBAR_MODE_LABELS else "fixed"
+        )
+        self.viewer_topmost_var.set(bool(data.get("viewer_topmost", False)))
+        saved_viewer_favorites = data.get("viewer_favorite_paths", [])
+        if isinstance(saved_viewer_favorites, list):
+            self.viewer_favorite_paths = list(
+                dict.fromkeys(
+                    os.path.abspath(str(path))
+                    for path in saved_viewer_favorites
+                    if isinstance(path, str) and path.strip()
+                )
+            )[:2000]
         self.restore_workspace = bool(data.get("restore_workspace", True))
         self.restore_workspace_var.set(self.restore_workspace)
         self.last_project = str(data.get("last_project", "") or "")
@@ -10333,7 +12196,7 @@ class ImageEditorApp(tk.Tk):
             self.annotation_tool_var.set(saved_tool)
             self.current_tool_label_var.set(f"当前：{ANNOTATION_TOOL_LABELS[saved_tool]}")
         self.edit_panel_visible_var.set(bool(data.get("edit_panel_visible", True)))
-        self.thumbnail_sidebar_visible_var.set(bool(data.get("thumbnail_sidebar_visible", True)))
+        self.thumbnail_sidebar_visible_var.set(bool(data.get("viewer_sidebar_visible_v2", False)))
         self.slideshow_interval_var.set(
             _bounded_setting_float(data.get("slideshow_interval", 3.0), 3.0, 0.5, 3600.0)
         )
@@ -10433,11 +12296,19 @@ class ImageEditorApp(tk.Tk):
                 "generation_seed": self.generate_seed_var.get().strip(),
                 "favorite_actions": self.favorite_actions,
                 "custom_shortcuts": self.custom_shortcuts,
+                "viewer_shortcuts": self.viewer_shortcuts,
+                "viewer_zoom_step_percent": self.viewer_zoom_step_percent,
+                "viewer_zoom_presets": self.viewer_zoom_presets,
+                "viewer_toolbar_visible": self.viewer_toolbar_visible_var.get(),
+                "viewer_toolbar_mode": self.viewer_toolbar_mode_var.get(),
+                "viewer_topmost": self.viewer_topmost_var.get(),
+                "viewer_favorite_paths": self.viewer_favorite_paths[:2000],
                 "restore_workspace": self.restore_workspace_var.get(),
                 "last_project": self.last_project,
                 "annotation_tool": self.annotation_tool_var.get(),
                 "edit_panel_visible": self.edit_panel_visible_var.get(),
                 "thumbnail_sidebar_visible": self.thumbnail_sidebar_visible_var.get(),
+                "viewer_sidebar_visible_v2": self.thumbnail_sidebar_visible_var.get(),
                 "slideshow_interval": self.slideshow_interval_var.get(),
                 "slideshow_loop": self.slideshow_loop_var.get(),
                 "preserve_metadata": self.preserve_metadata_var.get(),
@@ -10461,6 +12332,17 @@ class ImageEditorApp(tk.Tk):
         canvas = getattr(self, "canvas", None)
         if event.widget is not self and event.widget is not canvas:
             return
+        if (
+            event.widget is self
+            and self.window_controller is not None
+            and self.window_controller.moving
+        ):
+            return
+        actively_resizing = bool(
+            self.window_controller is not None and self.window_controller.resizing
+        )
+        if event.widget is self and actively_resizing:
+            return
         custom_maximized = bool(self.window_controller and self.window_controller.maximized)
         if (
             event.widget is self
@@ -10469,15 +12351,106 @@ class ImageEditorApp(tk.Tk):
             and not custom_maximized
         ):
             self._saved_geometry = self.geometry()
-        dpi_changed = self.dpi_manager.refresh()
-        if dpi_changed:
-            self._update_monitor_constraints()
-            self.dpi_manager.constrain_to_current_work_area()
-            self.theme_manager.apply(self.theme_mode_var.get())
+            self._schedule_window_resize_finish()
+        if event.widget is not canvas:
+            return
+        current_size = (max(1, int(event.width)), max(1, int(event.height)))
+        if current_size == self._last_canvas_configure_size:
+            return
+        self._last_canvas_configure_size = current_size
+        if self.mode_router.active_mode is ModeId.VIEWER:
+            if not self._viewer_resize_preview_pending:
+                self._preview_generation += 1
+            self._viewer_resize_preview_pending = True
+            if self._preview_job is not None:
+                try:
+                    self.after_cancel(self._preview_job)
+                except tk.TclError:
+                    pass
+                self._preview_job = None
+            self.canvas.delete("viewer-navigation")
+            self.canvas.delete("viewer-navigation-tooltip")
+            if self.preview is not None:
+                self._move_cached_viewer_preview(redraw_navigation=False)
+            elif self.original is None:
+                self.after_idle(self._show_empty_state)
+            if not actively_resizing:
+                self._schedule_window_resize_finish()
+            return
+        self._update_viewer_navigation_buttons()
         if self.original is None:
             self.after_idle(self._show_empty_state)
         else:
             self._schedule_preview()
+
+    def _on_window_move_finished(self, _event: tk.Event | None = None) -> None:
+        if self._is_fullscreen or self._is_immersive:
+            return
+        self._saved_geometry = self.geometry()
+        self.rounded_window_effect.invalidate()
+        # Refresh monitor/DPI constraints once after the move, not for every
+        # intermediate pointer position.
+        self._schedule_window_resize_finish()
+
+    def _on_window_interaction_started(self, _event: tk.Event | None = None) -> None:
+        """Freeze toolbar compositing during native move/resize gestures."""
+
+        if self._viewer_toolbar_fade_job is not None:
+            try:
+                self.after_cancel(self._viewer_toolbar_fade_job)
+            except tk.TclError:
+                pass
+            self._viewer_toolbar_fade_job = None
+        self._viewer_toolbar_fade_target = None
+        if self._viewer_toolbar_auto_hide_job is not None:
+            try:
+                self.after_cancel(self._viewer_toolbar_auto_hide_job)
+            except tk.TclError:
+                pass
+            self._viewer_toolbar_auto_hide_job = None
+        if (
+            self.mode_router.active_mode is ModeId.VIEWER
+            and self.viewer_toolbar_mode_var.get() == "auto"
+        ):
+            opacity = 1.0 if self._viewer_toolbar_auto_visible else 0.0
+            self._viewer_toolbar_opacity = opacity
+            self._set_viewer_toolbar_visual_opacity(opacity)
+            if not self._viewer_toolbar_auto_visible:
+                self._update_command_dock_for_mode(self.mode_router.active_mode)
+
+    def _on_window_resize_finished(self, _event: tk.Event | None = None) -> None:
+        if self._is_fullscreen or self._is_immersive:
+            return
+        self._saved_geometry = self.geometry()
+        self.rounded_window_effect.invalidate()
+        if self.window_controller is not None:
+            self.window_controller._schedule_raise_resize_handles()
+        self._schedule_window_resize_finish()
+
+    def _schedule_window_resize_finish(self) -> None:
+        if self._window_resize_idle_job is not None:
+            try:
+                self.after_cancel(self._window_resize_idle_job)
+            except tk.TclError:
+                pass
+        self._window_resize_idle_job = self.after(140, self._finish_window_resize)
+
+    def _finish_window_resize(self) -> None:
+        self._window_resize_idle_job = None
+        if self._services_shutdown:
+            return
+        if self.dpi_manager.refresh():
+            self._update_monitor_constraints()
+            self.dpi_manager.constrain_to_current_work_area()
+            tokens = self.theme_manager.apply(self.theme_mode_var.get())
+            self._apply_thumbnail_palette(tokens)
+        if self._viewer_resize_preview_pending:
+            self._viewer_resize_preview_pending = False
+            if self.original is None:
+                self._show_empty_state()
+                self._update_viewer_navigation_buttons()
+            else:
+                self._refresh_preview()
 
     def open_file(self) -> None:
         if not self._confirm_discard_changes():
@@ -10702,7 +12675,10 @@ class ImageEditorApp(tk.Tk):
         self.lift()
         try:
             self.attributes("-topmost", True)
-            self.after(80, lambda: self.attributes("-topmost", False))
+            self.after(
+                80,
+                lambda: self.attributes("-topmost", self.viewer_topmost_var.get()),
+            )
             self.focus_force()
         except tk.TclError:
             pass
@@ -10875,19 +12851,52 @@ class ImageEditorApp(tk.Tk):
         self.selected_annotation_id = None
         self.clean_signature = None
         self.info_var.set(f"未载入 · {failed_path.name}")
-        self._set_window_title(f"{failed_path.name} — {APP_NAME}")
+        self._set_window_title(failed_path.name)
         self._invalidate_asset_registration()
 
     def _image_info_text(self) -> str:
         if self.original is None:
             return "未载入图片"
         name = self.image_path.name if self.image_path is not None else "剪贴板图片"
+        format_label = (
+            self.image_path.suffix.removeprefix(".").upper()
+            if self.image_path is not None and self.image_path.suffix
+            else (self.original.format or "图片").upper()
+        )
+        file_size = ""
+        if self.image_path is not None:
+            try:
+                file_size = self._format_bytes(self.image_path.stat().st_size)
+            except OSError:
+                file_size = ""
         position = self.navigation.position
-        suffix = f"  {position[0]} / {position[1]}" if position and position[1] > 1 else ""
-        animation = ""
+        details = [name, format_label, f"{self.original.width} × {self.original.height}"]
+        if file_size:
+            details.append(file_size)
+        if position and position[1] > 1:
+            details.append(f"第 {position[0]} / {position[1]} 张")
         if self.document is not None and self.document.metadata.is_animated:
-            animation = f"  动画图片 · {self.document.metadata.frame_count} 帧"
-        return f"{name}{suffix}  {self.original.width} x {self.original.height}{animation}"
+            details.append(f"动画 · {self.document.metadata.frame_count} 帧")
+        return "  ·  ".join(details)
+
+    def _viewer_footer_info(self) -> str:
+        if self.original is None:
+            return "未载入图片"
+        format_label = (
+            self.image_path.suffix.removeprefix(".").upper()
+            if self.image_path is not None and self.image_path.suffix
+            else (self.original.format or "图片").upper()
+        )
+        metrics = [f"{self.original.width} × {self.original.height}"]
+        if self.image_path is not None:
+            try:
+                metrics.append(self._format_bytes(self.image_path.stat().st_size))
+            except OSError:
+                pass
+        return "  ·  ".join((format_label, *metrics))
+
+    def _update_viewer_footer_info(self) -> None:
+        self.viewer_footer_var.set(self._viewer_footer_info())
 
     def _begin_animation_playback(self, path: Path) -> None:
         self._animation_generation += 1
@@ -11204,6 +13213,24 @@ class ImageEditorApp(tk.Tk):
                     return True
         if not self._confirm_discard_changes():
             return False
+        if self._viewer_gallery_scope == "favorites":
+            try:
+                available = path.is_file() and path.suffix.lower() in SUPPORTED_INPUTS
+            except OSError:
+                available = False
+            if not available:
+                stale_key = self._viewer_favorite_key(path)
+                self.viewer_favorite_paths = [
+                    saved_path
+                    for saved_path in self.viewer_favorite_paths
+                    if self._viewer_favorite_key(Path(saved_path)) != stale_key
+                ]
+                self._update_viewer_gallery_button()
+                self._save_config()
+                self.status_var.set("收藏图片已不存在，已从列表移除")
+                return False
+            self.open_path(path, confirm=False)
+            return True
         if not self.navigation.select(path):
             self.status_var.set("图片已不在当前浏览序列中")
             return False
@@ -11251,9 +13278,12 @@ class ImageEditorApp(tk.Tk):
     def _load_current_image(self, display_name: str, *, recovered: bool = False) -> None:
         if self.original is None or self.document is None:
             return
+        # Startup layout events may still have a deferred resize marker.  The
+        # freshly loaded document owns the current preview from this point on.
+        self._viewer_resize_preview_pending = False
         self._clear_annotation_drag(redraw=False)
         self.selected_annotation_id = None
-        self._set_window_title(f"{display_name} — {APP_NAME}")
+        self._set_window_title(display_name)
         self._apply_document_state(self.document.state)
         self._sync_controls_from_timeline()
         if self.mode_router.active_mode is ModeId.CONVERT:
@@ -11263,6 +13293,8 @@ class ImageEditorApp(tk.Tk):
             if self.image_path is not None
             else f"{display_name}  {self.original.width} x {self.original.height}"
         )
+        self._update_viewer_gallery_button()
+        self._update_viewer_favorite_button()
         self.crop_var.set("未设置裁剪")
         self.pan_offset = (0, 0)
         self.zoom_mode.set("适应")
@@ -11341,6 +13373,23 @@ class ImageEditorApp(tk.Tk):
         return "break"
 
     def toggle_thumbnail_sidebar(self) -> None:
+        if self.mode_router.active_mode is ModeId.VIEWER:
+            self.thumbnail_sidebar.grid_remove()
+            self.conversion_workspace.grid_remove()
+            self.columnconfigure(0, minsize=0)
+            if self.thumbnail_sidebar_visible_var.get() and not self._is_immersive:
+                self.thumbnail_filmstrip.select(self.navigation.current)
+                scope_label = "当前文件夹" if self._viewer_gallery_scope == "folder" else "我的收藏"
+                self.status_var.set(f"已显示{scope_label}图片")
+            else:
+                self.viewer_gallery_scope_bar.place_forget()
+                self.thumbnail_filmstrip.place_forget()
+                self.status_var.set("已收起图片预览")
+            self._place_canvas_status()
+            self._update_viewer_gallery_button()
+            self._save_config()
+            self._schedule_preview()
+            return
         if self.thumbnail_sidebar_visible_var.get() and not self._is_immersive:
             if self.mode_router.active_mode is ModeId.CONVERT:
                 self.thumbnail_sidebar.grid_remove()
@@ -11351,14 +13400,18 @@ class ImageEditorApp(tk.Tk):
                 self.thumbnail_sidebar.grid()
                 self.thumbnail_sidebar.select(self.navigation.current)
                 self.status_var.set("已显示当前目录缩略图")
+            self.columnconfigure(0, minsize=220)
         else:
             self.thumbnail_sidebar.grid_remove()
             self.conversion_workspace.grid_remove()
+            self.columnconfigure(0, minsize=0)
             self.status_var.set("已隐藏左侧栏")
+        self._update_viewer_gallery_button()
         self._save_config()
         self._schedule_preview()
 
     def toggle_fullscreen(self) -> None:
+        self._hide_zoom_preset_popup()
         if self._is_immersive:
             self.toggle_immersive()
             return
@@ -11366,6 +13419,8 @@ class ImageEditorApp(tk.Tk):
         if not self._set_fullscreen_state(target):
             return
         self._is_fullscreen = target
+        self._update_command_dock_for_mode(self.mode_router.active_mode)
+        self._place_canvas_status()
         self.status_var.set(
             "已进入全屏，按 F11 或 Esc 退出" if self._is_fullscreen else "已退出全屏"
         )
@@ -11386,15 +13441,16 @@ class ImageEditorApp(tk.Tk):
             self.command_dock.place_forget()
             self.status_label.place_forget()
             self.canvas_metadata.place_forget()
+            self.viewer_file_details.place_forget()
+            self.viewer_gallery_button.place_forget()
+            self.viewer_gallery_scope_bar.place_forget()
+            self.thumbnail_filmstrip.place_forget()
+            self._hide_viewer_navigation()
         else:
             self._is_fullscreen = False
             self.config(menu="")
             self.toolbar.grid_remove()
-            self.mode_bar.grid()
-            self._place_command_dock()
-            self._place_canvas_status()
-            if self.thumbnail_sidebar_visible_var.get():
-                self.thumbnail_sidebar.grid()
+            self.mode_bar.grid_remove()
             self._apply_mode_layout(self.mode_router.active_mode, announce=False)
         self._update_animation_controls()
         self._schedule_preview()
@@ -11439,6 +13495,8 @@ class ImageEditorApp(tk.Tk):
     def _handle_escape(self) -> None:
         if self._slideshow_job is not None:
             self.stop_slideshow()
+        elif self._viewer_clean_mode:
+            self.toggle_viewer_clean_mode()
         elif self._is_immersive:
             self.toggle_immersive()
         elif self._is_fullscreen:
@@ -11538,6 +13596,7 @@ class ImageEditorApp(tk.Tk):
         parent_revision = self._current_asset_revision
         self.image_loader.invalidate(path)
         self.thumbnail_sidebar.invalidate(path)
+        self.thumbnail_filmstrip.invalidate(path)
         self.navigation.files[self.navigation.index] = target
         self.thumbnail_sidebar.set_paths(self.navigation.files, target)
         self.image_path = target
@@ -11577,6 +13636,7 @@ class ImageEditorApp(tk.Tk):
         parent_revision = self._current_asset_revision
         self.image_loader.invalidate(path)
         self.thumbnail_sidebar.invalidate(path)
+        self.thumbnail_filmstrip.invalidate(path)
         self.status_var.set(f"已移动到：{target}")
         if parent_revision is not None:
             self._asset_relocation_hint = (target.resolve(strict=False), parent_revision)
@@ -11599,6 +13659,7 @@ class ImageEditorApp(tk.Tk):
             return
         self.image_loader.invalidate(path)
         self.thumbnail_sidebar.invalidate(path)
+        self.thumbnail_filmstrip.invalidate(path)
         target = self.navigation.remove(path)
         self.thumbnail_sidebar.set_paths(self.navigation.files, target)
         self.original = None
@@ -12503,6 +14564,12 @@ class ImageEditorApp(tk.Tk):
 
     def _cancel_pending_preview_updates(self) -> None:
         self._cancel_annotation_drag_preview()
+        if self._window_resize_idle_job is not None:
+            try:
+                self.after_cancel(self._window_resize_idle_job)
+            except tk.TclError:
+                pass
+            self._window_resize_idle_job = None
         if self._preview_job is not None:
             try:
                 self.after_cancel(self._preview_job)
@@ -12600,6 +14667,7 @@ class ImageEditorApp(tk.Tk):
         self._invalidate_asset_registration()
         self._asset_executor.shutdown(wait=True, cancel_futures=True)
         self._analysis_executor.shutdown(wait=True, cancel_futures=True)
+        self.thumbnail_filmstrip.shutdown()
         self.thumbnail_sidebar.shutdown()
         self.image_loader.shutdown()
         self.preview_renderer.shutdown()
@@ -13529,7 +15597,7 @@ class ImageEditorApp(tk.Tk):
     def _zoom_with_wheel(self, event: tk.Event) -> str:
         direction = 1 if event.delta > 0 else -1
         steps = max(1, abs(event.delta) // 120)
-        factor = ZOOM_STEP_FACTOR**steps
+        factor = (1 + self.viewer_zoom_step_percent / 100) ** steps
         current = self._current_zoom_percent()
         target = current * factor if direction > 0 else current / factor
         self._set_zoom_percent(target, anchor=(event.x, event.y))
@@ -13537,8 +15605,48 @@ class ImageEditorApp(tk.Tk):
 
     def step_zoom(self, direction: int) -> None:
         current = self._current_zoom_percent()
-        target = current * ZOOM_STEP_FACTOR if direction >= 0 else current / ZOOM_STEP_FACTOR
+        factor = 1 + self.viewer_zoom_step_percent / 100
+        target = current * factor if direction >= 0 else current / factor
         self._set_zoom_percent(target)
+
+    def _begin_inline_zoom_edit(self) -> None:
+        if self.mode_router.active_mode is not ModeId.VIEWER:
+            return
+        self._hide_zoom_preset_popup()
+        self._viewer_zoom_editing = True
+        self.viewer_zoom_input_var.set(str(self._current_zoom_percent()))
+        self.dock_zoom_percent_button.grid_remove()
+        self.dock_zoom_percent_entry.grid(row=0, column=5, padx=1, ipady=6)
+        self.dock_zoom_percent_entry.focus_set()
+        self.dock_zoom_percent_entry.selection_range(0, "end")
+
+    def _commit_inline_zoom_edit(self, _event: tk.Event | None = None) -> str:
+        if not self._viewer_zoom_editing:
+            return "break"
+        self._viewer_zoom_editing = False
+        value = self.viewer_zoom_input_var.get().strip().removesuffix("%").strip()
+        try:
+            percent = float(value)
+        except ValueError:
+            self.status_var.set("请输入 10 到 800 之间的缩放比例")
+        else:
+            if MIN_ZOOM_PERCENT <= percent <= MAX_ZOOM_PERCENT:
+                self._set_zoom_percent(percent)
+            else:
+                self.status_var.set("缩放比例范围为 10% 到 800%")
+        self.dock_zoom_percent_entry.grid_remove()
+        self.dock_zoom_percent_button.grid(row=0, column=5, padx=1)
+        self.canvas.focus_set()
+        return "break"
+
+    def _cancel_inline_zoom_edit(self, _event: tk.Event | None = None) -> str:
+        if not self._viewer_zoom_editing:
+            return "break"
+        self._viewer_zoom_editing = False
+        self.dock_zoom_percent_entry.grid_remove()
+        self.dock_zoom_percent_button.grid(row=0, column=5, padx=1)
+        self.canvas.focus_set()
+        return "break"
 
     def _zoom_changed(self) -> None:
         value = self.zoom_mode.get()
@@ -13564,11 +15672,15 @@ class ImageEditorApp(tk.Tk):
     def reset_view(self) -> None:
         self.zoom_mode.set("适应")
         self.pan_offset = (0, 0)
-        self.status_var.set("已适应视图")
+        self.status_var.set("图片已适合窗口")
         self._refresh_after_zoom()
 
     def _start_pan(self, event: tk.Event) -> None:
         if self.preview is None:
+            return
+        if self.mode_router.active_mode is ModeId.VIEWER and not any(self._viewer_pan_axes()):
+            self.pan_start = None
+            self.canvas.configure(cursor="arrow")
             return
         self.pan_start = (event.x, event.y)
         self.pan_start_offset = self.pan_offset
@@ -13579,12 +15691,55 @@ class ImageEditorApp(tk.Tk):
             return
         dx = event.x - self.pan_start[0]
         dy = event.y - self.pan_start[1]
+        if self.mode_router.active_mode is ModeId.VIEWER:
+            allow_x, allow_y = self._viewer_pan_axes()
+            dx = dx if allow_x else 0
+            dy = dy if allow_y else 0
         self.pan_offset = (self.pan_start_offset[0] + dx, self.pan_start_offset[1] + dy)
-        self._refresh_preview()
+        if self.mode_router.active_mode is ModeId.VIEWER:
+            self._move_cached_viewer_preview()
+        else:
+            self._refresh_preview()
+
+    def _move_cached_viewer_preview(self, *, redraw_navigation: bool = True) -> None:
+        """Move the existing viewer frame immediately without a render round-trip."""
+
+        if self.preview is None:
+            return
+        canvas_w = max(100, self.canvas.winfo_width())
+        canvas_h = max(100, self.canvas.winfo_height())
+        image_w = self.preview.width()
+        image_h = self.preview.height()
+        centered_x = (canvas_w - image_w) // 2
+        centered_y = (canvas_h - image_h) // 2
+        min_x, max_x = min(0, canvas_w - image_w), max(0, canvas_w - image_w)
+        min_y, max_y = min(0, canvas_h - image_h), max(0, canvas_h - image_h)
+        offset_x = max(min_x, min(max_x, centered_x + self.pan_offset[0]))
+        offset_y = max(min_y, min(max_y, centered_y + self.pan_offset[1]))
+        delta_x = offset_x - self.preview_offset[0]
+        delta_y = offset_y - self.preview_offset[1]
+        self.preview_offset = (offset_x, offset_y)
+        self.pan_offset = (offset_x - centered_x, offset_y - centered_y)
+        if delta_x or delta_y:
+            self.canvas.move("all", delta_x, delta_y)
+        if redraw_navigation:
+            self._draw_viewer_navigation()
+
+    def _viewer_pan_axes(self) -> tuple[bool, bool]:
+        """Return the axes where the rendered image exceeds the visible canvas."""
+
+        if self.preview is None:
+            return (False, False)
+        canvas_w = max(1, self.canvas.winfo_width())
+        canvas_h = max(1, self.canvas.winfo_height())
+        return (self.preview.width() > canvas_w, self.preview.height() > canvas_h)
 
     def _finish_pan(self, _event: tk.Event) -> None:
         self.pan_start = None
-        self._update_crop_cursor(_event)
+        if self.mode_router.active_mode is ModeId.VIEWER:
+            self.canvas.configure(cursor="fleur" if any(self._viewer_pan_axes()) else "arrow")
+        else:
+            self._update_crop_cursor(_event)
 
     def _schedule_preview(self) -> None:
         if self._preview_job:
@@ -13608,11 +15763,14 @@ class ImageEditorApp(tk.Tk):
             else None
         )
         timeline = None if conversion_recipe is not None else self._timeline_for_preview()
-        render_size = (
-            (max(100, round(canvas_w * 0.68)), max(100, round(canvas_h * 0.72)))
-            if zoom_percent is None
-            else (canvas_w, canvas_h)
-        )
+        if zoom_percent is None:
+            render_size = (
+                self._viewer_fit_render_size(canvas_w, canvas_h)
+                if self.mode_router.active_mode is ModeId.VIEWER
+                else (max(100, round(canvas_w * 0.68)), max(100, round(canvas_h * 0.72)))
+            )
+        else:
+            render_size = (canvas_w, canvas_h)
         comparison_image = (
             self._comparison_image
             if self.file_compare_var.get()
@@ -13652,6 +15810,7 @@ class ImageEditorApp(tk.Tk):
                 comparison_labels=comparison_labels,
                 display_proxy=display_proxy,
                 conversion_recipe=conversion_recipe,
+                allow_fit_upscale=self.mode_router.active_mode is ModeId.VIEWER,
             )
         except Exception:
             if comparison_image is not None:
@@ -13732,7 +15891,8 @@ class ImageEditorApp(tk.Tk):
         self.base_preview_image = frame.working
         self._base_preview_owned = frame.owns_working
         image = frame.image
-        self.preview = ImageTk.PhotoImage(image, master=self.canvas)
+        previous_preview = self.preview
+        next_preview = ImageTk.PhotoImage(image, master=self.canvas)
         self.preview_scale = frame.scale
         centered_x = (canvas_w - image.width) // 2
         centered_y = (canvas_h - image.height) // 2
@@ -13747,21 +15907,41 @@ class ImageEditorApp(tk.Tk):
             if self.zoom_mode.get() == "适应"
             else self._current_zoom_percent()
         )
-        zoom_label = (
-            f"适应 · {displayed_percent}%"
-            if self.zoom_mode.get() == "适应"
-            else f"{displayed_percent}%"
+        zoom_label = f"{displayed_percent}%"
+        self.dock_zoom_percent_button.set_text(zoom_label)
+        set_accessible_name(
+            self.dock_zoom_percent_button,
+            f"当前缩放 {zoom_label}，点击输入任意比例",
         )
         self.canvas_metadata.configure(text=f"P3 色域 · 8 位    {zoom_label}")
 
         tokens = self.theme_manager.tokens
         self.canvas.delete("all")
-        grid_color = "#dbd7dd" if tokens.name == "light" else "#211f26"
-        shadow_color = "#c8c1cc" if tokens.name == "light" else "#09080c"
-        for x in range(0, canvas_w, 28):
-            self.canvas.create_line(x, 0, x, canvas_h, fill=grid_color, tags="canvas-grid")
-        for y in range(0, canvas_h, 28):
-            self.canvas.create_line(0, y, canvas_w, y, fill=grid_color, tags="canvas-grid")
+        shadow_color = (
+            "#000000"
+            if self.mode_router.active_mode is ModeId.VIEWER
+            else ("#c8c1cc" if tokens.name == "light" else "#09080c")
+        )
+        if self.mode_router.active_mode is not ModeId.VIEWER:
+            grid_color = "#dbd7dd" if tokens.name == "light" else "#211f26"
+            for x in range(0, canvas_w, 28):
+                self.canvas.create_line(
+                    x,
+                    0,
+                    x,
+                    canvas_h,
+                    fill=grid_color,
+                    tags="canvas-grid",
+                )
+            for y in range(0, canvas_h, 28):
+                self.canvas.create_line(
+                    0,
+                    y,
+                    canvas_w,
+                    y,
+                    fill=grid_color,
+                    tags="canvas-grid",
+                )
         shadow_x = self.preview_offset[0] + 12
         shadow_y = self.preview_offset[1] + 16
         self.canvas.create_rectangle(
@@ -13774,8 +15954,14 @@ class ImageEditorApp(tk.Tk):
             tags="image-shadow",
         )
         self.canvas.create_image(
-            self.preview_offset[0], self.preview_offset[1], image=self.preview, anchor="nw"
+            self.preview_offset[0], self.preview_offset[1], image=next_preview, anchor="nw"
         )
+        # Publish the replacement only after its Canvas item exists. Retaining
+        # the old Tk image for one display frame prevents Tcl from blanking the
+        # existing item while the new one is being attached.
+        self.preview = next_preview
+        if previous_preview is not None:
+            self.after(34, lambda retained=previous_preview: None)
         if frame.split_layout is not None:
             layout = frame.split_layout
             left_label, right_label = frame.split_labels or ("编辑前", "编辑后")
@@ -13814,6 +16000,7 @@ class ImageEditorApp(tk.Tk):
             ModeId.EDIT,
         }:
             self.after_idle(self._update_estimate)
+        self._update_viewer_navigation_buttons()
         frame.image.close()
 
     def _draw_checker_bounds(self, width: int, height: int) -> None:
@@ -13875,6 +16062,17 @@ class ImageEditorApp(tk.Tk):
         if self._side_by_side_comparison_active():
             self.status_var.set("请先退出并排对比，再进行裁剪或标注")
             return
+        if self.mode_router.active_mode is ModeId.VIEWER:
+            self._update_viewer_toolbar_auto_visibility(event.y)
+            if self._viewer_markup_active:
+                self._start_annotation(event, self._viewer_markup_tool)
+                return
+            navigation_direction = self._viewer_navigation_direction_at(event.x, event.y)
+            if navigation_direction is not None:
+                self._viewer_navigation_pressed = navigation_direction
+                return
+            self._start_pan(event)
+            return
         if self._smart_mask_brush_active:
             self._start_smart_mask_stroke(event)
             return
@@ -13894,6 +16092,14 @@ class ImageEditorApp(tk.Tk):
     def _canvas_drag(self, event: tk.Event) -> None:
         if self._side_by_side_comparison_active():
             return
+        if self.mode_router.active_mode is ModeId.VIEWER:
+            if self._viewer_markup_active:
+                self._drag_annotation(event, self._viewer_markup_tool)
+                return
+            if self._viewer_navigation_pressed is not None:
+                return
+            self._drag_pan(event)
+            return
         if self._smart_mask_brush_active:
             self._drag_smart_mask_stroke(event)
             return
@@ -13912,6 +16118,19 @@ class ImageEditorApp(tk.Tk):
 
     def _canvas_release(self, event: tk.Event) -> None:
         if self._side_by_side_comparison_active():
+            return
+        if self.mode_router.active_mode is ModeId.VIEWER:
+            if self._viewer_markup_active:
+                self._finish_annotation(event, self._viewer_markup_tool)
+                return
+            navigation_direction = self._viewer_navigation_direction_at(event.x, event.y)
+            pressed_direction = self._viewer_navigation_pressed
+            self._viewer_navigation_pressed = None
+            if pressed_direction is not None:
+                if navigation_direction == pressed_direction:
+                    self.navigate_folder(pressed_direction)
+                return
+            self._finish_pan(event)
             return
         if self._smart_mask_brush_active:
             self._finish_smart_mask_stroke(event)
@@ -13933,6 +16152,24 @@ class ImageEditorApp(tk.Tk):
         if self._side_by_side_comparison_active():
             self.canvas.configure(cursor="arrow")
             return
+        if self.mode_router.active_mode is ModeId.VIEWER:
+            self._update_viewer_toolbar_auto_visibility(event.y)
+            if self._viewer_markup_active:
+                self._set_viewer_navigation_hover(None)
+                self.canvas.configure(cursor="crosshair")
+                return
+            navigation_direction = self._viewer_navigation_direction_at(event.x, event.y)
+            self._set_viewer_navigation_hover(navigation_direction)
+            self.canvas.configure(
+                cursor=(
+                    "hand2"
+                    if navigation_direction is not None
+                    else "fleur"
+                    if any(self._viewer_pan_axes())
+                    else "arrow"
+                )
+            )
+            return
         if self._smart_mask_brush_active:
             self.canvas.configure(cursor="crosshair")
             return
@@ -13952,6 +16189,11 @@ class ImageEditorApp(tk.Tk):
                 self.canvas.configure(cursor="arrow")
         else:
             self.canvas.configure(cursor="crosshair")
+
+    def _canvas_leave(self, _event: tk.Event) -> None:
+        if self.mode_router.active_mode is not ModeId.VIEWER:
+            return
+        self._set_viewer_navigation_hover(None)
 
     def _canvas_to_normalized(self, x: int, y: int) -> tuple[float, float]:
         image = self.base_preview_image
@@ -14156,6 +16398,15 @@ class ImageEditorApp(tk.Tk):
             ),
             refresh=False,
         )
+        if self.mode_router.active_mode is ModeId.VIEWER and self._viewer_markup_active:
+            self.selected_annotation_id = None
+            # Keep the final Canvas guide visible while the committed bitmap is
+            # rendered in the background. ``_display_preview`` replaces the
+            # guide and bitmap together, avoiding a release-time blink.
+            self._clear_annotation_drag(redraw=False)
+            self._refresh_preview()
+            self.status_var.set(f"已添加{ANNOTATION_TOOL_LABELS[tool]} · 可继续绘制、撤销或另存")
+            return
         self.selected_annotation_id = annotation.id
         self._clear_annotation_drag(redraw=False)
         self._set_annotation_tool("select")
@@ -14210,6 +16461,12 @@ class ImageEditorApp(tk.Tk):
     def _schedule_annotation_drag_preview(self) -> None:
         """Throttle exact drag previews while the Canvas guide remains immediate."""
 
+        if self.mode_router.active_mode is ModeId.VIEWER and self._viewer_markup_active:
+            # Viewer markup uses the lightweight Canvas guide while dragging.
+            # Re-rendering the full source image every 40 ms made large images
+            # feel sticky; the exact high-quality composite is rendered once
+            # on pointer release instead.
+            return
         if self._annotation_preview_job is not None or self._services_shutdown:
             return
         self._annotation_preview_job = self.after(40, self._render_annotation_drag_preview)
@@ -14431,7 +16688,7 @@ class ImageEditorApp(tk.Tk):
         x2, y2 = self._normalized_to_canvas(right, bottom)
         color = annotation.color
         stroke = max(
-            2,
+            3 if self._viewer_markup_active else 2,
             round(
                 annotation.stroke_width
                 * min(self.base_preview_image.size)
@@ -14450,6 +16707,8 @@ class ImageEditorApp(tk.Tk):
                 width=stroke,
                 arrow=tk.LAST if annotation.kind == "arrow" else tk.NONE,
                 arrowshape=(arrow_size, arrow_size, max(3, arrow_size // 2)),
+                capstyle=tk.ROUND,
+                joinstyle=tk.ROUND,
                 tags="annotation-ui",
             )
         elif annotation.kind == "ellipse":
@@ -14477,16 +16736,14 @@ class ImageEditorApp(tk.Tk):
                     tags="annotation-ui",
                 )
         else:
-            self.canvas.create_rectangle(
-                x1,
-                y1,
-                x2,
-                y2,
-                outline=color,
-                width=stroke,
-                dash=(4, 3),
-                tags="annotation-ui",
-            )
+            options: dict[str, object] = {
+                "outline": color,
+                "width": stroke,
+                "tags": "annotation-ui",
+            }
+            if not self._viewer_markup_active:
+                options["dash"] = (4, 3)
+            self.canvas.create_rectangle(x1, y1, x2, y2, **options)
         if self.selected_annotation_id == annotation.id:
             radius = self._hit_radius()
             for x, y in ((x1, y1), (x2, y1), (x1, y2), (x2, y2)):

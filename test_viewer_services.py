@@ -56,6 +56,20 @@ class NavigationTests(unittest.TestCase):
             self.assertEqual([path.name for path in session.files], ["image10.png", "image2.png"])
             self.assertEqual(session.source_label, "选择的文件")
 
+    def test_folder_navigation_sorts_mixed_numeric_and_text_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            for name in ("10.png", "2.png", "image3.png", "image12.png"):
+                (folder / name).touch()
+
+            session = NavigationSession.from_activation([folder / "image3.png"])
+
+            self.assertEqual(
+                [path.name for path in session.files],
+                ["2.png", "10.png", "image3.png", "image12.png"],
+            )
+            self.assertEqual(session.current.name if session.current else "", "image3.png")
+
 
 class ImageLoaderTests(unittest.TestCase):
     def test_background_loader_decodes_and_prefetches_without_unbounded_cache(self) -> None:
@@ -156,6 +170,25 @@ class ImageLoaderTests(unittest.TestCase):
         )
         self.assertEqual(frame.working.size, (40, 80))
         self.assertEqual(image.size, (80, 40))
+
+    def test_viewer_fit_can_upscale_small_image_to_available_canvas(self) -> None:
+        image = Image.new("RGB", (100, 50), "navy")
+        try:
+            frame = render_preview(
+                image,
+                EditState(),
+                compare_original=False,
+                canvas_size=(400, 300),
+                zoom_percent=None,
+                allow_fit_upscale=True,
+            )
+            try:
+                self.assertEqual(frame.image.size, (400, 200))
+                self.assertEqual(frame.scale, 4.0)
+            finally:
+                frame.close()
+        finally:
+            image.close()
 
     def test_preview_can_compare_two_different_files_with_distinct_labels(self) -> None:
         primary = Image.new("RGB", (40, 30), "red")

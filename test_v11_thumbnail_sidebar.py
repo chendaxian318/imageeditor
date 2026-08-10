@@ -549,7 +549,9 @@ class InteractionLogicTests(unittest.TestCase):
                 self.assertGreater(app.preview_ready_generation, initial_generation)
                 assert app.base_preview_image is not None
                 initial_pixel = cast(tuple[int, ...], app.base_preview_image.getpixel((48, 36)))
-                self.assertEqual(initial_pixel[:3], (255, 0, 0))
+                self.assertEqual(initial_pixel[0], 255)
+                self.assertLess(initial_pixel[1], 255)
+                self.assertEqual(initial_pixel[1], initial_pixel[2])
                 app._set_annotation_tool("select")
                 app.selected_annotation_id = arrow.id
                 app._load_annotation_style(arrow)
@@ -608,7 +610,12 @@ class InteractionLogicTests(unittest.TestCase):
                         new_pixel = cast(
                             tuple[int, ...], app.base_preview_image.getpixel((144, 84))
                         )
-                        if old_pixel[:3] == (255, 255, 255) and new_pixel[:3] == (255, 0, 0):
+                        if (
+                            old_pixel[:3] == (255, 255, 255)
+                            and new_pixel[0] == 255
+                            and new_pixel[1] < 255
+                            and new_pixel[1] == new_pixel[2]
+                        ):
                             live_pixels = (old_pixel, new_pixel)
                             break
                     time.sleep(0.01)

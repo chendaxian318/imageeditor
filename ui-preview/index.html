@@ -25,8 +25,8 @@
         <div>
           <span id="themeIndex">17 / 20</span>
           <strong id="themeName">个性化圆润</strong>
-          <small id="themeDescription">四模式常驻，命令靠近底部操作区</small>
-          <em class="layout-name" id="layoutName">底部胶囊命令坞</em>
+          <small id="themeDescription">只显示当前任务需要的命令</small>
+          <em class="layout-name" id="layoutName">模式化精简命令坞</em>
         </div>
         <button class="round-button" id="nextTheme" aria-label="下一个风格">→</button>
       </div>
@@ -53,12 +53,7 @@
 
       <section class="mode-shell" aria-label="四模式导航">
         <div class="viewer-mode-actions">
-          <button aria-label="上一张图片">‹</button>
-          <button aria-label="下一张图片">›</button>
-          <button>适应</button>
-          <button>1:1</button>
-          <button class="filled" data-mode-jump="convert">去转图</button>
-          <button data-mode-jump="edit">去改图</button>
+          <button><i data-icon="folder"></i><span>打开文件夹</span></button>
         </div>
         <nav class="mode-switcher" aria-label="工作模式">
           <button class="active" data-mode-button="viewer" aria-pressed="true">看图</button>
@@ -67,36 +62,41 @@
           <button data-mode-button="generate" aria-pressed="false">生图</button>
         </nav>
         <span class="mode-summary" id="modeSummary">浏览与预览 · 本地</span>
-        <div class="favorite-strip">
-          <span>收藏工具</span>
-          <button>打开</button><button>保存图片</button><button>撤销</button>
-          <button>重做</button><button>裁剪</button><button>配置…</button>
-        </div>
       </section>
 
       <section class="command-bar">
         <div class="command-group primary-commands">
-          <button class="tool-button accent"><i data-icon="folder"></i><span>打开</span></button>
-          <button class="tool-button"><i data-icon="save"></i><span>保存</span></button>
-          <button class="tool-button"><i data-icon="export"></i><span>导出</span></button>
+          <button class="tool-button accent" data-command-mode="viewer convert edit"><i data-icon="folder"></i><span>打开</span></button>
+          <button class="tool-button" data-command-mode="edit"><i data-icon="save"></i><span>保存</span></button>
+          <button class="tool-button" data-command-mode="convert edit"><i data-icon="export"></i><span>导出</span></button>
         </div>
-        <div class="command-divider"></div>
+        <div class="command-divider" data-command-mode="convert edit"></div>
+        <div class="command-group viewer-commands" data-command-mode="viewer">
+          <button class="icon-button" id="zoomOut" data-tooltip="缩小" aria-label="缩小图片">−</button>
+          <button class="tool-button compact" id="zoomPercent">68%</button>
+          <button class="icon-button" id="zoomIn" data-tooltip="放大" aria-label="放大图片">＋</button>
+        </div>
         <div class="command-group edit-commands">
-          <button class="icon-button" data-tooltip="撤销" aria-label="撤销"><i data-icon="undo"></i></button>
-          <button class="icon-button" data-tooltip="重做" aria-label="重做"><i data-icon="redo"></i></button>
-          <button class="icon-button active" data-tooltip="裁剪" aria-label="裁剪"><i data-icon="crop"></i></button>
-          <button class="icon-button" data-tooltip="左转" aria-label="向左旋转"><i data-icon="rotate"></i></button>
-          <button class="icon-button" data-tooltip="对比原图" aria-label="对比原图"><i data-icon="compare"></i></button>
+          <button class="icon-button" data-command-mode="edit" data-tooltip="撤销" aria-label="撤销"><i data-icon="undo"></i></button>
+          <button class="icon-button" data-command-mode="edit" data-tooltip="重做" aria-label="重做"><i data-icon="redo"></i></button>
+          <button class="icon-button active" data-command-mode="convert" data-tooltip="裁剪" aria-label="裁剪"><i data-icon="crop"></i></button>
+          <button class="icon-button" data-command-mode="viewer convert" data-tooltip="右转" aria-label="向右旋转"><i data-icon="rotate"></i></button>
+          <button class="icon-button" data-command-mode="edit" data-tooltip="对比原图" aria-label="对比原图"><i data-icon="compare"></i></button>
         </div>
-        <div class="command-spacer"></div>
-        <div class="zoom-control">
-          <button id="zoomOut" aria-label="缩小画布">−</button>
-          <span id="zoomValue">68%</span>
-          <button id="zoomIn" aria-label="放大画布">＋</button>
-        </div>
-        <button class="icon-button subtle" data-tooltip="全屏" aria-label="进入全屏"><i data-icon="fullscreen"></i></button>
-        <button class="avatar-button" aria-label="当前用户：林">林</button>
+        <button class="icon-button subtle" data-command-mode="viewer edit" data-tooltip="全屏" aria-label="进入全屏"><i data-icon="fullscreen"></i></button>
+        <button class="tool-button more-command" data-command-mode="convert edit">更多</button>
       </section>
+
+      <div class="zoom-preset-popover" id="zoomPresetPopover" hidden>
+        <button data-zoom-preset="fit">适合窗口</button>
+        <button data-zoom-preset="25">25%</button>
+        <button data-zoom-preset="50">50%</button>
+        <button data-zoom-preset="75">75%</button>
+        <button data-zoom-preset="100">100%</button>
+        <button data-zoom-preset="125">125%</button>
+        <button data-zoom-preset="150">150%</button>
+        <button data-zoom-preset="200">200%</button>
+      </div>
 
       <section class="workspace">
         <aside class="asset-panel">
@@ -129,6 +129,8 @@
         </aside>
 
         <section class="canvas-stage">
+          <button class="viewer-edge-nav previous" aria-label="上一张图片">‹</button>
+          <button class="viewer-edge-nav next" aria-label="下一张图片">›</button>
           <div class="canvas-grid"></div>
           <div class="generate-preview">
             <span class="generate-kicker">完全离线 · 不联网 · 不计费</span>
@@ -177,12 +179,13 @@
             <span class="crop-handle nw"></span><span class="crop-handle ne"></span>
             <span class="crop-handle sw"></span><span class="crop-handle se"></span>
             <div class="crop-grid"><i></i><i></i><i></i><i></i></div>
-            <div class="photo-meta"><span>6000 × 4000</span><strong>原始格式 + 调整</strong></div>
+            <div class="photo-meta"><span>6000 × 4000</span><strong>山谷清晨.jpg</strong></div>
           </div>
           <div class="canvas-status">
-            <span><i class="status-dot"></i> 已自动保存</span>
-            <span>P3 色域 · 8 位</span>
-            <button>适合画布</button>
+            <button class="gallery-trigger" id="galleryToggle" aria-expanded="false">▦ 12 张</button>
+            <span class="viewer-file-name">山谷清晨.jpg</span>
+            <span>JPEG · 6000 × 4000 · 8.4 MB</span>
+            <button>适合画布 · 27%</button>
           </div>
         </section>
 
@@ -215,8 +218,8 @@
     </main>
 
     <footer class="concept-note">
-      <div><span>设计关键词</span><strong id="themeKeywords">圆润 / 系统化 / 易用</strong></div>
-      <p id="themeNote">看图、转图、改图和生图拥有常驻一级入口；看图时隐藏参数面板，并保留收藏工具和底部胶囊命令。</p>
+      <div><span>设计关键词</span><strong id="themeKeywords">圆润 / 克制 / 易用</strong></div>
+      <p id="themeNote">默认只呈现图片；打开、切图、缩放、旋转和全屏放在底部，图库与低频功能按需展开。</p>
       <span class="prototype-badge">交互原型</span>
     </footer>
   </div>

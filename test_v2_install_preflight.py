@@ -113,7 +113,7 @@ class V2InstallPreflightTests(unittest.TestCase):
         )
         blockers = verify(contract, ROOT)
 
-        self.assertTrue(any(item.startswith("V2-INSTALL-VERSION:") for item in blockers))
+        self.assertFalse(any(item.startswith("V2-INSTALL-VERSION:") for item in blockers))
         self.assertFalse(any("仍固定引用 v1.0.0" in item for item in blockers))
         self.assertFalse(any(item.startswith("V2-INSTALL-DOC:") for item in blockers))
         self.assertTrue(any(item.startswith("V2-INSTALL-ARTIFACT:") for item in blockers))

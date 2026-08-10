@@ -10,12 +10,12 @@ from typing import Any, Protocol, cast
 
 from .diagnostics import configure_diagnostics, install_crash_handlers
 from .dpi import enable_process_dpi_awareness
+from .qt_viewer import QtViewerApplication
 from .single_instance import (
     SingleInstanceController,
     activation_message,
     request_running_app_exit,
 )
-from .ui import ImageEditorApp
 
 
 class Application(Protocol):
@@ -36,7 +36,7 @@ class ViewerApplication(Application, Protocol):
 
 def create_application(
     argv: Sequence[str] | None = None,
-    app_factory: Callable[[], Application] = ImageEditorApp,
+    app_factory: Callable[[], Application] = QtViewerApplication,
 ) -> Application:
     """Create the UI and schedule command-line images to open."""
 

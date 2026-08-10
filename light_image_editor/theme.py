@@ -51,20 +51,20 @@ LIGHT_TOKENS = ThemeTokens(
 )
 DARK_TOKENS = ThemeTokens(
     "dark",
-    "#141218",
-    "#211f26",
-    "#2b2930",
-    "#e6e0e9",
-    "#cac4d0",
-    "#d0bcff",
-    "#b69df8",
-    "#49454f",
-    "#d0bcff",
+    "#101114",
+    "#15171a",
+    "#202329",
+    "#f4f5f6",
+    "#979da5",
+    "#f1f3f5",
+    "#ffffff",
+    "#30343a",
+    "#f1f3f5",
     "#f2b8b5",
-    "#0f0e12",
-    "#211f26",
-    "#36343b",
-    "#381e72",
+    "#060708",
+    "#181a1e",
+    "#30343a",
+    "#141619",
 )
 
 
@@ -112,12 +112,12 @@ class ThemeManager:
         )
         style.configure("TFrame", background=tokens.background)
         style.configure("Surface.TFrame", background=tokens.surface)
-        style.configure("CanvasShell.TFrame", background=tokens.surface_container)
+        style.configure("CanvasShell.TFrame", background=tokens.canvas)
         style.configure("AppBar.TFrame", background=tokens.surface)
         style.configure("FloatingBar.TFrame", background=tokens.surface)
         style.configure("Toolbar.TFrame", background=tokens.surface)
         style.configure("ToolShelf.TFrame", background=tokens.surface_container)
-        style.configure("Dock.TFrame", background=tokens.surface)
+        style.configure("Dock.TFrame", background=tokens.surface_alt)
         style.configure("InspectorHeader.TFrame", background=tokens.surface)
         style.configure("TLabel", background=tokens.surface, foreground=tokens.foreground)
         style.configure("Surface.TLabel", background=tokens.surface, foreground=tokens.foreground)
@@ -162,6 +162,12 @@ class ThemeManager:
         style.configure(
             "CanvasMeta.TLabel",
             background=tokens.surface_container,
+            foreground=tokens.muted,
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.configure(
+            "ViewerStatus.TLabel",
+            background=tokens.canvas,
             foreground=tokens.muted,
             font=("Microsoft YaHei UI", 9),
         )
@@ -523,14 +529,34 @@ class ThemeManager:
                     border=tokens.border,
                 )
             elif widget_type == "MaterialButton":
-                getattr(widget, "apply_palette")(
-                    surface=tokens.surface,
-                    container=tokens.surface_container,
-                    hover=tokens.surface_high,
-                    foreground=tokens.foreground,
-                    accent=tokens.accent,
-                    on_accent=tokens.on_accent,
-                )
+                role = str(getattr(widget, "material_role", ""))
+                if role == "viewer-navigation-overlay":
+                    getattr(widget, "apply_palette")(
+                        surface=tokens.canvas,
+                        container=tokens.surface_container,
+                        hover=tokens.canvas,
+                        foreground=tokens.muted,
+                        accent=tokens.foreground,
+                        on_accent=tokens.on_accent,
+                    )
+                elif role == "viewer-toolbar":
+                    getattr(widget, "apply_palette")(
+                        surface=tokens.canvas,
+                        container=tokens.surface_high,
+                        hover=tokens.surface_high,
+                        foreground=tokens.foreground,
+                        accent=tokens.accent,
+                        on_accent=tokens.on_accent,
+                    )
+                else:
+                    getattr(widget, "apply_palette")(
+                        surface=tokens.surface,
+                        container=tokens.surface_container,
+                        hover=tokens.surface_high,
+                        foreground=tokens.foreground,
+                        accent=tokens.accent,
+                        on_accent=tokens.on_accent,
+                    )
             elif widget_type == "MaterialTabStrip":
                 getattr(widget, "apply_palette")(
                     surface=tokens.surface,

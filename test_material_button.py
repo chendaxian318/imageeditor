@@ -162,6 +162,30 @@ class MaterialButtonTests(unittest.TestCase):
         self.assertIsNone(button._tooltip_job)
         self.assertIsNone(button._tooltip_window)
 
+    def test_visual_opacity_blends_button_into_its_surface(self) -> None:
+        button = MaterialButton(
+            self.root,
+            text="100%",
+            command=lambda: None,
+            width=56,
+            height=42,
+            variant="icon",
+        )
+        button.pack()
+        button.apply_palette(
+            surface="#060708",
+            container="#181a1e",
+            hover="#30343a",
+            foreground="#f4f5f6",
+            accent="#f1f3f5",
+            on_accent="#141619",
+        )
+        button.set_visual_opacity(0.0)
+        self.root.update_idletasks()
+
+        self.assertEqual(button.visual_opacity, 0.0)
+        self.assertEqual(button._colors(), ("#060708", "#060708", None))
+
 
 class ConversionWorkspaceMaterialLayoutTests(unittest.TestCase):
     def test_action_buttons_use_material_palette_without_compact_overflow(self) -> None:

@@ -186,6 +186,7 @@ class FeatureCommandPalette(tk.Toplevel):
         active_mode: ModeId,
         on_invoke: Callable[[str], object],
         on_closed: Callable[[], None] | None = None,
+        initial_scope: FeaturePaletteScope | str = FeaturePaletteScope.ALL,
     ) -> None:
         super().__init__(parent)
         self.title("全部功能")
@@ -198,7 +199,15 @@ class FeatureCommandPalette(tk.Toplevel):
         self.filtered_items: tuple[FeaturePaletteItem, ...] = ()
         self._closed = False
         self.query_var = tk.StringVar(self, "")
-        self.scope_var = tk.StringVar(self, FeaturePaletteScope.ALL.value)
+        try:
+            parsed_scope = (
+                initial_scope
+                if isinstance(initial_scope, FeaturePaletteScope)
+                else FeaturePaletteScope(initial_scope)
+            )
+        except ValueError:
+            parsed_scope = FeaturePaletteScope.ALL
+        self.scope_var = tk.StringVar(self, parsed_scope.value)
         self.result_var = tk.StringVar(self)
         self.detail_title_var = tk.StringVar(self, "选择一项功能")
         self.detail_var = tk.StringVar(self, "输入关键词，或按模块筛选全部功能。")

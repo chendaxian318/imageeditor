@@ -99,7 +99,7 @@ class ConversionWorkspaceIntegrationTests(unittest.TestCase):
                 app.mode_buttons[ModeId.VIEWER].command()
                 app.update_idletasks()
                 self.assertFalse(app.conversion_workspace.winfo_ismapped())
-                self.assertTrue(app.thumbnail_sidebar.winfo_ismapped())
+                self.assertFalse(app.thumbnail_sidebar.winfo_ismapped())
 
                 app.mode_buttons[ModeId.CONVERT].command()
                 app.update_idletasks()

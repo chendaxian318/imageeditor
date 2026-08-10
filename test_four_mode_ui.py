@@ -109,7 +109,7 @@ class FourModeUiTests(unittest.TestCase):
             raise AssertionError(f"资源登记未完成：{app._last_asset_registration_error!r}")
         return app._current_asset_revision
 
-    def test_four_modes_are_visible_and_keep_edit_submode_state(self) -> None:
+    def test_viewer_shell_hides_other_modes_and_keeps_internal_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             app = self._create_app(directory)
             try:
@@ -123,17 +123,19 @@ class FourModeUiTests(unittest.TestCase):
                         for feature in app.feature_registry
                     )
                 )
+                self.assertFalse(app.mode_bar.winfo_ismapped())
                 self.assertTrue(
-                    all(button.winfo_ismapped() for button in app.mode_buttons.values())
+                    all(not button.winfo_ismapped() for button in app.mode_buttons.values())
                 )
-                self.assertTrue(app.viewer_mode_actions.winfo_ismapped())
-                self.assertTrue(app.favorite_toolbar.winfo_ismapped())
-                favorite_labels = {
-                    child.text
-                    for child in app.favorite_toolbar.winfo_children()
-                    if hasattr(child, "text")
-                }
-                self.assertTrue({"打开", "保存图片", "撤销", "重做", "裁剪"} <= favorite_labels)
+                self.assertFalse(app.viewer_mode_actions.winfo_ismapped())
+                self.assertFalse(app.favorite_toolbar.winfo_ismapped())
+                self.assertFalse(app.viewer_open_folder_button.winfo_ismapped())
+                self.assertTrue(
+                    all(
+                        not widget.winfo_ismapped()
+                        for widget in app._viewer_secondary_action_widgets
+                    )
+                )
                 self.assertEqual(
                     app.viewer_to_convert_button.accessible_name,
                     "将当前图片送到转图模式",
@@ -197,8 +199,8 @@ class FourModeUiTests(unittest.TestCase):
                 app.mode_buttons[ModeId.VIEWER].command()
                 app.update_idletasks()
                 self.assertFalse(app.panel_shell.winfo_ismapped())
-                self.assertTrue(app.thumbnail_sidebar.winfo_ismapped())
-                self.assertTrue(app.viewer_mode_actions.winfo_ismapped())
+                self.assertFalse(app.thumbnail_sidebar.winfo_ismapped())
+                self.assertFalse(app.viewer_mode_actions.winfo_ismapped())
                 self.assertEqual(app.thumbnail_sidebar.title_var.get(), "资源库")
             finally:
                 self._close_app(app)

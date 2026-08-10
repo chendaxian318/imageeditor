@@ -13,6 +13,10 @@ from installer import (
 
 
 class InstallerTests(unittest.TestCase):
+    def test_default_install_directory_uses_named_folder_on_d_drive(self) -> None:
+        script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
+        self.assertIn(r"DefaultDirName=D:\LightImageEditor", script)
+
     def test_installer_carries_required_legal_documents(self) -> None:
         self.assertEqual(
             LEGAL_DOCUMENTS,

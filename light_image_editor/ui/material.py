@@ -2,14 +2,110 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
 import tkinter as tk
 from collections.abc import Callable
 from tkinter import ttk
 from typing import Any
 
-from PIL import ImageDraw
+from PIL import Image, ImageColor, ImageDraw, ImageTk
 
-from .antialias import render_photo
+from .antialias import render_antialiased, render_photo
+
+
+def _set_native_window_region(
+    widget: tk.Misc,
+    bounds: tuple[int, int, int, int] | None,
+    radius: int = 0,
+) -> bool:
+    """Clip a Windows Tk child HWND so rounded corners reveal its parent."""
+
+    if os.name != "nt":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetWindowRgn.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_bool,
+        )
+        user32.SetWindowRgn.restype = ctypes.c_int
+        handle = ctypes.c_void_p(int(widget.winfo_id()))
+        if bounds is None:
+            return bool(user32.SetWindowRgn(handle, None, True))
+
+        left, top, right, bottom = bounds
+        gdi32 = ctypes.windll.gdi32
+        gdi32.CreateRoundRectRgn.argtypes = (
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+        )
+        gdi32.CreateRoundRectRgn.restype = ctypes.c_void_p
+        gdi32.DeleteObject.argtypes = (ctypes.c_void_p,)
+        gdi32.DeleteObject.restype = ctypes.c_bool
+        diameter = max(2, int(radius) * 2)
+        region = gdi32.CreateRoundRectRgn(
+            int(left),
+            int(top),
+            int(right) + 1,
+            int(bottom) + 1,
+            diameter,
+            diameter,
+        )
+        if not region:
+            return False
+        if user32.SetWindowRgn(handle, region, True):
+            # Windows owns the region after a successful SetWindowRgn call.
+            return True
+        gdi32.DeleteObject(region)
+    except (AttributeError, OSError, tk.TclError):
+        return False
+    return False
+
+
+def _set_native_window_opacity(widget: tk.Misc, opacity: float) -> bool:
+    """Let DWM fade a complete Tk child subtree without repainting each control."""
+
+    if os.name != "nt":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        get_window_long = user32.GetWindowLongW
+        set_window_long = user32.SetWindowLongW
+        set_layered_attributes = user32.SetLayeredWindowAttributes
+        get_window_long.argtypes = (ctypes.c_void_p, ctypes.c_int)
+        get_window_long.restype = ctypes.c_long
+        set_window_long.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_long)
+        set_window_long.restype = ctypes.c_long
+        set_layered_attributes.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_ubyte,
+            ctypes.c_uint,
+        )
+        set_layered_attributes.restype = ctypes.c_bool
+
+        handle = ctypes.c_void_p(int(widget.winfo_id()))
+        gwl_exstyle = -20
+        ws_ex_layered = 0x00080000
+        lwa_alpha = 0x00000002
+        current_style = int(get_window_long(handle, gwl_exstyle))
+        alpha = max(0, min(255, round(float(opacity) * 255)))
+        if alpha >= 255:
+            if current_style & ws_ex_layered:
+                set_layered_attributes(handle, 0, 255, lwa_alpha)
+                set_window_long(handle, gwl_exstyle, current_style & ~ws_ex_layered)
+            return True
+        if not current_style & ws_ex_layered:
+            set_window_long(handle, gwl_exstyle, current_style | ws_ex_layered)
+        return bool(set_layered_attributes(handle, 0, alpha, lwa_alpha))
+    except (AttributeError, OSError, ValueError, tk.TclError):
+        return False
 
 
 def rounded_rectangle_points(
@@ -51,7 +147,7 @@ def rounded_rectangle_points(
 
 
 class MaterialCommandDock(tk.Canvas):
-    """Bottom command surface with a Material You capsule silhouette."""
+    """Command surface that can render as a bottom capsule or top strip."""
 
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master, height=64, highlightthickness=0, takefocus=False)
@@ -60,25 +156,65 @@ class MaterialCommandDock(tk.Canvas):
         self._background = "#f7f2fa"
         self._container = "#ece6f0"
         self._border = "#cac4d0"
+        self._profile = "capsule"
+        self._last_configure_size: tuple[int, int] | None = None
+        self._native_region_bounds: tuple[int, int, int, int, int] | None = None
+        self._visual_opacity = 1.0
         self.bind("<Configure>", self._layout)
+
+    @property
+    def profile(self) -> str:
+        return self._profile
+
+    @property
+    def visual_opacity(self) -> float:
+        return self._visual_opacity
+
+    def set_visual_opacity(self, opacity: float) -> bool:
+        """Fade the dock and every child control as one compositor surface."""
+
+        bounded = max(0.0, min(1.0, float(opacity)))
+        self._visual_opacity = bounded
+        return _set_native_window_opacity(self, bounded)
+
+    def set_profile(self, profile: str) -> None:
+        if profile not in {"capsule", "top"}:
+            raise ValueError(f"unsupported command dock profile: {profile}")
+        self._profile = profile
+        self.content.configure(style="ViewerDock.TFrame" if profile == "top" else "Dock.TFrame")
+        self._layout()
 
     def apply_palette(self, *, background: str, container: str, border: str) -> None:
         self._background = background
         self._container = container
         self._border = border
         self.configure(background=background)
+        ttk.Style(self).configure("ViewerDock.TFrame", background=background)
         self._draw_capsule()
 
     def _layout(self, _event: tk.Event | None = None) -> None:
-        self.update_idletasks()
-        width = max(1, self.winfo_width())
+        if _event is None:
+            self.update_idletasks()
+            current_size = (max(1, self.winfo_width()), max(1, self.winfo_height()))
+        else:
+            current_size = (max(1, int(_event.width)), max(1, int(_event.height)))
+        # A relx-placed dock receives Configure events while it merely moves as
+        # the window is resized.  Its local geometry is unchanged, so rebuilding
+        # the supersampled capsule on every event only stalls the UI thread.
+        if _event is not None and current_size == self._last_configure_size:
+            return
+        self._last_configure_size = current_size
+        width, height = current_size
         content_width = min(
             max(1, self.content.winfo_reqwidth()),
             max(1, width - 28),
             920,
         )
-        content_height = min(max(1, self.content.winfo_reqheight()), 46)
-        self.coords(self._content_window, width / 2, 32)
+        content_height = min(
+            max(1, self.content.winfo_reqheight()), 52 if self._profile == "top" else 46
+        )
+        center_y = height / 2 if self._profile == "top" else 32
+        self.coords(self._content_window, width / 2, center_y)
         self.itemconfigure(
             self._content_window,
             width=content_width,
@@ -88,13 +224,30 @@ class MaterialCommandDock(tk.Canvas):
 
     def _draw_capsule(self) -> None:
         width = max(1, self.winfo_width())
-        height = max(64, self.winfo_height())
+        height = max(48 if self._profile == "top" else 64, self.winfo_height())
+        if self._profile == "top":
+            self.delete("dock_capsule")
+            self._capsule_photo = None
+            if self._native_region_bounds is not None:
+                _set_native_window_region(self, None)
+                self._native_region_bounds = None
+            return
         requested = max(140, self.content.winfo_reqwidth() + 20)
         capsule_width = min(requested, max(1, width - 20), 940)
         left = (width - capsule_width) / 2
         top = 4
         right = left + capsule_width
         bottom = 60
+        native_bounds = (
+            round(left),
+            top,
+            round(right),
+            bottom,
+            28,
+        )
+        if native_bounds != self._native_region_bounds:
+            if _set_native_window_region(self, native_bounds[:4], native_bounds[4]):
+                self._native_region_bounds = native_bounds
 
         def paint(draw: ImageDraw.ImageDraw, scale: int) -> None:
             draw.rounded_rectangle(
@@ -468,6 +621,9 @@ class MaterialButton(tk.Canvas):
         width: int = 52,
         height: int = 38,
         variant: str = "ghost",
+        icon_size: int = 13,
+        text_size: int = 10,
+        icon_name: str | None = None,
     ) -> None:
         super().__init__(
             master,
@@ -481,6 +637,9 @@ class MaterialButton(tk.Canvas):
         self.accessible_name = text
         self.command = command
         self.variant = variant
+        self.icon_name = icon_name
+        self.icon_size = max(8, int(icon_size))
+        self.text_size = max(8, int(text_size))
         self.selected = False
         self._states: set[str] = set()
         self._hovered = False
@@ -488,6 +647,10 @@ class MaterialButton(tk.Canvas):
         self._focused = False
         self._tooltip_job: str | None = None
         self._tooltip_window: tk.Toplevel | None = None
+        self._last_draw_size: tuple[int, int] | None = None
+        self._visual_opacity = 1.0
+        self._button_base_image: Image.Image | None = None
+        self._button_base_key: tuple[object, ...] | None = None
         self._surface = "#fffbfe"
         self._container = "#f3edf7"
         self._hover = "#e6e0e9"
@@ -551,6 +714,17 @@ class MaterialButton(tk.Canvas):
         self.text = text
         if self.accessible_name == previous:
             self.accessible_name = text
+        self._draw()
+
+    @property
+    def visual_opacity(self) -> float:
+        return self._visual_opacity
+
+    def set_visual_opacity(self, opacity: float) -> None:
+        bounded = max(0.0, min(1.0, float(opacity)))
+        if abs(bounded - self._visual_opacity) < 0.001:
+            return
+        self._visual_opacity = bounded
         self._draw()
 
     def configure(
@@ -684,37 +858,92 @@ class MaterialButton(tk.Canvas):
             takefocus=False if disabled else True,
         )
 
-    def _colors(self) -> tuple[str, str, str | None]:
+    def _colors(self, *, opacity: float | None = None) -> tuple[str, str, str | None]:
+        def faded(
+            fill: str,
+            foreground: str,
+            outline: str | None,
+        ) -> tuple[str, str, str | None]:
+            visual_opacity = self._visual_opacity if opacity is None else opacity
+            if visual_opacity >= 0.999:
+                return fill, foreground, outline
+            background = ImageColor.getrgb(self._surface)
+
+            def blend(color: str) -> str:
+                source = ImageColor.getrgb(color)
+                channels = tuple(
+                    round(background[index] + (source[index] - background[index]) * visual_opacity)
+                    for index in range(3)
+                )
+                return "#{:02x}{:02x}{:02x}".format(*channels)
+
+            return blend(fill), blend(foreground), blend(outline) if outline else None
+
         if self.instate(("disabled",)):
             fill = (
                 self._disabled_container if self.variant in {"filled", "tonal"} else self._surface
             )
-            return fill, self._disabled_foreground, None
+            return faded(fill, self._disabled_foreground, None)
         if self.variant == "filled":
-            return self._accent, self._on_accent, None
+            return faded(self._accent, self._on_accent, None)
+        if self.variant == "overlay":
+            if self._pressed or self._hovered:
+                return faded(self._hover, self._accent, None)
+            return faded(self._surface, self._foreground, None)
         if self.variant == "tonal":
             fill = self._hover if self._pressed or self._hovered else self._container
-            return fill, self._foreground, None
+            return faded(fill, self._foreground, None)
         if self.variant == "text":
             fill = self._hover if self._pressed or self._hovered else self._surface
-            return fill, self._accent, None
+            return faded(fill, self._accent, None)
+        if self.selected and getattr(self, "material_role", "") == "emphasized-toggle":
+            return faded(
+                getattr(self, "selected_fill", None) or self._surface,
+                getattr(self, "selected_foreground", self._foreground),
+                getattr(self, "selected_outline", None),
+            )
+        if getattr(self, "material_role", "") == "emphasized-toggle":
+            if self._pressed or self._hovered:
+                return faded(self._hover, self._foreground, None)
+            return faded(
+                self._surface,
+                getattr(self, "inactive_foreground", self._foreground),
+                None,
+            )
         if self.selected:
-            return self._container, self._accent, None
+            return faded(self._container, self._accent, None)
         if self._pressed or self._hovered:
-            return self._hover, self._foreground, None
-        return self._surface, self._foreground, self._border if self._focused else None
+            return faded(self._hover, self._foreground, None)
+        return faded(
+            self._surface,
+            self._foreground,
+            self._border if self._focused else None,
+        )
 
     def _draw(self, _event: tk.Event | None = None) -> None:
         width = max(8, self.winfo_width())
         height = max(8, self.winfo_height())
-        fill, foreground, outline = self._colors()
-        focused = self._focused and not self.instate(("disabled",))
+        current_size = (width, height)
+        if _event is not None and current_size == self._last_draw_size:
+            return
+        self._last_draw_size = current_size
+        fill, foreground, _outline = self._colors()
+        base_fill, base_foreground, base_outline = self._colors(opacity=1.0)
+        # Overlay navigation stays visually arrow-only even after a mouse click.
+        # Keyboard focus is still retained for accessibility, but it must not
+        # draw a large capsule around the edge navigation target.
+        focused = (
+            self._focused
+            and not self.instate(("disabled",))
+            and self.variant != "overlay"
+            and getattr(self, "material_role", "") != "emphasized-toggle"
+        )
         font = (
-            ("Segoe UI Symbol", 13, "normal")
-            if self.variant == "icon"
+            ("Segoe UI Symbol", self.icon_size, "normal")
+            if self.variant in {"icon", "overlay"}
             else (
                 "Microsoft YaHei UI",
-                10,
+                self.text_size,
                 "bold" if self.variant == "filled" else "normal",
             )
         )
@@ -734,27 +963,145 @@ class MaterialButton(tk.Canvas):
                 draw.rounded_rectangle(
                     (3 * scale, 3 * scale, (width - 3) * scale, (height - 3) * scale),
                     radius=round((height - 4) * scale / 2),
-                    fill=fill,
+                    fill=base_fill,
                 )
             else:
                 draw.rounded_rectangle(
                     (scale, scale, (width - 1) * scale, (height - 1) * scale),
                     radius=round(height * scale / 2),
-                    fill=fill,
-                    outline=outline,
+                    fill=base_fill,
+                    outline=base_outline,
                     width=max(1, scale),
                 )
 
-        self.delete("all")
-        self._button_photo = render_photo(width, height, paint, master=self)
-        self.create_image(0, 0, image=self._button_photo, anchor="nw")
-        self.create_text(
-            width / 2,
-            height / 2,
-            text=self.text,
-            fill=foreground,
-            font=font,
+            if self.icon_name == "pin":
+                # A small Fluent-style pushpin rendered on the same supersampled
+                # layer as the button, avoiding the jagged edges of font glyphs.
+                cx = width / 2
+                top = height / 2 - 9
+                shoulder = height / 2 + 3
+                base = height / 2 + 5
+                tip = height / 2 + 11
+                half_cap = 5
+                half_body = 3.25
+                half_base = 6.25
+                stroke = max(1, round(1.65 * scale))
+
+                def point(x: float, y: float) -> tuple[int, int]:
+                    return round(x * scale), round(y * scale)
+
+                pin_path = [
+                    point(cx - half_cap, top),
+                    point(cx + half_cap, top),
+                    point(cx + half_body, shoulder),
+                    point(cx + half_base, base),
+                    point(cx - half_base, base),
+                    point(cx - half_body, shoulder),
+                    point(cx - half_cap, top),
+                ]
+                if self.selected:
+                    draw.polygon(pin_path[:-1], fill=base_foreground)
+                    filled_stem = max(stroke, round(2.15 * scale))
+                    draw.line(
+                        [point(cx, base - 0.5), point(cx, tip)],
+                        fill=base_foreground,
+                        width=filled_stem,
+                    )
+                    draw.polygon(
+                        [
+                            point(cx - 1.8, tip - 1.5),
+                            point(cx + 1.8, tip - 1.5),
+                            point(cx, tip + 1.2),
+                        ],
+                        fill=base_foreground,
+                    )
+                else:
+                    draw.line(pin_path, fill=base_foreground, width=stroke, joint="curve")
+                    draw.line(
+                        [point(cx, base), point(cx, tip)],
+                        fill=base_foreground,
+                        width=stroke,
+                    )
+            elif self.icon_name == "overlapping_rectangles":
+                # Fluent-style fullscreen/window icon: two fine outlined panes
+                # with the front pane cleanly occluding the rear one.
+                cx = width / 2
+                cy = height / 2
+                stroke = max(1, round(1.25 * scale))
+                radius = max(1, round(1.4 * scale))
+
+                def box(
+                    left: float,
+                    top: float,
+                    right: float,
+                    bottom: float,
+                ) -> tuple[int, int, int, int]:
+                    return (
+                        round(left * scale),
+                        round(top * scale),
+                        round(right * scale),
+                        round(bottom * scale),
+                    )
+
+                draw.rounded_rectangle(
+                    box(cx - 3, cy - 6, cx + 6, cy + 3),
+                    radius=radius,
+                    outline=base_foreground,
+                    width=stroke,
+                )
+                draw.rounded_rectangle(
+                    box(cx - 6, cy - 3, cx + 3, cy + 6),
+                    radius=radius,
+                    fill=base_fill,
+                    outline=base_foreground,
+                    width=stroke,
+                )
+
+        base_key = (
+            width,
+            height,
+            base_fill,
+            base_foreground,
+            base_outline,
+            focused,
+            self._focus,
+            self._surface,
+            self.icon_name,
+            self.selected,
         )
+        if self._button_base_image is None or self._button_base_key != base_key:
+            if self._button_base_image is not None:
+                self._button_base_image.close()
+            self._button_base_image = render_antialiased(width, height, paint)
+            self._button_base_key = base_key
+
+        button_image = self._button_base_image
+        faded_image: Image.Image | None = None
+        if self._visual_opacity < 0.999:
+            surface_image = Image.new("RGBA", (width, height), self._surface)
+            composed_image = Image.alpha_composite(surface_image, button_image)
+            faded_image = Image.blend(
+                surface_image,
+                composed_image,
+                self._visual_opacity,
+            )
+            surface_image.close()
+            composed_image.close()
+            button_image = faded_image
+
+        self.delete("all")
+        self._button_photo = ImageTk.PhotoImage(button_image, master=self)
+        if faded_image is not None:
+            faded_image.close()
+        self.create_image(0, 0, image=self._button_photo, anchor="nw")
+        if self.icon_name is None:
+            self.create_text(
+                width / 2,
+                height / 2,
+                text=self.text,
+                fill=foreground,
+                font=font,
+            )
 
     def _enter(self, _event: tk.Event) -> None:
         if self.instate(("disabled",)):
@@ -778,7 +1125,7 @@ class MaterialButton(tk.Canvas):
         return "break"
 
     def _tooltip_text(self) -> str:
-        if self.variant != "icon":
+        if self.variant not in {"icon", "overlay"}:
             return ""
         label = str(getattr(self, "accessible_name", "")).strip()
         return label if label and label != self.text else ""

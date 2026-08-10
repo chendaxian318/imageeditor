@@ -15,7 +15,7 @@ const themes = [
   { id: "copper", layout: "workshop-reverse", layoutName: "工坊式反向三栏", name: "铜色工坊", desc: "先参数、后画布、再底片", keywords: "质感 / 工具 / 成熟", note: "按照参数—画布—底片的顺序组织三栏，像传统暗房工作台，适合摄影师。", colors: ["#d88b52", "#251b15"] },
   { id: "film", layout: "darkroom-filmstrip", layoutName: "暗房画布 + 接触印样带", name: "单色胶片", desc: "底部胶片带模拟暗房挑片", keywords: "胶片 / 纯粹 / 影像", note: "中央暗房画布配底部接触印样带，参数固定在右侧，强化连续挑片与冲印感。", colors: ["#f3f3f0", "#1b1b1b"] },
   { id: "chrome", layout: "classic-suite", layoutName: "经典桌面软件套件", name: "千禧铬光", desc: "标题栏、命令栏和功能区层层展开", keywords: "复古未来 / 金属 / 数字", note: "保留完整标题栏与双层命令感，三栏紧密排布，复现经典桌面创作软件的信息密度。", colors: ["#315cff", "#dbe4f7"] },
-  { id: "material", layout: "material-dock", layoutName: "底部胶囊命令坞", name: "个性化圆润", desc: "四模式常驻，命令靠近底部操作区", keywords: "圆润 / 系统化 / 易用", note: "看图、转图、改图和生图拥有常驻一级入口；看图时隐藏参数面板，并保留收藏工具和底部胶囊命令。", colors: ["#67507a", "#f7f2fa"] },
+  { id: "material", layout: "material-dock", layoutName: "沉浸式看图命令坞", name: "个性化圆润", desc: "只保留看图所需操作", keywords: "圆润 / 沉浸 / 易用", note: "默认只呈现图片；打开、切图、缩放、旋转和全屏放在底部，图库与低频功能按需展开。", colors: ["#67507a", "#f7f2fa"] },
   { id: "blueprint", layout: "blueprint-reverse", layoutName: "参数先行工程视图", name: "蓝图工程", desc: "尺寸与参数获得最高优先级", keywords: "工程 / 参数 / 精密", note: "左侧参数面板优先，右侧资源栏用于数据集切换，符合工程与批处理思维。", colors: ["#66c5ff", "#0b2541"] },
   { id: "editorial", layout: "editorial-contact", layoutName: "顶部接触印样 + 左侧编辑", name: "编辑工坊", desc: "像编辑台一样先选片再精修", keywords: "编辑感 / 高级 / 作品导向", note: "图库成为顶部横向接触印样，左侧为编辑参数，画布像杂志版面一样占据主体。", colors: ["#1c5145", "#fbfaf7"] },
   { id: "fluent", layout: "fluent-rail", layoutName: "视窗折叠资源轨", name: "流畅视窗", desc: "资源栏收窄，保持熟悉的原生结构", keywords: "原生 / 熟悉 / 稳妥", note: "图库压缩成图标式资源轨，仍保留系统用户熟悉的顶部命令栏与右侧属性面板。", colors: ["#0067c0", "#eef5fb"] }
@@ -115,11 +115,24 @@ document.querySelectorAll('.slider-row input').forEach((input) => input.addEvent
 let zoom = 68;
 function applyZoom(delta) {
   zoom = Math.min(110, Math.max(40, zoom + delta));
-  document.getElementById("zoomValue").textContent = `${zoom}%`;
   document.getElementById("photoFrame").style.transform = `scale(${zoom / 74})`;
+  document.getElementById("zoomPercent").textContent = `${zoom}%`;
 }
 document.getElementById("zoomOut").addEventListener("click", () => applyZoom(-6));
 document.getElementById("zoomIn").addEventListener("click", () => applyZoom(6));
+const zoomPresetPopover = document.getElementById("zoomPresetPopover");
+document.getElementById("zoomPercent").addEventListener("click", () => {
+  zoomPresetPopover.hidden = !zoomPresetPopover.hidden;
+});
+document.querySelectorAll("[data-zoom-preset]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const preset = button.dataset.zoomPreset;
+    zoom = preset === "fit" ? 68 : Number(preset);
+    document.getElementById("photoFrame").style.transform = preset === "fit" ? "" : `scale(${zoom / 74})`;
+    document.getElementById("zoomPercent").textContent = `${zoom}%`;
+    zoomPresetPopover.hidden = true;
+  });
+});
 
 const modes = {
   viewer: { summary: "浏览与预览 · 本地", title: "资源库", meta: "示例图片 · 5 张", inspector: "adjust" },
@@ -145,8 +158,19 @@ function setMode(mode) {
     button.classList.toggle("active", selected);
     button.setAttribute("aria-selected", String(selected));
   });
+  document.querySelectorAll("[data-command-mode]").forEach((element) => {
+    const visible = element.dataset.commandMode.split(" ").includes(next);
+    element.hidden = !visible;
+  });
   localStorage.setItem("lie-ui-mode", next);
 }
+
+const galleryToggle = document.getElementById("galleryToggle");
+galleryToggle?.addEventListener("click", () => {
+  const isOpen = document.body.dataset.gallery === "open";
+  document.body.dataset.gallery = isOpen ? "closed" : "open";
+  galleryToggle.setAttribute("aria-expanded", String(!isOpen));
+});
 
 document.querySelectorAll("[data-mode-button]").forEach((button) => {
   button.addEventListener("click", () => setMode(button.dataset.modeButton));
@@ -169,4 +193,4 @@ document.querySelectorAll("[data-inspector]").forEach((button) => {
 
 const saved = themes.findIndex((theme) => theme.id === localStorage.getItem("lie-ui-theme"));
 setTheme(saved >= 0 ? saved : 16);
-setMode(localStorage.getItem("lie-ui-mode") || "viewer");
+setMode("viewer");

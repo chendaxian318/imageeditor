@@ -8,6 +8,8 @@ import sys
 import tkinter as tk
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
+from typing import Any
 
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWCP_ROUND = 2
@@ -239,6 +241,94 @@ def _show_window(handle: int, command: int) -> bool:
         return False
 
 
+def _set_native_window_position(
+    handle: int | None,
+    left: int,
+    top: int,
+) -> bool:
+    """Move a top-level without routing every pointer sample through Tcl."""
+
+    if os.name != "nt" or handle is None:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetWindowPos.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        )
+        user32.SetWindowPos.restype = ctypes.c_bool
+        swp_nosize = 0x0001
+        swp_nozorder = 0x0004
+        swp_noactivate = 0x0010
+        moved = bool(
+            user32.SetWindowPos(
+                ctypes.c_void_p(handle),
+                None,
+                int(left),
+                int(top),
+                0,
+                0,
+                swp_nosize | swp_nozorder | swp_noactivate,
+            )
+        )
+        if moved:
+            try:
+                dwmapi = ctypes.windll.dwmapi
+                dwmapi.DwmFlush.argtypes = ()
+                dwmapi.DwmFlush.restype = ctypes.c_long
+                dwmapi.DwmFlush()
+            except (AttributeError, OSError):
+                pass
+        return moved
+    except (AttributeError, OSError, tk.TclError):
+        return False
+
+
+def _set_native_window_bounds(
+    handle: int | None,
+    left: int,
+    top: int,
+    width: int,
+    height: int,
+) -> bool:
+    """Resize and move a top-level without a Tcl geometry round trip."""
+
+    if os.name != "nt" or handle is None:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetWindowPos.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        )
+        user32.SetWindowPos.restype = ctypes.c_bool
+        swp_nozorder = 0x0004
+        swp_noactivate = 0x0010
+        return bool(
+            user32.SetWindowPos(
+                ctypes.c_void_p(handle),
+                None,
+                int(left),
+                int(top),
+                max(1, int(width)),
+                max(1, int(height)),
+                swp_nozorder | swp_noactivate,
+            )
+        )
+    except (AttributeError, OSError):
+        return False
+
+
 def _promote_to_taskbar_window(handle: int) -> bool:
     """Convert Tk's override-redirect tool window into a normal taskbar app."""
 
@@ -286,22 +376,35 @@ class BorderlessWindowController:
     """Window movement and sizing for the Windows 10 rounded custom frame."""
 
     window: tk.Tk | tk.Toplevel
-    edge_size: int = 7
+    edge_size: int = 9
 
     def __post_init__(self) -> None:
         self._style_job: str | None = None
         self._drag_offset: tuple[int, int] | None = None
+        self._drag_frame_job: str | None = None
+        self._pending_drag_position: tuple[int, int] | None = None
+        self._drag_window_handle: int | None = None
         self._drag_ratio = 0.5
         self._resize_direction = ""
         self._resize_origin: tuple[int, int, int, int, int, int] | None = None
+        self._resize_frame_job: str | None = None
+        self._pending_resize_bounds: tuple[int, int, int, int] | None = None
+        self._resize_window_handle: int | None = None
         self._restore_rect: tuple[int, int, int, int] | None = None
         self._maximized = False
         self._fullscreen = False
         self._fullscreen_rect: tuple[int, int, int, int] | None = None
         self._fullscreen_was_maximized = False
         self._state_listener: Callable[[bool], None] | None = None
+        self._resize_handles: dict[str, tk.Frame] = {}
+        self._resize_handle_layouts: dict[str, dict[str, Any]] = {}
+        self._titlebar_handle_background: str | None = None
+        self._body_handle_background: str | None = None
+        self._handle_raise_job: str | None = None
         self.window.overrideredirect(True)
+        self._create_resize_handles()
         self.window.bind("<Map>", self._mapped, add="+")
+        self.window.bind("<Configure>", self._window_configured, add="+")
         self.window.bind("<ButtonPress-1>", self._begin_resize, add="+")
         self.window.bind("<B1-Motion>", self._resize, add="+")
         self.window.bind("<ButtonRelease-1>", self._end_resize, add="+")
@@ -316,9 +419,39 @@ class BorderlessWindowController:
     def fullscreen(self) -> bool:
         return self._fullscreen
 
+    @property
+    def moving(self) -> bool:
+        return self._drag_offset is not None
+
+    @property
+    def resizing(self) -> bool:
+        return self._resize_origin is not None
+
     def set_state_listener(self, listener: Callable[[bool], None]) -> None:
         self._state_listener = listener
         listener(self._maximized)
+
+    def set_titlebar_handle_background(self, background: str) -> None:
+        """Blend the top resize hit targets into the custom title bar."""
+
+        self._titlebar_handle_background = background
+        for direction in ("n", "nw", "ne"):
+            handle = self._resize_handles.get(direction)
+            if handle is not None:
+                handle.configure(background=background)
+
+    def set_resize_handle_backgrounds(
+        self,
+        *,
+        titlebar: str,
+        body: str,
+    ) -> None:
+        """Blend invisible resize targets with the surface beneath each edge."""
+
+        self._titlebar_handle_background = titlebar
+        self._body_handle_background = body
+        for direction, handle in self._resize_handles.items():
+            handle.configure(background=titlebar if direction in {"n", "nw", "ne"} else body)
 
     def bind_drag_surface(self, *widgets: tk.Misc) -> None:
         for widget in widgets:
@@ -381,6 +514,7 @@ class BorderlessWindowController:
             width = max(1, work.right - work.left)
             height = max(1, work.bottom - work.top)
         self._maximized = True
+        self._set_resize_handles_visible(False)
         self._notify_state()
         self.window.geometry(f"{width}x{height}{left:+d}{top:+d}")
 
@@ -389,6 +523,7 @@ class BorderlessWindowController:
             return
         restore = self._restore_rect
         self._maximized = False
+        self._set_resize_handles_visible(True)
         self._notify_state()
         if restore is None:
             return
@@ -421,11 +556,13 @@ class BorderlessWindowController:
                 width = max(1, bounds.right - bounds.left)
                 height = max(1, bounds.bottom - bounds.top)
             self._fullscreen = True
+            self._set_resize_handles_visible(False)
             self.window.geometry(f"{width}x{height}{left:+d}{top:+d}")
             return True
         restore = self._fullscreen_rect
         self._fullscreen = False
         self._maximized = self._fullscreen_was_maximized
+        self._set_resize_handles_visible(not self._maximized)
         self._notify_state()
         if restore is not None:
             left, top, width, height = restore
@@ -435,6 +572,132 @@ class BorderlessWindowController:
     def _mapped(self, event: tk.Event) -> None:
         if event.widget is self.window:
             self.schedule_native_style()
+            self._set_resize_handles_visible(not self._maximized and not self._fullscreen)
+
+    def _window_configured(self, event: tk.Event) -> None:
+        if (
+            event.widget is self.window
+            and not self.moving
+            and not self.resizing
+            and not self._maximized
+            and not self._fullscreen
+        ):
+            self._schedule_raise_resize_handles()
+
+    def _create_resize_handles(self) -> None:
+        edge = max(6, int(self.edge_size))
+        corner = max(14, edge * 2)
+        layouts: dict[str, dict[str, Any]] = {
+            "n": {
+                "relx": 0.0,
+                "rely": 0.0,
+                "x": corner,
+                "anchor": "nw",
+                "relwidth": 1.0,
+                "width": -2 * corner,
+                "height": edge,
+            },
+            "s": {
+                "relx": 0.0,
+                "rely": 1.0,
+                "x": corner,
+                "anchor": "sw",
+                "relwidth": 1.0,
+                "width": -2 * corner,
+                "height": edge,
+            },
+            "w": {
+                "relx": 0.0,
+                "rely": 0.0,
+                "y": corner,
+                "anchor": "nw",
+                "relheight": 1.0,
+                "height": -2 * corner,
+                "width": edge,
+            },
+            "e": {
+                "relx": 1.0,
+                "rely": 0.0,
+                "y": corner,
+                "anchor": "ne",
+                "relheight": 1.0,
+                "height": -2 * corner,
+                "width": edge,
+            },
+            "nw": {"relx": 0.0, "rely": 0.0, "anchor": "nw", "width": corner, "height": corner},
+            "ne": {"relx": 1.0, "rely": 0.0, "anchor": "ne", "width": corner, "height": corner},
+            "sw": {"relx": 0.0, "rely": 1.0, "anchor": "sw", "width": corner, "height": corner},
+            "se": {"relx": 1.0, "rely": 1.0, "anchor": "se", "width": corner, "height": corner},
+        }
+        cursors = {
+            "n": "size_ns",
+            "s": "size_ns",
+            "e": "size_we",
+            "w": "size_we",
+            "nw": "size_nw_se",
+            "se": "size_nw_se",
+            "ne": "size_ne_sw",
+            "sw": "size_ne_sw",
+        }
+        background = str(self.window.cget("background"))
+        for direction, layout in layouts.items():
+            handle = tk.Frame(
+                self.window,
+                borderwidth=0,
+                highlightthickness=0,
+                background=background,
+                cursor=cursors[direction],
+                takefocus=False,
+            )
+            handle.bind(
+                "<ButtonPress-1>",
+                partial(self._begin_handle_resize, direction),
+            )
+            handle.bind("<B1-Motion>", self._resize)
+            handle.bind("<ButtonRelease-1>", self._end_resize)
+            self._resize_handles[direction] = handle
+            self._resize_handle_layouts[direction] = layout
+            handle.place(**layout)
+        self._schedule_raise_resize_handles()
+
+    def _set_resize_handles_visible(self, visible: bool) -> None:
+        for direction, handle in self._resize_handles.items():
+            if visible:
+                handle.place(**self._resize_handle_layouts[direction])
+            else:
+                handle.place_forget()
+        if visible:
+            self._schedule_raise_resize_handles()
+
+    def _schedule_raise_resize_handles(self) -> None:
+        if self._handle_raise_job is not None:
+            try:
+                self.window.after_cancel(self._handle_raise_job)
+            except tk.TclError:
+                pass
+            self._handle_raise_job = None
+        try:
+            self._handle_raise_job = self.window.after(80, self._raise_resize_handles)
+        except tk.TclError:
+            self._handle_raise_job = None
+
+    def _raise_resize_handles(self) -> None:
+        self._handle_raise_job = None
+        try:
+            background = self._body_handle_background or str(self.window.cget("background"))
+            for direction, handle in self._resize_handles.items():
+                if handle.winfo_ismapped():
+                    handle.configure(
+                        background=(
+                            self._titlebar_handle_background
+                            if direction in {"n", "nw", "ne"}
+                            and self._titlebar_handle_background is not None
+                            else background
+                        )
+                    )
+                    handle.lift()
+        except tk.TclError:
+            return
 
     def _ensure_native_style(self) -> None:
         self._style_job = None
@@ -454,6 +717,10 @@ class BorderlessWindowController:
         if self._fullscreen:
             return "break"
         try:
+            self._drag_window_handle = _root_window_handle(self.window)
+        except tk.TclError:
+            self._drag_window_handle = None
+        try:
             width = max(1, self.window.winfo_width())
             self._drag_ratio = max(
                 0.0,
@@ -465,6 +732,19 @@ class BorderlessWindowController:
             )
         except tk.TclError:
             self._drag_offset = None
+        if (
+            self._drag_offset is not None
+            and self._drag_window_handle is not None
+            and not self._maximized
+        ):
+            # A Win32 region on an override-redirect window can leave stale
+            # title-bar strips while the surface moves quickly.  Use a square
+            # compositor surface during the gesture and restore rounding once.
+            _clear_window_region(self._drag_window_handle)
+            try:
+                self.window.event_generate("<<WindowMoveStarted>>")
+            except tk.TclError:
+                pass
         return "break"
 
     def _drag(self, event: tk.Event) -> str:
@@ -484,11 +764,38 @@ class BorderlessWindowController:
             return "break"
         left = event.x_root - self._drag_offset[0]
         top = event.y_root - self._drag_offset[1]
-        self.window.geometry(f"{left:+d}{top:+d}")
+        self._pending_drag_position = (left, top)
+        if self._drag_frame_job is None:
+            # Keep Tk's event loop alive, but commit no more than one position
+            # per 60 Hz frame.  _set_native_window_position waits for DWM so a
+            # captured/displayed frame cannot contain several stale title bars.
+            self._drag_frame_job = self.window.after(16, self._flush_drag_position)
         return "break"
 
+    def _flush_drag_position(self) -> None:
+        self._drag_frame_job = None
+        position = self._pending_drag_position
+        self._pending_drag_position = None
+        if position is None:
+            return
+        left, top = position
+        if not _set_native_window_position(self._drag_window_handle, left, top):
+            self.window.geometry(f"{left:+d}{top:+d}")
+
     def _end_drag(self, _event: tk.Event) -> str:
+        if self._drag_frame_job is not None:
+            try:
+                self.window.after_cancel(self._drag_frame_job)
+            except tk.TclError:
+                pass
+            self._drag_frame_job = None
+        self._flush_drag_position()
         self._drag_offset = None
+        self._drag_window_handle = None
+        try:
+            self.window.after_idle(lambda: self.window.event_generate("<<WindowMoveFinished>>"))
+        except tk.TclError:
+            pass
         return "break"
 
     def _toggle_from_titlebar(self, _event: tk.Event) -> str:
@@ -520,6 +827,7 @@ class BorderlessWindowController:
         if not direction:
             return None
         try:
+            self._resize_window_handle = _root_window_handle(self.window)
             self._resize_origin = (
                 event.x_root,
                 event.y_root,
@@ -529,9 +837,43 @@ class BorderlessWindowController:
                 self.window.winfo_height(),
             )
         except tk.TclError:
+            self._resize_window_handle = None
             return None
+        if self._resize_window_handle is not None:
+            _clear_window_region(self._resize_window_handle)
         self._resize_direction = direction
+        self._notify_resize_started()
         return "break"
+
+    def _begin_handle_resize(self, direction: str, event: tk.Event) -> str:
+        if self._maximized or self._fullscreen:
+            return "break"
+        try:
+            self._resize_window_handle = _root_window_handle(self.window)
+            self._resize_origin = (
+                event.x_root,
+                event.y_root,
+                self.window.winfo_x(),
+                self.window.winfo_y(),
+                self.window.winfo_width(),
+                self.window.winfo_height(),
+            )
+        except tk.TclError:
+            self._resize_window_handle = None
+            self._resize_origin = None
+            self._resize_direction = ""
+            return "break"
+        if self._resize_window_handle is not None:
+            _clear_window_region(self._resize_window_handle)
+        self._resize_direction = direction
+        self._notify_resize_started()
+        return "break"
+
+    def _notify_resize_started(self) -> None:
+        try:
+            self.window.event_generate("<<WindowResizeStarted>>")
+        except tk.TclError:
+            pass
 
     def _resize(self, event: tk.Event) -> str | None:
         origin = self._resize_origin
@@ -553,18 +895,58 @@ class BorderlessWindowController:
         if "n" in direction:
             new_height = max(min_height, height - delta_y)
             new_top = top + height - new_height
-        self.window.geometry(f"{new_width}x{new_height}{new_left:+d}{new_top:+d}")
+        self._pending_resize_bounds = (new_left, new_top, new_width, new_height)
+        if self._resize_frame_job is None:
+            # A stable 60 Hz ceiling leaves Tk enough time to complete its
+            # geometry-manager pass between native WM_SIZE notifications.
+            self._resize_frame_job = self.window.after(16, self._flush_resize_bounds)
         return "break"
+
+    def _flush_resize_bounds(self) -> None:
+        self._resize_frame_job = None
+        bounds = self._pending_resize_bounds
+        self._pending_resize_bounds = None
+        if bounds is None:
+            return
+        left, top, width, height = bounds
+        used_native_resize = _set_native_window_bounds(
+            self._resize_window_handle,
+            left,
+            top,
+            width,
+            height,
+        )
+        if not used_native_resize:
+            self.window.geometry(f"{width}x{height}{left:+d}{top:+d}")
+        try:
+            # Configure/pack/place work is normally deferred until Tk is idle.
+            # Dense pointer input can starve that work, leaving the title bar
+            # and toolbar visibly behind the already-resized native window.
+            self.window.update_idletasks()
+        except tk.TclError:
+            pass
 
     def _end_resize(self, _event: tk.Event) -> str | None:
         if self._resize_origin is None:
             return None
+        if self._resize_frame_job is not None:
+            try:
+                self.window.after_cancel(self._resize_frame_job)
+            except tk.TclError:
+                pass
+            self._resize_frame_job = None
+        self._flush_resize_bounds()
         self._resize_origin = None
         self._resize_direction = ""
+        self._resize_window_handle = None
+        try:
+            self.window.after_idle(lambda: self.window.event_generate("<<WindowResizeFinished>>"))
+        except tk.TclError:
+            pass
         return "break"
 
     def _update_resize_cursor(self, event: tk.Event) -> None:
-        if self._maximized or self._fullscreen or self._drag_offset is not None:
+        if self._maximized or self._fullscreen or self.moving or self.resizing:
             return
         direction = self._edge_at(event.x_root, event.y_root)
         cursor = {
@@ -592,10 +974,13 @@ class RoundedWindowEffect:
     allow_region_fallback: bool = False
     maximized_provider: Callable[[], bool] | None = None
     fullscreen_provider: Callable[[], bool] | None = None
+    resizing_provider: Callable[[], bool] | None = None
+    moving_provider: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
         self._job: str | None = None
         self._last_region: tuple[int, int, int] | None = None
+        self._last_configure_size: tuple[int, int] | None = None
         self._dwm_supported: bool | None = None
         self.window.bind("<Map>", self.schedule, add="+")
         self.window.bind("<Configure>", self.schedule, add="+")
@@ -608,12 +993,27 @@ class RoundedWindowEffect:
     def schedule(self, _event: tk.Event | None = None) -> None:
         if not self.active:
             return
+        if self.resizing_provider is not None and self.resizing_provider():
+            return
+        if self.moving_provider is not None and self.moving_provider():
+            return
+        if _event is not None and _event.type == tk.EventType.Configure:
+            current_size = (max(1, int(_event.width)), max(1, int(_event.height)))
+            if current_size == self._last_configure_size:
+                return
+            self._last_configure_size = current_size
         if self._job is not None:
             return
         try:
             self._job = self.window.after(16, self.apply)
         except tk.TclError:
             self._job = None
+
+    def invalidate(self) -> None:
+        """Forget a cleared native region and restore it on the next frame."""
+
+        self._last_region = None
+        self.schedule()
 
     def apply(self) -> None:
         self._job = None

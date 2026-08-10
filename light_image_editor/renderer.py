@@ -428,22 +428,39 @@ def _apply_annotations(
         return image
     original_mode = image.mode
     result = image.convert("RGBA")
-    overlay = Image.new("RGBA", result.size, (0, 0, 0, 0))
+    # Supersample vector annotations on ordinary desktop-sized images.  At
+    # higher resolutions the source pixels already provide sufficient edge
+    # detail, so the 2x layer is capped to avoid excessive memory use.
+    vector_scale = 2 if result.width * result.height <= 3_000_000 else 1
+    overlay_size = (result.width * vector_scale, result.height * vector_scale)
+    overlay = Image.new("RGBA", overlay_size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     overlay_dirty = False
+
+    def composite_overlay() -> None:
+        nonlocal result, overlay, draw, overlay_dirty
+        if not overlay_dirty:
+            return
+        if vector_scale > 1:
+            antialiased = overlay.resize(result.size, Image.Resampling.LANCZOS)
+            result = Image.alpha_composite(result, antialiased)
+            antialiased.close()
+        else:
+            result = Image.alpha_composite(result, overlay)
+        overlay.close()
+        overlay = Image.new("RGBA", overlay_size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        overlay_dirty = False
+
     for annotation in annotations:
         if annotation.kind in {"mosaic", "blur"}:
-            if overlay_dirty:
-                result = Image.alpha_composite(result, overlay)
-                overlay = Image.new("RGBA", result.size, (0, 0, 0, 0))
-                draw = ImageDraw.Draw(overlay)
-                overlay_dirty = False
+            composite_overlay()
             result = _apply_region_effect(result, annotation)
             continue
-        _draw_annotation(draw, result.size, annotation)
+        _draw_annotation(draw, overlay_size, annotation)
         overlay_dirty = True
-    if overlay_dirty:
-        result = Image.alpha_composite(result, overlay)
+    composite_overlay()
+    overlay.close()
     if original_mode == "RGBA":
         return result
     if original_mode == "LA":

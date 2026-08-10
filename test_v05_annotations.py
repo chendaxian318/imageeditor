@@ -81,6 +81,26 @@ class AnnotationModelTests(unittest.TestCase):
 
 
 class AnnotationRendererTests(unittest.TestCase):
+    def test_desktop_sized_arrow_uses_antialiased_edge_pixels(self) -> None:
+        base = Image.new("RGB", (320, 240), "white")
+        arrow = AnnotationObject.create(
+            "arrow",
+            (0.15, 0.75, 0.82, 0.22),
+            color="#ff0000",
+            stroke_width=5,
+        )
+        timeline = EditTimeline()
+        timeline.commit(
+            EditCommand.create("annotation_add", {"object": arrow.to_json()}, "添加箭头")
+        )
+
+        rendered = render_image(base, timeline).convert("RGB")
+        extrema = rendered.getextrema()
+        self.assertEqual(extrema[0], (255, 255))
+        self.assertLess(extrema[1][0], 255)
+        green_histogram = rendered.getchannel("G").histogram()
+        self.assertTrue(any(green_histogram[1:255]))
+
     def test_annotation_objects_remain_editable_after_project_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
