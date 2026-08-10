@@ -103,9 +103,9 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: |
-            current/release/LightImageEditor-Setup-x64-1.0.0.exe
-            current/release/LightImageEditor-Portable-x64-1.0.0.exe
-            current/release/LightImageEditor-Rollback-x64-0.9.0.exe
+            current/release/CSImage-Setup-x64-1.0.0.exe
+            current/release/CSImage-Portable-x64-1.0.0.exe
+            current/release/CSImage-Rollback-x64-0.9.0.exe
             current/release/LightImageEditor-Onedir-x64-1.0.0.zip
 
       - name: Create mutable draft release for external false-positive review
@@ -125,4 +125,3 @@ jobs:
           Remove-Item -LiteralPath "$env:RUNNER_TEMP\publisher.pfx" -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath "$env:RUNNER_TEMP\update-private-key.json" -Force -ErrorAction SilentlyContinue
           Get-ChildItem Cert:\CurrentUser\My | Where-Object Thumbprint -EQ '${{ steps.signing.outputs.thumbprint }}' | Remove-Item -Force
-

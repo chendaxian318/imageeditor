@@ -81,8 +81,8 @@ def verify(
 
     expected_artifacts = {
         "LightImageEditor/ImageEditor.exe",
-        f"LightImageEditor-Portable-x64-{expected_version}.exe",
-        f"LightImageEditor-Setup-x64-{expected_version}.exe",
+        f"CSImage-Portable-x64-{expected_version}.exe",
+        f"CSImage-Setup-x64-{expected_version}.exe",
         "SBOM.cdx.json",
     }
     artifacts = {
@@ -110,7 +110,7 @@ def verify(
         if not security.get("PublicReleaseReady"):
             blockers.append("V1-MALWARE: security report does not allow public release")
 
-    rollback = list(release.glob("LightImageEditor-Rollback-x64-*.exe"))
+    rollback = list(release.glob("CSImage-Rollback-x64-*.exe"))
     if len(rollback) != 1:
         blockers.append("V1-ROLLBACK: exactly one signed previous-version installer is required")
     for required_name in (

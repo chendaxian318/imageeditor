@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parent
 
 class IdentityAndResourceTests(unittest.TestCase):
     def test_product_identity_is_stable_and_versioned(self) -> None:
-        self.assertEqual(PRODUCT_NAME_ZH, "轻量图片编辑器")
-        self.assertEqual(PRODUCT_NAME_EN, "Light Image Editor")
+        self.assertEqual(PRODUCT_NAME_ZH, "CSImage")
+        self.assertEqual(PRODUCT_NAME_EN, "CSImage")
         self.assertEqual(APP_ID, "io.github.chendaxian318.imageeditor")
         self.assertRegex(VERSION, re.compile(r"^\d+\.\d+\.\d+$"))
 

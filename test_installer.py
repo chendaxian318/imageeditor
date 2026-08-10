@@ -15,7 +15,21 @@ from installer import (
 class InstallerTests(unittest.TestCase):
     def test_default_install_directory_uses_named_folder_on_d_drive(self) -> None:
         script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
-        self.assertIn(r"DefaultDirName=D:\LightImageEditor", script)
+        self.assertIn(r"DefaultDirName=D:\CSImage", script)
+        self.assertIn("DisableDirPage=no", script)
+
+    def test_directory_picker_does_not_scan_disconnected_network_drives(self) -> None:
+        script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
+        self.assertIn("AllowNetworkDrive=no", script)
+        self.assertIn("AllowUNCPath=no", script)
+        self.assertIn("WizardForm.DirEdit.AutoCompleteFiles := False", script)
+        self.assertIn("WizardForm.DirBrowseButton.OnClick := @ShowLocalFolderBrowser", script)
+        self.assertIn("GetDriveTypeW(DrivePath) = 3", script)
+        self.assertIn("TNewListBox.Create", script)
+        self.assertIn("RefreshLocalFolderList", script)
+        self.assertIn("FindFirst(AddBackslash(FolderCurrentDirectory)", script)
+        self.assertIn("FILE_ATTRIBUTE_REPARSE_POINT", script)
+        self.assertNotIn("TFolderTreeView.Create", script)
 
     def test_installer_carries_required_legal_documents(self) -> None:
         self.assertEqual(
@@ -39,6 +53,8 @@ class InstallerTests(unittest.TestCase):
                 ".tif",
                 ".tiff",
                 ".gif",
+                ".psd",
+                ".pdf",
             ),
         )
 

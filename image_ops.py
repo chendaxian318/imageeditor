@@ -30,7 +30,11 @@ SUPPORTED_INPUTS = {
     ".avif",
     ".heic",
     ".heif",
+    ".psd",
 }
+
+DOCUMENT_INPUTS = {".pdf"}
+VIEWER_INPUTS = SUPPORTED_INPUTS | DOCUMENT_INPUTS
 
 SUPPORTED_FORMATS = ("JPEG", "PNG", "WEBP", "AVIF", "BMP", "TIFF", "GIF")
 _NATURAL_PARTS = re.compile(r"(\d+)")

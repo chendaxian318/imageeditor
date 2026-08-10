@@ -17,6 +17,7 @@ from .image_loader import (
     SUPPORTED_DECODE_FORMATS,
     friendly_load_failure,
 )
+from .pdf_support import PDF_EXTENSION, render_pdf_page
 
 THUMBNAIL_SIZE = (66, 48)
 
@@ -31,6 +32,22 @@ def generate_thumbnail(
     image_path = Path(path)
     contained: Image.Image | None = None
     try:
+        if image_path.suffix.casefold() == PDF_EXTENSION:
+            rendered = render_pdf_page(image_path, dpi=72)
+            try:
+                rgba = rendered.convert("RGBA")
+                try:
+                    contained = ImageOps.contain(rgba, size, Image.Resampling.LANCZOS)
+                finally:
+                    rgba.close()
+            finally:
+                rendered.close()
+            result = Image.new("RGBA", size, background)
+            offset = ((size[0] - contained.width) // 2, (size[1] - contained.height) // 2)
+            result.alpha_composite(contained, offset)
+            rgb = result.convert("RGB")
+            result.close()
+            return rgb
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", Image.DecompressionBombWarning)
             with Image.open(image_path) as source:

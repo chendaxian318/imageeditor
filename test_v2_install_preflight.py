@@ -47,9 +47,9 @@ class V2InstallPreflightTests(unittest.TestCase):
         }
         release = root / "release"
         executable_names = (
-            "LightImageEditor-Portable-x64-2.0.0.exe",
-            "LightImageEditor-Setup-x64-2.0.0.exe",
-            "LightImageEditor-Rollback-x64-1.1.3.exe",
+            "CSImage-Portable-x64-2.0.0.exe",
+            "CSImage-Setup-x64-2.0.0.exe",
+            "CSImage-Rollback-x64-1.1.3.exe",
             "LightImageEditor/ImageEditor.exe",
         )
         for name in executable_names:
@@ -153,7 +153,7 @@ class V2InstallPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             contract = self._write_complete_repository(root)
-            portable = root / "release/LightImageEditor-Portable-x64-2.0.0.exe"
+            portable = root / "release/CSImage-Portable-x64-2.0.0.exe"
             self._write_fake_pe(portable, machine=0x014C)
             (root / "release/LightImageEditor/ImageEditor.exe").write_bytes(b"not-a-pe")
             sbom_path = root / "release/SBOM.cdx.json"

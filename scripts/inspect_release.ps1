@@ -29,10 +29,10 @@ function Get-RelativeReleasePath {
 
 $binaries = @(
     (Join-Path $ReleasePath "LightImageEditor\ImageEditor.exe"),
-    (Join-Path $ReleasePath "LightImageEditor-Portable-x64-$Version.exe"),
-    (Join-Path $ReleasePath "LightImageEditor-Setup-x64-$Version.exe")
+    (Join-Path $ReleasePath "CSImage-Portable-x64-$Version.exe"),
+    (Join-Path $ReleasePath "CSImage-Setup-x64-$Version.exe")
 )
-$binaries += @(Get-ChildItem -LiteralPath $ReleasePath -Filter "LightImageEditor-Rollback-x64-*.exe" -File | ForEach-Object { $_.FullName })
+$binaries += @(Get-ChildItem -LiteralPath $ReleasePath -Filter "CSImage-Rollback-x64-*.exe" -File | ForEach-Object { $_.FullName })
 $signatureResults = @()
 foreach ($binary in $binaries) {
     if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Missing binary: $binary" }

@@ -95,7 +95,7 @@ def load_project(
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ProjectError(f"项目 JSON 无效：{error}") from error
     if not isinstance(payload, dict) or payload.get("format") != PROJECT_FORMAT:
-        raise ProjectError("这不是轻量图片编辑器项目文件。")
+        raise ProjectError("这不是 CSImage 项目文件。")
     try:
         schema_version = int(payload.get("schema_version", 1))
     except (TypeError, ValueError) as error:

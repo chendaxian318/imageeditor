@@ -1,4 +1,4 @@
-# 轻量图片编辑器
+# CSImage
 
 一个可安装在 Windows 上运行的桌面图片编辑器，支持：
 
@@ -63,6 +63,8 @@
 - 识别 GIF、APNG 和动画 WebP；未经明确确认不会把动画静默覆盖为单帧
 - GIF、APNG 和动画 WebP 可直接播放，并可独立导出为 GIF、APNG 或动画 WebP
 - AVIF 可直接打开和导出；HEIF/HEIC 通过单独的可选解码插件启用，不增加基础安装体积
+- PSD 可直接打开合成预览；为避免破坏图层结构，PSD 源文件保持只读，编辑结果导出为 PNG、JPEG 或 WebP
+- PDF 支持多页渲染和左右翻页；当前页可以进入快速编辑，结果导出为普通图片，源 PDF 不会被覆盖
 - 原子保存、明确的同名冲突处理与可选 `.bak` 覆盖备份
 - 每 2 秒自动保存未完成会话；异常退出后可恢复或安全放弃，即使源文件随后被删除也可恢复
 - 监测源文件被外部修改、重命名或删除，并阻止覆盖已变化的源文件
@@ -87,7 +89,7 @@
 - 文件夹浏览：打开一张图片后可用上一张/下一张、第一张/最后一张、左右方向键或 PageUp/PageDown 切换同文件夹图片，按 Windows 习惯自然排序（image2 在 image10 前）
 - 保存体验：保存为、Ctrl+E 快速导出、复制编辑结果到剪贴板、可在保存后自动定位到导出的文件
 - 命名体验：可填写输出文件前缀和后缀，快速导出和批量处理会自动套用到文件名，便于区分源图和处理结果
-- Windows 集成：标准安装器提供“已安装的应用”卸载入口、可选快捷方式、图片右键菜单、`.lieproj` 项目关联，并注册为 JPEG、PNG、APNG、WEBP、AVIF、HEIF/HEIC、BMP、TIFF、GIF 的候选默认应用
+- Windows 集成：标准安装器提供“已安装的应用”卸载入口、可选快捷方式、图片右键菜单、`.lieproj` 项目关联，并注册为 JPEG、PNG、APNG、WEBP、AVIF、HEIF/HEIC、BMP、TIFF、GIF、PSD、PDF 的候选默认应用
 - 快捷键：Ctrl+O 打开、Ctrl+B 显示/隐藏缩略图侧栏、F11 全屏、Ctrl+F11 沉浸模式、F5 幻灯片、Alt+Enter 属性、F2 重命名、Delete 移入回收站、Ctrl+V 粘贴、Ctrl+S 保存、Ctrl+E 快速导出、Ctrl+Shift+C 复制结果、方向键或 PageUp/PageDown 切换图片、Home/End 跳到首尾、Ctrl+加号/减号缩放、Ctrl+0 适应、Ctrl+1 实际大小、Ctrl+R 右转、Ctrl+Z 撤销、Ctrl+Y 重做、Enter 应用裁剪
 - 批量处理：版本化任务队列支持并发数、内存上限、取消、异常恢复、失败重试和再次运行；预设可导入导出，重命名模板支持名称、序号和日期变量，可组合元数据清理、尺寸、水印与格式转换，并导出 CSV/JSON 错误日志
 
@@ -104,16 +106,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 构建完成后产物位于 `release`：
 
 - `LightImageEditor/`：供标准安装器使用的 `onedir` 应用目录
-- `LightImageEditor-Portable-x64-1.0.0.exe`：便携 `onefile` 版本
-- `LightImageEditor-Setup-x64-1.0.0.exe`：当前用户标准安装器，支持覆盖升级和“已安装的应用”卸载
-- `LightImageEditor-Rollback-x64-0.9.0.exe`：生产构建附带的上一版本签名回滚包
+- `CSImage-Portable-x64-1.0.0.exe`：便携 `onefile` 版本
+- `CSImage-Setup-x64-1.0.0.exe`：当前用户标准安装器，支持覆盖升级和“已安装的应用”卸载
+- `CSImage-Rollback-x64-0.9.0.exe`：生产构建附带的上一版本签名回滚包
 - `LICENSE`、`NOTICE.md`、`PRIVACY.md`、`THIRD_PARTY_LICENSES.md`：随发布物和安装程序提供的权属、隐私及第三方许可说明
 - `SBOM.cdx.json`：CycloneDX 1.6 软件物料清单
 - `RELEASE_NOTES-v1.0.0.md`、`RELEASE_GATE_STATUS.json`：正式版说明与机器可读发布门禁
 - `BUILD_PROVENANCE.json`、`LOCAL_SECURITY_SCAN.json`、`diagnostics/`：提交到产物的追溯、签名/杀软和诊断资料
 - `SHA256SUMS.txt`：本次构建产物的 SHA-256 校验值
 
-安装程序可在完成后直接打开 Windows“默认应用”设置。选择“轻量图片编辑器”，再为希望使用的图片格式确认默认关联即可。Windows 10/11 要求默认应用由用户在系统设置中确认，安装程序不会静默覆盖现有选择。覆盖升级或卸载时，安装器会通过本地 IPC 请求主程序保存或安全退出；用户取消时操作随之取消，不会强制终止进程。卸载时可选择保留或清除设置、最近记录、恢复会话、日志和缓存；静默卸载默认保留，传入 `/CLEARUSERDATA` 才会清除。
+安装程序可在完成后直接打开 Windows“默认应用”设置。选择“CSImage”，再为希望使用的图片格式确认默认关联即可。Windows 10/11 要求默认应用由用户在系统设置中确认，安装程序不会静默覆盖现有选择。覆盖升级或卸载时，安装器会通过本地 IPC 请求主程序保存或安全退出；用户取消时操作随之取消，不会强制终止进程。卸载时可选择保留或清除设置、最近记录、恢复会话、日志和缓存；静默卸载默认保留，传入 `/CLEARUSERDATA` 才会清除。
 
 公开发布还需要配置 `IMAGEEDITOR_SIGNTOOL`、`IMAGEEDITOR_AUTHENTICODE_THUMBPRINT` 和仓库外的 `IMAGEEDITOR_UPDATE_PRIVATE_KEY`。构建会签署并复验最终 EXE 后生成两个通道的签名清单；未配置时只生成带 `SIGNING_REQUIRED.txt` 的本地测试构建，不得上传到更新通道。更新安全模型与发布步骤见 `docs/release/UPDATE_SECURITY.md`。
 
@@ -160,7 +162,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_single_in
 
 # 三轮全新安装、覆盖升级和卸载验收（会改动当前用户安装状态）
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_install_cycles.ps1 `
-  -Installer .\release\LightImageEditor-Setup-x64-2.0.0.exe `
+  -Installer .\release\CSImage-Setup-x64-2.0.0.exe `
   -PreviousInstaller .\release\LightImageEditor-Rollback-x64-1.1.3.exe `
   -TargetVersion 2.0.0 -PreviousVersion 1.1.3
 ```

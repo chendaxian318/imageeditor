@@ -99,7 +99,7 @@ class ProductionGateTests(unittest.TestCase):
 
     def create_bundle(self, root: Path) -> None:
         for name in (
-            "LightImageEditor-Rollback-x64-0.9.0.exe",
+            "CSImage-Rollback-x64-0.9.0.exe",
             "update-stable.json",
             "SHA256SUMS.txt",
             "SBOM.cdx.json",
@@ -112,8 +112,8 @@ class ProductionGateTests(unittest.TestCase):
             (root / name).write_text("evidence", encoding="utf-8")
         artifact_paths = (
             "LightImageEditor/ImageEditor.exe",
-            "LightImageEditor-Portable-x64-1.0.0.exe",
-            "LightImageEditor-Setup-x64-1.0.0.exe",
+            "CSImage-Portable-x64-1.0.0.exe",
+            "CSImage-Setup-x64-1.0.0.exe",
             "SBOM.cdx.json",
         )
         artifacts = []

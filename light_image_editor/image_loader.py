@@ -19,11 +19,22 @@ from .document import (
     replace_orientation_in_exif,
 )
 from .formats import HEIF_EXTENSIONS, AnimationSequence, decode_animation, register_optional_heif
+from .pdf_support import PDF_EXTENSION, PdfSupportError, render_pdf_page
 
 MAX_DECODE_PIXELS = 120_000_000
 MAX_IMAGE_DIMENSION = 100_000
 MAX_ANIMATION_FRAMES = 10_000
-SUPPORTED_DECODE_FORMATS = {"JPEG", "PNG", "WEBP", "BMP", "TIFF", "GIF", "AVIF", "HEIF"}
+SUPPORTED_DECODE_FORMATS = {
+    "JPEG",
+    "PNG",
+    "WEBP",
+    "BMP",
+    "TIFF",
+    "GIF",
+    "AVIF",
+    "HEIF",
+    "PSD",
+}
 CACHED_PREVIEW_MAX_SIZE = (1600, 1600)
 
 HEIF_AVAILABLE, HEIF_DETAIL = register_optional_heif()
@@ -51,6 +62,8 @@ def friendly_load_failure(path: str | Path, error: BaseException) -> ImageLoadFa
         return ImageLoadFailure(image_path, "missing", "文件已被移动或删除。")
     if isinstance(error, PermissionError):
         return ImageLoadFailure(image_path, "permission", "没有权限读取这个文件。")
+    if isinstance(error, PdfSupportError):
+        return ImageLoadFailure(image_path, "pdf", str(error))
     if isinstance(error, (Image.DecompressionBombError, Image.DecompressionBombWarning)):
         return ImageLoadFailure(image_path, "too_large", "图片尺寸过大，已停止解码以保护内存。")
     if isinstance(error, UnidentifiedImageError):
@@ -64,9 +77,11 @@ def friendly_load_failure(path: str | Path, error: BaseException) -> ImageLoadFa
     return ImageLoadFailure(image_path, "decode", f"无法解码图片：{error}")
 
 
-def decode_image(path: str | Path) -> Image.Image:
+def decode_image(path: str | Path, page_index: int = 0) -> Image.Image:
     image_path = Path(path)
     try:
+        if image_path.suffix.casefold() == PDF_EXTENSION:
+            return render_pdf_page(image_path, page_index)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", Image.DecompressionBombWarning)
             with Image.open(image_path) as source:
@@ -158,11 +173,14 @@ class ImageLoader:
         self._lock = threading.Lock()
 
     @staticmethod
-    def _key(path: str | Path) -> str:
+    def _key(path: str | Path, page_index: int | None = None) -> str:
         try:
-            return str(Path(path).resolve()).casefold()
+            key = str(Path(path).resolve()).casefold()
         except OSError:
-            return str(Path(path).absolute()).casefold()
+            key = str(Path(path).absolute()).casefold()
+        if Path(path).suffix.casefold() == PDF_EXTENSION:
+            key += f"#page={page_index or 0}"
+        return key
 
     def load(
         self,
@@ -170,8 +188,9 @@ class ImageLoader:
         callback: Callable[[Future[Image.Image]], object] | None = None,
         *,
         take_cached: bool = False,
+        page_index: int | None = None,
     ) -> Future[Image.Image]:
-        key = self._key(path)
+        key = self._key(path, page_index)
         new_base_future: Future[None] | None = None
         with self._lock:
             cached = self._cache.get(key)
@@ -192,7 +211,9 @@ class ImageLoader:
             else:
                 base_future = self._inflight.get(key)
                 if base_future is None:
-                    base_future = self._executor.submit(self._decode_into_cache, key, path)
+                    base_future = self._executor.submit(
+                        self._decode_into_cache, key, path, page_index
+                    )
                     self._inflight[key] = base_future
                     new_base_future = base_future
                 future = self._copy_after_cached(key, base_future)
@@ -206,8 +227,13 @@ class ImageLoader:
             future.add_done_callback(callback)
         return future
 
-    def _decode_into_cache(self, key: str, path: str | Path) -> None:
-        decoded = decode_image(path)
+    def _decode_into_cache(
+        self,
+        key: str,
+        path: str | Path,
+        page_index: int | None = None,
+    ) -> None:
+        decoded = decode_image(path, page_index or 0)
         try:
             self._store_decoded(key, decoded)
         finally:
@@ -285,10 +311,10 @@ class ImageLoader:
             if self._inflight.get(key) is future:
                 self._inflight.pop(key, None)
 
-    def cached_preview(self, path: str | Path) -> Image.Image | None:
+    def cached_preview(self, path: str | Path, page_index: int | None = None) -> Image.Image | None:
         """Return an owned screen-sized preview when adjacent prefetch is ready."""
 
-        key = self._key(path)
+        key = self._key(path, page_index)
         with self._lock:
             preview = self._preview_cache.get(key)
             if preview is None:
@@ -303,7 +329,7 @@ class ImageLoader:
             with self._lock:
                 if key in self._cache or key in self._inflight:
                     continue
-                future = self._executor.submit(self._decode_into_cache, key, path)
+                future = self._executor.submit(self._decode_into_cache, key, path, None)
                 self._inflight[key] = future
 
             def clear(completed: Future[None], cache_key: str = key) -> None:
@@ -318,13 +344,18 @@ class ImageLoader:
 
     def invalidate(self, path: str | Path) -> None:
         key = self._key(path)
+        base_key = key.partition("#page=")[0]
         with self._lock:
-            image = self._cache.pop(key, None)
-            preview = self._preview_cache.pop(key, None)
-        if image is not None:
-            image.close()
-        if preview is not None:
-            preview.close()
+            keys = [
+                cached_key
+                for cached_key in set(self._cache) | set(self._preview_cache)
+                if cached_key == base_key or cached_key.startswith(f"{base_key}#page=")
+            ]
+            retired = [self._cache.pop(cached_key, None) for cached_key in keys]
+            retired.extend(self._preview_cache.pop(cached_key, None) for cached_key in keys)
+        for image in retired:
+            if image is not None:
+                image.close()
 
     def shutdown(self, *, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait, cancel_futures=True)

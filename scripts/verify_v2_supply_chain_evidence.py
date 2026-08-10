@@ -43,9 +43,9 @@ MULTI_ENGINE_FIELDS = {
 MULTI_ARTIFACT_FIELDS = {"File", "Sha256", "Result"}
 EXPECTED_ARTIFACTS = {
     "application": "LightImageEditor/ImageEditor.exe",
-    "portable": "LightImageEditor-Portable-x64-2.0.0.exe",
-    "installer": "LightImageEditor-Setup-x64-2.0.0.exe",
-    "rollback": "LightImageEditor-Rollback-x64-1.1.3.exe",
+    "portable": "CSImage-Portable-x64-2.0.0.exe",
+    "installer": "CSImage-Setup-x64-2.0.0.exe",
+    "rollback": "CSImage-Rollback-x64-1.1.3.exe",
 }
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 THUMBPRINT_PATTERN = re.compile(r"^[0-9A-F]{40}$")

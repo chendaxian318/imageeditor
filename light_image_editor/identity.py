@@ -2,9 +2,9 @@
 
 from .version import __version__
 
-PRODUCT_NAME_ZH = "轻量图片编辑器"
-PRODUCT_NAME_EN = "Light Image Editor"
-INTERNAL_NAME = "LightImageEditor"
+PRODUCT_NAME_ZH = "CSImage"
+PRODUCT_NAME_EN = "CSImage"
+INTERNAL_NAME = "CSImage"
 PUBLISHER = "chendaxian318"
 APP_ID = "io.github.chendaxian318.imageeditor"
 REGISTRY_NAME = "LightImageEditor"

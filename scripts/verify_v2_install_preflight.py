@@ -107,9 +107,9 @@ def _verify_artifacts(
 ) -> None:
     release_root = repository_root / "release"
     executables = (
-        f"LightImageEditor-Portable-x64-{target}.exe",
-        f"LightImageEditor-Setup-x64-{target}.exe",
-        f"LightImageEditor-Rollback-x64-{previous}.exe",
+        f"CSImage-Portable-x64-{target}.exe",
+        f"CSImage-Setup-x64-{target}.exe",
+        f"CSImage-Rollback-x64-{previous}.exe",
         "LightImageEditor/ImageEditor.exe",
     )
     checksummed = (

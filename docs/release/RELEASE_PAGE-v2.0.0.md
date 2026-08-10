@@ -1,12 +1,12 @@
-# 轻量图片编辑器 2.0.0 候选下载页
+# CSImage 2.0.0 候选下载页
 
 > 尚未公开发布。以下文件名是冻结后的候选包契约，不代表当前仓库已经生成或批准这些产物。
 
 ## 候选产物
 
-- `LightImageEditor-Setup-x64-2.0.0.exe`：当前用户安装包，支持安全覆盖升级、卸载、快捷方式、右键菜单和默认应用注册。
-- `LightImageEditor-Portable-x64-2.0.0.exe`：不写入默认应用注册的便携版。
-- `LightImageEditor-Rollback-x64-1.1.3.exe`：仅用于 2.0.0 阻断性故障回滚的已验证上一稳定版安装包。
+- `CSImage-Setup-x64-2.0.0.exe`：当前用户安装包，支持安全覆盖升级、卸载、快捷方式、右键菜单和默认应用注册。
+- `CSImage-Portable-x64-2.0.0.exe`：不写入默认应用注册的便携版。
+- `CSImage-Rollback-x64-1.1.3.exe`：仅用于 2.0.0 阻断性故障回滚的已验证上一稳定版安装包。
 - `SHA256SUMS.txt`：发布文件校验值。
 - `SBOM.cdx.json`：CycloneDX 软件物料清单。
 - `RELEASE_GATE_STATUS.json`：最终发布门禁结果；`passed` 不是 `true` 时不得发布。

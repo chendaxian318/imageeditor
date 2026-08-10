@@ -12,7 +12,7 @@ from typing import Final
 
 from PIL import Image
 
-from image_ops import SUPPORTED_INPUTS, natural_sort_key
+from image_ops import VIEWER_INPUTS, natural_sort_key
 
 CF_DIB: Final = 8
 GMEM_MOVEABLE: Final = 0x0002
@@ -59,7 +59,7 @@ def list_folder_images(image_path: str | Path | None) -> list[Path]:
         (
             path
             for path in folder.iterdir()
-            if path.is_file() and path.suffix.lower() in SUPPORTED_INPUTS
+            if path.is_file() and path.suffix.lower() in VIEWER_INPUTS
         ),
         key=natural_sort_key,
     )

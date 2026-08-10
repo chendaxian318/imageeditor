@@ -1,4 +1,4 @@
-# 轻量图片编辑器 2.0.0 候选发布说明
+# CSImage 2.0.0 候选发布说明
 
 > 当前状态：候选文档。只有 `V2_RELEASE_GATES.json` 与最终构建生成的
 > `RELEASE_GATE_STATUS.json` 均通过后，才能作为公开稳定版发布。

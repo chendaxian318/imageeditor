@@ -6,8 +6,8 @@
   "Reviewer": "填写人工复核人",
   "Artifacts": [
     {"File": "LightImageEditor/ImageEditor.exe", "Sha256": "替换为六十四位小写哈希", "Result": "passed"},
-    {"File": "LightImageEditor-Portable-x64-2.0.0.exe", "Sha256": "替换为六十四位小写哈希", "Result": "passed"},
-    {"File": "LightImageEditor-Setup-x64-2.0.0.exe", "Sha256": "替换为六十四位小写哈希", "Result": "passed"},
-    {"File": "LightImageEditor-Rollback-x64-1.1.3.exe", "Sha256": "替换为六十四位小写哈希", "Result": "passed"}
+    {"File": "CSImage-Portable-x64-2.0.0.exe", "Sha256": "替换为六十四位小写哈希", "Result": "passed"},
+    {"File": "CSImage-Setup-x64-2.0.0.exe", "Sha256": "替换为六十四位小写哈希", "Result": "passed"},
+    {"File": "CSImage-Rollback-x64-1.1.3.exe", "Sha256": "替换为六十四位小写哈希", "Result": "passed"}
   ]
 }

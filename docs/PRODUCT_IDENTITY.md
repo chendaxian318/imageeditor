@@ -6,9 +6,9 @@
 
 | 项目 | 值 |
 |---|---|
-| 中文产品名 | 轻量图片编辑器 |
-| 英文产品名 | Light Image Editor |
-| 内部名称 | LightImageEditor |
+| 中文产品名 | CSImage |
+| 英文产品名 | CSImage |
+| 内部名称 | CSImage（旧版注册表标识继续保留 `LightImageEditor` 以兼容升级） |
 | 发布者 | chendaxian318 |
 | 应用 ID | io.github.chendaxian318.imageeditor |
 | 可执行文件 | ImageEditor.exe |

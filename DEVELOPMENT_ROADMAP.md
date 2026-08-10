@@ -492,8 +492,8 @@ Pillow 的格式能力和各格式可保存的 EXIF、ICC、动画等参数以�
 
 ### 9.1 推荐产物
 
-1. `LightImageEditor-Setup-x64-版本.exe`：主要分发物，PyInstaller `onedir` + Inno Setup。
-2. `LightImageEditor-Portable-x64-版本.exe`：便携 `onefile`，接受启动稍慢的权衡。
+1. `CSImage-Setup-x64-版本.exe`：主要分发物，PyInstaller `onedir` + Inno Setup。
+2. `CSImage-Portable-x64-版本.exe`：便携 `onefile`，接受启动稍慢的权衡。
 3. `LightImageEditor-版本.msix`：在 Beta 稳定后用于 Microsoft Store 或企业分发。
 
 ### 9.2 签名策略

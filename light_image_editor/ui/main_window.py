@@ -12519,7 +12519,7 @@ class ImageEditorApp(tk.Tk):
     def open_project_dialog(self) -> None:
         path = filedialog.askopenfilename(
             title="打开编辑项目",
-            filetypes=[("轻量图片编辑器项目", "*.lieproj"), ("所有文件", "*.*")],
+            filetypes=[("CSImage 项目", "*.lieproj"), ("所有文件", "*.*")],
         )
         if path:
             self.open_project_path(Path(path))
@@ -12629,7 +12629,7 @@ class ImageEditorApp(tk.Tk):
             title="保存编辑项目",
             defaultextension=".lieproj",
             initialfile=initial,
-            filetypes=[("轻量图片编辑器项目", "*.lieproj")],
+            filetypes=[("CSImage 项目", "*.lieproj")],
         )
         if not target:
             return

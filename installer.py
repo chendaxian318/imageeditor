@@ -35,6 +35,8 @@ SUPPORTED_EXTENSIONS = (
     ".tif",
     ".tiff",
     ".gif",
+    ".psd",
+    ".pdf",
 )
 PROJECT_EXTENSION = ".lieproj"
 PROJECT_PROG_ID = "LightImageEditor.Project"

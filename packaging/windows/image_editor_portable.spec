@@ -9,6 +9,9 @@ ICON = ROOT / "resources" / "icons" / "app.ico"
 VERSION_INFO = ROOT / "build" / "version" / "ImageEditor.version.txt"
 LOCALES = ROOT / "resources" / "locales"
 UPDATE_KEYS = ROOT / "resources" / "update"
+PYPDFIUM_LICENSES = (
+    ROOT / ".venv" / "Lib" / "site-packages" / "pypdfium2-5.12.1.dist-info" / "licenses"
+)
 
 a = Analysis(
     [str(ROOT / "image_editor.py")],
@@ -17,6 +20,7 @@ a = Analysis(
     datas=[
         (str(LOCALES), "resources/locales"),
         (str(UPDATE_KEYS), "resources/update"),
+        (str(PYPDFIUM_LICENSES), "licenses/pypdfium2"),
     ],
     hiddenimports=[],
     hookspath=[],

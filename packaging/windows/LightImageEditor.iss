@@ -8,8 +8,8 @@
   #error OutputDir is required
 #endif
 
-#define MyAppName "轻量图片编辑器"
-#define MyAppNameEn "Light Image Editor"
+#define MyAppName "CSImage"
+#define MyAppNameEn "CSImage"
 #define MyAppPublisher "chendaxian318"
 #define MyAppId "io.github.chendaxian318.imageeditor"
 #define MyAppExeName "ImageEditor.exe"
@@ -29,7 +29,10 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL=https://github.com/chendaxian318/imageeditor
 AppSupportURL=https://github.com/chendaxian318/imageeditor/issues
 AppUpdatesURL=https://github.com/chendaxian318/imageeditor/releases
-DefaultDirName=D:\LightImageEditor
+DefaultDirName=D:\CSImage
+DisableDirPage=no
+AllowNetworkDrive=no
+AllowUNCPath=no
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -37,7 +40,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
-OutputBaseFilename=LightImageEditor-Setup-x64-{#MyAppVersion}
+OutputBaseFilename=CSImage-Setup-x64-{#MyAppVersion}
 SetupIconFile={#SourcePath}\..\..\resources\icons\app.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
@@ -61,7 +64,7 @@ Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "快捷方式："; Flags: unchecked
-Name: "contextmenu"; Description: "添加“用轻量图片编辑器查看”右键菜单"; GroupDescription: "Windows 集成："; Flags: checkedonce
+Name: "contextmenu"; Description: "添加“用 CSImage 查看”右键菜单"; GroupDescription: "Windows 集成："; Flags: checkedonce
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -98,6 +101,8 @@ Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; Va
 Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".tif"; ValueData: "{#ProgId}"
 Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".tiff"; ValueData: "{#ProgId}"
 Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".gif"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".psd"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".pdf"; ValueData: "{#ProgId}"
 Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#RegistryName}"; ValueData: "Software\{#RegistryName}\Capabilities"; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExeName}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\{#ProjectProgId}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppName} 编辑项目"; Flags: uninsdeletekey
@@ -116,6 +121,304 @@ Filename: "ms-settings:defaultapps?registeredAppUser={#RegistryName}"; Descripti
 [Code]
 var
   PreserveUserData: Boolean;
+  FolderBrowseForm: TSetupForm;
+  FolderDriveList: TNewListBox;
+  FolderDriveRoots: TStringList;
+  FolderListBox: TNewListBox;
+  FolderCurrentLabel: TNewStaticText;
+  FolderPathEdit: TNewPathEdit;
+  FolderCurrentDirectory: String;
+
+function GetDriveTypeW(lpRootPathName: String): Integer;
+  external 'GetDriveTypeW@kernel32.dll stdcall';
+
+function FixedDriveRoot(const Path: String): String;
+var
+  Root: String;
+begin
+  Result := '';
+  if (Length(Path) < 3) or (Path[2] <> ':') then
+    exit;
+  Root := Uppercase(Copy(Path, 1, 3));
+  if GetDriveTypeW(Root) = 3 then
+    Result := Root;
+end;
+
+function FirstFixedDrive(): String;
+var
+  DriveLetter: Integer;
+  DrivePath: String;
+begin
+  Result := '';
+  for DriveLetter := Ord('A') to Ord('Z') do
+  begin
+    DrivePath := Chr(DriveLetter) + ':\';
+    if GetDriveTypeW(DrivePath) = 3 then
+    begin
+      Result := DrivePath;
+      exit;
+    end;
+  end;
+end;
+
+function ExistingLocalFolder(const Path: String): String;
+var
+  Candidate: String;
+  Root: String;
+begin
+  Root := FixedDriveRoot(Path);
+  if Root = '' then
+    Root := FirstFixedDrive();
+  Candidate := RemoveBackslashUnlessRoot(Path);
+  if CompareText(Copy(Candidate, 1, 3), Root) <> 0 then
+    Candidate := Root;
+  while (Length(Candidate) > 3) and (not DirExists(Candidate)) do
+    Candidate := ExtractFileDir(Candidate);
+  if not DirExists(Candidate) then
+    Candidate := Root;
+  Result := Candidate;
+end;
+
+function SuggestedInstallPath(const Folder: String): String;
+var
+  Normalized: String;
+begin
+  Normalized := RemoveBackslashUnlessRoot(Folder);
+  if CompareText(ExtractFileName(Normalized), 'CSImage') = 0 then
+    Result := Normalized
+  else
+    Result := AddBackslash(Normalized) + 'CSImage';
+end;
+
+procedure RefreshLocalFolderList(const Folder: String);
+var
+  FindRec: TFindRec;
+begin
+  if FixedDriveRoot(Folder) = '' then
+    exit;
+  FolderCurrentDirectory := RemoveBackslashUnlessRoot(Folder);
+  FolderCurrentLabel.Caption := FolderCurrentDirectory;
+  FolderListBox.Items.Clear();
+  if FindFirst(AddBackslash(FolderCurrentDirectory) + '*', FindRec) then
+  begin
+    try
+      repeat
+        if ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
+           ((FindRec.Attributes and FILE_ATTRIBUTE_HIDDEN) = 0) and
+           ((FindRec.Attributes and FILE_ATTRIBUTE_SYSTEM) = 0) and
+           ((FindRec.Attributes and FILE_ATTRIBUTE_REPARSE_POINT) = 0) and
+           ((FindRec.Attributes and FILE_ATTRIBUTE_OFFLINE) = 0) and
+           (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+          FolderListBox.Items.Add(FindRec.Name);
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
+procedure FolderListClicked(Sender: TObject);
+var
+  SelectedFolder: String;
+begin
+  if FolderListBox.ItemIndex >= 0 then
+  begin
+    SelectedFolder := AddBackslash(FolderCurrentDirectory) +
+      FolderListBox.Items[FolderListBox.ItemIndex];
+    FolderPathEdit.Text := SuggestedInstallPath(SelectedFolder);
+  end;
+end;
+
+procedure FolderListDoubleClicked(Sender: TObject);
+var
+  SelectedFolder: String;
+begin
+  if FolderListBox.ItemIndex >= 0 then
+  begin
+    SelectedFolder := AddBackslash(FolderCurrentDirectory) +
+      FolderListBox.Items[FolderListBox.ItemIndex];
+    if DirExists(SelectedFolder) then
+    begin
+      RefreshLocalFolderList(SelectedFolder);
+      FolderPathEdit.Text := SuggestedInstallPath(SelectedFolder);
+    end;
+  end;
+end;
+
+procedure FolderDriveChanged(Sender: TObject);
+begin
+  if FolderDriveList.ItemIndex >= 0 then
+  begin
+    RefreshLocalFolderList(FolderDriveRoots[FolderDriveList.ItemIndex]);
+    FolderPathEdit.Text := SuggestedInstallPath(FolderCurrentDirectory);
+  end;
+end;
+
+procedure ParentFolderClicked(Sender: TObject);
+var
+  ParentFolder: String;
+  Root: String;
+begin
+  Root := FixedDriveRoot(FolderCurrentDirectory);
+  ParentFolder := ExtractFileDir(RemoveBackslashUnlessRoot(FolderCurrentDirectory));
+  if (ParentFolder = '') or
+     (CompareText(Copy(ParentFolder, 1, 3), Root) <> 0) then
+    ParentFolder := Root;
+  RefreshLocalFolderList(ParentFolder);
+  FolderPathEdit.Text := SuggestedInstallPath(ParentFolder);
+end;
+
+procedure ShowLocalFolderBrowser(Sender: TObject);
+var
+  DriveLetter: Integer;
+  DrivePath: String;
+  InitialFolder: String;
+  InitialRoot: String;
+  SelectedIndex: Integer;
+  HeaderPanel: TPanel;
+  TitleLabel: TNewStaticText;
+  HintLabel: TNewStaticText;
+  DriveLabel: TNewStaticText;
+  FolderLabel: TNewStaticText;
+  FolderHintLabel: TNewStaticText;
+  PathLabel: TNewStaticText;
+  ParentFolderButton: TNewButton;
+  OKButton: TNewButton;
+  CancelButton: TNewButton;
+begin
+  FolderBrowseForm := CreateCustomForm(ScaleX(660), ScaleY(510), True, True);
+  try
+    FolderBrowseForm.Caption := '选择 CSImage 安装位置';
+
+    HeaderPanel := TPanel.Create(FolderBrowseForm);
+    HeaderPanel.Parent := FolderBrowseForm;
+    HeaderPanel.BevelOuter := bvNone;
+    HeaderPanel.Color := clBtnFace;
+    HeaderPanel.SetBounds(0, 0, ScaleX(660), ScaleY(76));
+
+    TitleLabel := TNewStaticText.Create(FolderBrowseForm);
+    TitleLabel.Parent := HeaderPanel;
+    TitleLabel.Caption := '选择 CSImage 安装位置';
+    TitleLabel.Font.Size := 15;
+    TitleLabel.Font.Style := [fsBold];
+    TitleLabel.SetBounds(ScaleX(20), ScaleY(14), ScaleX(610), ScaleY(26));
+
+    HintLabel := TNewStaticText.Create(FolderBrowseForm);
+    HintLabel.Parent := HeaderPanel;
+    HintLabel.Caption := '只按需读取本地文件夹，不扫描网络磁盘，选择过程保持流畅。';
+    HintLabel.SetBounds(ScaleX(20), ScaleY(43), ScaleX(610), ScaleY(21));
+
+    DriveLabel := TNewStaticText.Create(FolderBrowseForm);
+    DriveLabel.Parent := FolderBrowseForm;
+    DriveLabel.Caption := '本地磁盘';
+    DriveLabel.Font.Style := [fsBold];
+    DriveLabel.SetBounds(ScaleX(16), ScaleY(90), ScaleX(142), ScaleY(22));
+
+    FolderLabel := TNewStaticText.Create(FolderBrowseForm);
+    FolderLabel.Parent := FolderBrowseForm;
+    FolderLabel.Caption := '文件夹';
+    FolderLabel.Font.Style := [fsBold];
+    FolderLabel.SetBounds(ScaleX(174), ScaleY(90), ScaleX(120), ScaleY(22));
+
+    FolderHintLabel := TNewStaticText.Create(FolderBrowseForm);
+    FolderHintLabel.Parent := FolderBrowseForm;
+    FolderHintLabel.Caption := '单击选择，双击进入';
+    FolderHintLabel.Alignment := taRightJustify;
+    FolderHintLabel.SetBounds(ScaleX(440), ScaleY(90), ScaleX(204), ScaleY(22));
+
+    FolderDriveList := TNewListBox.Create(FolderBrowseForm);
+    FolderDriveList.Parent := FolderBrowseForm;
+    FolderDriveList.Font.Size := 10;
+    FolderDriveList.SetBounds(ScaleX(16), ScaleY(116), ScaleX(142), ScaleY(280));
+    FolderDriveRoots := TStringList.Create();
+
+    SelectedIndex := -1;
+    InitialFolder := ExistingLocalFolder(WizardForm.DirEdit.Text);
+    InitialRoot := FixedDriveRoot(InitialFolder);
+    for DriveLetter := Ord('A') to Ord('Z') do
+    begin
+      DrivePath := Chr(DriveLetter) + ':\';
+      if GetDriveTypeW(DrivePath) = 3 then
+      begin
+        FolderDriveRoots.Add(DrivePath);
+        if CompareText(DrivePath, FixedDriveRoot(ExpandConstant('{win}'))) = 0 then
+          FolderDriveList.Items.Add('系统盘  ' + DrivePath)
+        else
+          FolderDriveList.Items.Add('本地磁盘  ' + DrivePath);
+        if CompareText(DrivePath, InitialRoot) = 0 then
+          SelectedIndex := FolderDriveList.Items.Count - 1;
+      end;
+    end;
+    FolderDriveList.ItemIndex := SelectedIndex;
+    FolderDriveList.OnClick := @FolderDriveChanged;
+
+    ParentFolderButton := TNewButton.Create(FolderBrowseForm);
+    ParentFolderButton.Parent := FolderBrowseForm;
+    ParentFolderButton.Caption := '‹  返回上级';
+    ParentFolderButton.SetBounds(ScaleX(174), ScaleY(116), ScaleX(98), ScaleY(28));
+    ParentFolderButton.OnClick := @ParentFolderClicked;
+
+    FolderCurrentLabel := TNewStaticText.Create(FolderBrowseForm);
+    FolderCurrentLabel.Parent := FolderBrowseForm;
+    FolderCurrentLabel.SetBounds(ScaleX(286), ScaleY(121), ScaleX(358), ScaleY(20));
+
+    FolderListBox := TNewListBox.Create(FolderBrowseForm);
+    FolderListBox.Parent := FolderBrowseForm;
+    FolderListBox.Font.Size := 10;
+    FolderListBox.Sorted := True;
+    FolderListBox.SetBounds(ScaleX(174), ScaleY(152), ScaleX(470), ScaleY(244));
+    FolderListBox.OnClick := @FolderListClicked;
+    FolderListBox.OnDblClick := @FolderListDoubleClicked;
+    RefreshLocalFolderList(InitialFolder);
+
+    PathLabel := TNewStaticText.Create(FolderBrowseForm);
+    PathLabel.Parent := FolderBrowseForm;
+    PathLabel.Caption := '最终安装路径';
+    PathLabel.Font.Style := [fsBold];
+    PathLabel.SetBounds(ScaleX(16), ScaleY(412), ScaleX(628), ScaleY(20));
+
+    FolderPathEdit := TNewPathEdit.Create(FolderBrowseForm);
+    FolderPathEdit.Parent := FolderBrowseForm;
+    FolderPathEdit.Font.Size := 10;
+    FolderPathEdit.AutoCompleteFiles := False;
+    FolderPathEdit.Text := WizardForm.DirEdit.Text;
+    FolderPathEdit.SetBounds(ScaleX(16), ScaleY(436), ScaleX(628), ScaleY(28));
+
+    OKButton := TNewButton.Create(FolderBrowseForm);
+    OKButton.Parent := FolderBrowseForm;
+    OKButton.Caption := '确定';
+    OKButton.Default := True;
+    OKButton.ModalResult := mrOk;
+    OKButton.SetBounds(ScaleX(466), ScaleY(476), ScaleX(82), ScaleY(27));
+
+    CancelButton := TNewButton.Create(FolderBrowseForm);
+    CancelButton.Parent := FolderBrowseForm;
+    CancelButton.Caption := '取消';
+    CancelButton.Cancel := True;
+    CancelButton.ModalResult := mrCancel;
+    CancelButton.SetBounds(ScaleX(562), ScaleY(476), ScaleX(82), ScaleY(27));
+
+    FolderBrowseForm.ActiveControl := FolderListBox;
+    FolderBrowseForm.FlipAndCenterIfNeeded(True, WizardForm, False);
+    if FolderBrowseForm.ShowModal() = mrOk then
+      WizardForm.DirEdit.Text := Trim(FolderPathEdit.Text);
+  finally
+    FolderDriveRoots.Free();
+    FolderBrowseForm.Free();
+  end;
+end;
+
+procedure InitializeWizard();
+begin
+  { Avoid Windows Shell autocomplete/folder picker enumeration of disconnected
+    network drives. The replacement browser enumerates only the local directory
+    that the user explicitly opens. }
+  WizardForm.DirEdit.AutoCompleteFiles := False;
+  WizardForm.DirBrowseButton.Caption := '浏览...';
+  WizardForm.DirBrowseButton.OnClick := @ShowLocalFolderBrowser;
+  WizardForm.SelectDirBrowseLabel.Caption :=
+    '可直接输入完整路径，或点击“浏览”用图形界面选择本地文件夹。';
+end;
 
 function RequestRunningAppExit(): Integer;
 var

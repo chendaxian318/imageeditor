@@ -4,7 +4,7 @@ Light Image Editor processes image pixels, metadata, projects, presets and batch
 on the user's Windows computer. Core viewing and editing features work without a network
 connection.
 
-轻量图片编辑器在用户自己的 Windows 电脑上处理图片像素、元数据、编辑项目、预设和批处理任务。看图与编辑核心功能在断网状态下仍可完整使用。
+CSImage 在用户自己的 Windows 电脑上处理图片像素、元数据、编辑项目、预设和批处理任务。看图与编辑核心功能在断网状态下仍可完整使用。
 
 The application does not upload images in the background, perform telemetry, show ads, or
 silently contact an update service. Version 1.0.0 contacts the selected update channel only

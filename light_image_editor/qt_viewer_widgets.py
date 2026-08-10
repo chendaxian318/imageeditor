@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
@@ -28,10 +28,12 @@ from PySide6.QtGui import (
     QFont,
     QIcon,
     QImage,
+    QKeyEvent,
     QKeySequence,
     QMouseEvent,
     QPainter,
     QPainterPath,
+    QPainterPathStroker,
     QPaintEvent,
     QPen,
     QPixmap,
@@ -43,6 +45,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -52,6 +55,8 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
     QGraphicsPixmapItem,
     QGraphicsScene,
+    QGraphicsSceneHoverEvent,
+    QGraphicsSceneMouseEvent,
     QGraphicsView,
     QHBoxLayout,
     QLabel,
@@ -208,14 +213,20 @@ class ViewerIconButton(QPushButton):
             painter.drawLine(cx - 7, cy + 7, cx - 3, cy + 6)
             painter.drawLine(cx + 4, cy - 6, cx + 7, cy - 3)
         elif name == "settings":
-            painter.drawEllipse(QPointF(cx, cy), 6, 6)
-            painter.drawEllipse(QPointF(cx, cy), 2, 2)
+            painter.setBrush(color)
+            painter.setPen(Qt.PenStyle.NoPen)
             for angle in range(0, 360, 45):
-                rad = math.radians(angle)
-                painter.drawLine(
-                    QPointF(cx + math.cos(rad) * 7, cy + math.sin(rad) * 7),
-                    QPointF(cx + math.cos(rad) * 9, cy + math.sin(rad) * 9),
-                )
+                painter.save()
+                painter.translate(cx, cy)
+                painter.rotate(angle)
+                painter.drawRoundedRect(QRectF(-1.7, -9.5, 3.4, 4.5), 0.9, 0.9)
+                painter.restore()
+            gear_pen = QPen(color, 2.4)
+            gear_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(gear_pen)
+            painter.drawEllipse(QPointF(cx, cy), 6.4, 6.4)
+            painter.drawEllipse(QPointF(cx, cy), 2.3, 2.3)
         painter.end()
 
 
@@ -226,12 +237,13 @@ class WindowControlButton(QPushButton):
         labels = {"minimize": "最小化", "maximize": "最大化", "close": "关闭"}
         self.setToolTip(labels[kind])
         self.setAccessibleName(labels[kind])
-        self.setFixedSize(46, 32)
+        self.setFixedSize(46, 41)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         hover = "#b64149" if kind == "close" else "#2a2e35"
         self.setStyleSheet(
-            f"QPushButton {{background: transparent; border: 0; border-radius: 8px;}}"
+            "QPushButton {background: transparent; border: 0; border-radius: 0;}"
             f"QPushButton:hover {{background: {hover};}}"
+            f"QPushButton:pressed {{background: {'#96343b' if kind == 'close' else '#343a43'};}}"
         )
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -245,7 +257,8 @@ class WindowControlButton(QPushButton):
         if self.kind == "minimize":
             painter.drawLine(cx - 5, cy, cx + 5, cy)
         elif self.kind == "maximize":
-            painter.drawRect(cx - 5, cy - 5, 10, 10)
+            painter.drawRect(cx - 3, cy - 5, 8, 8)
+            painter.drawRect(cx - 6, cy - 2, 8, 8)
         else:
             painter.drawLine(cx - 5, cy - 5, cx + 5, cy + 5)
             painter.drawLine(cx + 5, cy - 5, cx - 5, cy + 5)
@@ -259,32 +272,43 @@ class ViewerTitleBar(QFrame):
         self.setFixedHeight(42)
         self.setObjectName("viewerTitleBar")
         self.setStyleSheet(
-            f"#viewerTitleBar {{background: {SURFACE}; border-bottom: 1px solid {BORDER};}}"
+            f"#viewerTitleBar {{background: {SURFACE}; border: 0; "
+            f"border-bottom: 1px solid {BORDER}; border-radius: 0;}}"
         )
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 4, 6, 4)
-        layout.setSpacing(6)
+        layout.setContentsMargins(10, 0, 0, 0)
+        layout.setSpacing(0)
         mark = QLabel("●", self)
         mark.setStyleSheet(f"color: {TEXT}; font-size: 18px; background: transparent;")
         mark.setFixedWidth(22)
-        self.title_label = QLabel("轻量图片查看器", self)
+        self.title_label = QLabel("CSImage", self)
         self.title_label.setStyleSheet(f"color: {TEXT}; font: 600 13px 'Microsoft YaHei UI';")
         self.title_label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         layout.addWidget(mark)
         layout.addWidget(self.title_label)
         layout.addStretch(1)
-        self.minimize_button = WindowControlButton("minimize", self)
-        self.maximize_button = WindowControlButton("maximize", self)
-        self.close_button = WindowControlButton("close", self)
+        self.window_controls = QFrame(self)
+        self.window_controls.setObjectName("windowControls")
+        self.window_controls.setStyleSheet(
+            f"#windowControls {{background: {SURFACE_HIGH}; border: 0; "
+            "border-left: 1px solid #343a43; border-bottom-left-radius: 18px;}}"
+        )
+        controls_layout = QHBoxLayout(self.window_controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(0)
+        self.minimize_button = WindowControlButton("minimize", self.window_controls)
+        self.maximize_button = WindowControlButton("maximize", self.window_controls)
+        self.close_button = WindowControlButton("close", self.window_controls)
         self.minimize_button.clicked.connect(window.showMinimized)
         self.maximize_button.clicked.connect(self.toggle_maximize)
         self.close_button.clicked.connect(window.close)
-        layout.addWidget(self.minimize_button)
-        layout.addWidget(self.maximize_button)
-        layout.addWidget(self.close_button)
+        controls_layout.addWidget(self.minimize_button)
+        controls_layout.addWidget(self.maximize_button)
+        controls_layout.addWidget(self.close_button)
+        layout.addWidget(self.window_controls)
 
     def set_title(self, title: str) -> None:
-        self.title_label.setText(title or "轻量图片查看器")
+        self.title_label.setText(title or "CSImage")
 
     def toggle_maximize(self) -> None:
         if self.host_window.isMaximized():
@@ -376,33 +400,242 @@ class AnnotationSpec:
     kind: str
     start: QPointF
     end: QPointF
+    color: str = "#ff4c48"
+    size: int = 6
+    text: str = ""
+    number: int = 0
+    points: tuple[QPointF, ...] = ()
+    control: QPointF | None = None
+
+
+def _clone_annotation_spec(spec: AnnotationSpec) -> AnnotationSpec:
+    return AnnotationSpec(
+        spec.kind,
+        QPointF(spec.start),
+        QPointF(spec.end),
+        color=spec.color,
+        size=spec.size,
+        text=spec.text,
+        number=spec.number,
+        points=tuple(QPointF(point) for point in spec.points),
+        control=QPointF(spec.control) if spec.control is not None else None,
+    )
+
+
+def _annotation_signature(spec: AnnotationSpec) -> tuple[object, ...]:
+    return (
+        spec.kind,
+        spec.start.x(),
+        spec.start.y(),
+        spec.end.x(),
+        spec.end.y(),
+        spec.color,
+        spec.size,
+        spec.text,
+        spec.number,
+        tuple((point.x(), point.y()) for point in spec.points),
+        (spec.control.x(), spec.control.y()) if spec.control is not None else None,
+    )
 
 
 class MarkupItem(QGraphicsItem):
-    def __init__(self, spec: AnnotationSpec) -> None:
+    def __init__(
+        self,
+        spec: AnnotationSpec,
+        source_image: QImage | None = None,
+        *,
+        draft: bool = False,
+        changed: Callable[[MarkupItem], None] | None = None,
+        change_started: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__()
         self.spec = spec
+        self._source_image = source_image
+        self._draft = draft
+        self._changed = changed
+        self._change_started = change_started
+        self._resize_handle: str | None = None
+        self._resize_snapshot: AnnotationSpec | None = None
+        self._effect_cache_key: tuple[str, int, int, int, int, int] | None = None
+        self._effect_cache: QPixmap | None = None
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setAcceptHoverEvents(True)
         self.setZValue(20)
 
     def boundingRect(self) -> QRectF:
-        return QRectF(self.spec.start, self.spec.end).normalized().adjusted(-14, -14, 14, 14)
+        points = [self.spec.start, self.spec.end, *self.spec.points]
+        if self.spec.control is not None:
+            points.append(self.spec.control)
+        left = min(point.x() for point in points)
+        top = min(point.y() for point in points)
+        right = max(point.x() for point in points)
+        bottom = max(point.y() for point in points)
+        if self.spec.kind == "text":
+            padding = max(4.0, self.spec.size * 0.15)
+            return QRectF(left, top, right - left, bottom - top).adjusted(
+                -padding, -padding, padding, padding
+            )
+        padding = max(14.0, float(self.spec.size * 3))
+        if self.spec.kind == "number":
+            radius = max(15.0, float(self.spec.size * 3))
+            return QRectF(
+                self.spec.start.x() - radius,
+                self.spec.start.y() - radius,
+                radius * 2,
+                radius * 2,
+            ).adjusted(-3, -3, 3, 3)
+        return QRectF(left, top, right - left, bottom - top).adjusted(
+            -padding, -padding, padding, padding
+        )
+
+    def shape(self) -> QPainterPath:
+        if self.spec.kind not in {"line", "arrow"}:
+            return super().shape()
+        path = QPainterPath(self.spec.start)
+        path.quadTo(self._curve_control(), self.spec.end)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(float(self.spec.size + 8), 12.0 / self._view_scale()))
+        hit_shape = stroker.createStroke(path)
+        radius = 9.0 / self._view_scale()
+        for position in self._handle_positions().values():
+            hit_shape.addEllipse(position, radius, radius)
+        return hit_shape
 
     def set_end(self, point: QPointF) -> None:
         self.prepareGeometryChange()
+        self.spec.end = point
+        if self.spec.kind in {"line", "arrow"} and self._draft:
+            self.spec.control = QPointF(
+                (self.spec.start.x() + point.x()) / 2,
+                (self.spec.start.y() + point.y()) / 2,
+            )
+        self._effect_cache_key = None
+        self._effect_cache = None
+        self.update()
+
+    def finish_draft(self) -> None:
+        self._draft = False
+        self.setSelected(True)
+        self.update()
+
+    def set_color(self, color: str) -> None:
+        candidate = QColor(color)
+        if not candidate.isValid():
+            return
+        self.spec.color = candidate.name()
+        self.update()
+        self._notify_changed()
+
+    def set_size(self, size: int) -> None:
+        self.prepareGeometryChange()
+        self.spec.size = max(1, int(size))
+        self._invalidate_effect_cache()
+        self.update()
+        self._notify_changed()
+
+    def add_point(self, point: QPointF) -> None:
+        self.prepareGeometryChange()
+        self.spec.points = (*self.spec.points, point)
         self.spec.end = point
         self.update()
 
     def paint(self, painter: QPainter, _option: object, _widget: QWidget | None = None) -> None:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#ff4c48"), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        color = QColor(self.spec.color)
+        pen = QPen(
+            color,
+            self.spec.size,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
         painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        bounds = QRectF(self.spec.start, self.spec.end).normalized()
         if self.spec.kind == "rectangle":
-            painter.drawRect(QRectF(self.spec.start, self.spec.end).normalized())
+            painter.drawRect(bounds)
+            self._paint_selection(painter)
+            return
+        if self.spec.kind == "ellipse":
+            painter.drawEllipse(bounds)
+            self._paint_selection(painter)
+            return
+        if self.spec.kind == "freehand":
+            points = self.spec.points or (self.spec.start, self.spec.end)
+            if len(points) >= 2:
+                path = QPainterPath(points[0])
+                for point in points[1:]:
+                    path.lineTo(point)
+                painter.drawPath(path)
+            self._paint_selection(painter)
+            return
+        if self.spec.kind == "text":
+            font = QFont("Microsoft YaHei UI")
+            font.setPixelSize(max(1, self.spec.size))
+            font.setWeight(QFont.Weight.DemiBold)
+            painter.setFont(font)
+            painter.drawText(
+                bounds,
+                Qt.AlignmentFlag.AlignLeft
+                | Qt.AlignmentFlag.AlignVCenter
+                | Qt.TextFlag.TextSingleLine,
+                self.spec.text or "文字",
+            )
+            self._paint_selection(painter)
+            return
+        if self.spec.kind == "number":
+            radius = max(15.0, float(self.spec.size * 3))
+            circle = QRectF(
+                self.spec.start.x() - radius,
+                self.spec.start.y() - radius,
+                radius * 2,
+                radius * 2,
+            )
+            painter.setBrush(color)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(circle)
+            painter.setPen(QColor("#ffffff"))
+            font = QFont("Microsoft YaHei UI", max(11, self.spec.size * 3))
+            font.setWeight(QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.drawText(circle, Qt.AlignmentFlag.AlignCenter, str(self.spec.number))
+            self._paint_selection(painter)
+            return
+        if self.spec.kind == "redact":
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#111315"))
+            painter.drawRect(bounds)
+            self._paint_selection(painter)
+            return
+        if self.spec.kind in {"mosaic", "blur"}:
+            preview = self._effect_preview(bounds)
+            if preview is not None:
+                pixmap, target = preview
+                painter.drawPixmap(
+                    target,
+                    pixmap,
+                    QRectF(0, 0, pixmap.width(), pixmap.height()),
+                )
+            if self._draft:
+                painter.setPen(QPen(color, 2, Qt.PenStyle.DashLine))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(bounds)
+            self._paint_selection(painter)
             return
         start, end = self.spec.start, self.spec.end
-        painter.drawLine(start, end)
-        angle = math.atan2(end.y() - start.y(), end.x() - start.x())
-        length = 16.0
+        control = self._curve_control()
+        path = QPainterPath(start)
+        path.quadTo(control, end)
+        painter.drawPath(path)
+        if self.spec.kind == "line":
+            self._paint_selection(painter)
+            return
+        tangent_start = control
+        if math.hypot(end.x() - control.x(), end.y() - control.y()) < 0.01:
+            tangent_start = start
+        angle = math.atan2(end.y() - tangent_start.y(), end.x() - tangent_start.x())
+        length = max(16.0, float(self.spec.size * 4))
         wing = math.radians(28)
         left = QPointF(
             end.x() - math.cos(angle - wing) * length, end.y() - math.sin(angle - wing) * length
@@ -410,13 +643,257 @@ class MarkupItem(QGraphicsItem):
         right = QPointF(
             end.x() - math.cos(angle + wing) * length, end.y() - math.sin(angle + wing) * length
         )
-        painter.setBrush(QColor("#ff4c48"))
+        painter.setBrush(color)
         painter.drawPolygon(QPolygonF([end, left, right]))
+        self._paint_selection(painter)
+
+    def hoverMoveEvent(self, event: QGraphicsSceneHoverEvent) -> None:
+        handle = self._handle_at(event.pos()) if self.isSelected() else None
+        if handle in {"nw", "se"}:
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif handle in {"ne", "sw"}:
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        elif handle is not None:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        super().hoverMoveEvent(event)
+
+    def mousePressEvent(self, event: QGraphicsSceneMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.isSelected():
+            if self._change_started is not None:
+                self._change_started()
+            handle = self._handle_at(event.pos())
+            if handle is not None:
+                self._resize_handle = handle
+                self._resize_snapshot = self._copy_spec()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent) -> None:
+        if self._resize_handle is not None and self._resize_snapshot is not None:
+            self._resize_from_snapshot(event.scenePos())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:
+        if self._resize_handle is not None:
+            self._resize_handle = None
+            self._resize_snapshot = None
+            self._notify_changed()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+        delta = self.pos()
+        if abs(delta.x()) > 0.01 or abs(delta.y()) > 0.01:
+            self.prepareGeometryChange()
+            self.spec.start += delta
+            self.spec.end += delta
+            self.spec.points = tuple(point + delta for point in self.spec.points)
+            if self.spec.control is not None:
+                self.spec.control += delta
+            self.setPos(0, 0)
+            self._invalidate_effect_cache()
+            self.update()
+            self._notify_changed()
+        else:
+            self._notify_changed()
+
+    def _copy_spec(self) -> AnnotationSpec:
+        return _clone_annotation_spec(self.spec)
+
+    def _resize_from_snapshot(self, scene_point: QPointF) -> None:
+        snapshot = self._resize_snapshot
+        handle = self._resize_handle
+        if snapshot is None or handle is None:
+            return
+        point = self._bounded_point(scene_point)
+        self.prepareGeometryChange()
+        if snapshot.kind in {"line", "arrow"}:
+            if handle == "start":
+                self.spec.start = point
+            elif handle == "control":
+                self.spec.control = QPointF(
+                    2 * point.x() - (self.spec.start.x() + self.spec.end.x()) / 2,
+                    2 * point.y() - (self.spec.start.y() + self.spec.end.y()) / 2,
+                )
+            else:
+                self.spec.end = point
+        else:
+            original = self._selection_rect_for(snapshot)
+            opposite = {
+                "nw": original.bottomRight(),
+                "ne": original.bottomLeft(),
+                "se": original.topLeft(),
+                "sw": original.topRight(),
+            }.get(handle)
+            if opposite is None:
+                return
+            resized = QRectF(opposite, point).normalized()
+            if resized.width() < 2 or resized.height() < 2:
+                return
+            self.spec.start = resized.topLeft()
+            self.spec.end = resized.bottomRight()
+            if snapshot.kind == "freehand" and snapshot.points:
+                source = self._selection_rect_for(snapshot)
+                width = max(1.0, source.width())
+                height = max(1.0, source.height())
+                self.spec.points = tuple(
+                    QPointF(
+                        resized.left() + (value.x() - source.left()) / width * resized.width(),
+                        resized.top() + (value.y() - source.top()) / height * resized.height(),
+                    )
+                    for value in snapshot.points
+                )
+            if snapshot.kind == "text" and original.height() > 0:
+                self.spec.size = max(
+                    1,
+                    round(snapshot.size * resized.height() / original.height()),
+                )
+        self._invalidate_effect_cache()
+        self.update()
+
+    def _bounded_point(self, point: QPointF) -> QPointF:
+        if self._source_image is None:
+            return point
+        return QPointF(
+            max(0.0, min(float(self._source_image.width()), point.x())),
+            max(0.0, min(float(self._source_image.height()), point.y())),
+        )
+
+    def _selection_rect(self) -> QRectF:
+        return self._selection_rect_for(self.spec)
+
+    @staticmethod
+    def _selection_rect_for(spec: AnnotationSpec) -> QRectF:
+        if spec.kind == "freehand" and spec.points:
+            left = min(point.x() for point in spec.points)
+            top = min(point.y() for point in spec.points)
+            right = max(point.x() for point in spec.points)
+            bottom = max(point.y() for point in spec.points)
+            return QRectF(left, top, right - left, bottom - top)
+        if spec.kind == "number":
+            radius = max(15.0, float(spec.size * 3))
+            return QRectF(
+                spec.start.x() - radius,
+                spec.start.y() - radius,
+                radius * 2,
+                radius * 2,
+            )
+        return QRectF(spec.start, spec.end).normalized()
+
+    def _handle_positions(self) -> dict[str, QPointF]:
+        if self.spec.kind in {"line", "arrow"}:
+            return {
+                "start": self.spec.start,
+                "control": self._curve_midpoint(),
+                "end": self.spec.end,
+            }
+        if self.spec.kind == "number":
+            return {}
+        rect = self._selection_rect()
+        return {
+            "nw": rect.topLeft(),
+            "ne": rect.topRight(),
+            "se": rect.bottomRight(),
+            "sw": rect.bottomLeft(),
+        }
+
+    def _view_scale(self) -> float:
+        if self.scene() is not None and self.scene().views():
+            return max(0.01, abs(self.scene().views()[0].transform().m11()))
+        return 1.0
+
+    def _handle_at(self, point: QPointF) -> str | None:
+        radius = 8.0 / self._view_scale()
+        for name, position in self._handle_positions().items():
+            if math.hypot(point.x() - position.x(), point.y() - position.y()) <= radius:
+                return name
+        return None
+
+    def _paint_selection(self, painter: QPainter) -> None:
+        if not self.isSelected() or self._draft:
+            return
+        scale = self._view_scale()
+        pen = QPen(QColor("#2f88ff"), 1, Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if self.spec.kind not in {"line", "arrow"}:
+            painter.drawRect(self._selection_rect())
+        radius = 4.5 / scale
+        painter.setPen(QPen(QColor("#2f88ff"), 1 / scale))
+        painter.setBrush(QColor("#ffffff"))
+        for position in self._handle_positions().values():
+            painter.drawEllipse(position, radius, radius)
+
+    def _curve_control(self) -> QPointF:
+        if self.spec.control is not None:
+            return self.spec.control
+        return QPointF(
+            (self.spec.start.x() + self.spec.end.x()) / 2,
+            (self.spec.start.y() + self.spec.end.y()) / 2,
+        )
+
+    def _curve_midpoint(self) -> QPointF:
+        control = self._curve_control()
+        return QPointF(
+            0.25 * self.spec.start.x() + 0.5 * control.x() + 0.25 * self.spec.end.x(),
+            0.25 * self.spec.start.y() + 0.5 * control.y() + 0.25 * self.spec.end.y(),
+        )
+
+    def _invalidate_effect_cache(self) -> None:
+        self._effect_cache_key = None
+        self._effect_cache = None
+
+    def _notify_changed(self) -> None:
+        if self._changed is not None:
+            self._changed(self)
+
+    def _effect_preview(self, bounds: QRectF) -> tuple[QPixmap, QRectF] | None:
+        source = self._source_image
+        if source is None or bounds.width() < 1 or bounds.height() < 1:
+            return None
+        left = max(0, math.floor(bounds.left()))
+        top = max(0, math.floor(bounds.top()))
+        right = min(source.width(), math.ceil(bounds.right()))
+        bottom = min(source.height(), math.ceil(bounds.bottom()))
+        if right <= left or bottom <= top:
+            return None
+        key = (self.spec.kind, left, top, right, bottom, self.spec.size)
+        if self._effect_cache_key != key or self._effect_cache is None:
+            region = qimage_to_pil(source.copy(left, top, right - left, bottom - top))
+            try:
+                if self.spec.kind == "mosaic":
+                    cell = max(4, self.spec.size * 2)
+                    small = region.resize(
+                        (max(1, region.width // cell), max(1, region.height // cell)),
+                        Image.Resampling.BILINEAR,
+                    )
+                    try:
+                        effect = small.resize(region.size, Image.Resampling.NEAREST)
+                    finally:
+                        small.close()
+                else:
+                    effect = region.filter(ImageFilter.GaussianBlur(radius=max(2, self.spec.size)))
+                try:
+                    self._effect_cache = QPixmap.fromImage(pil_to_qimage(effect))
+                finally:
+                    effect.close()
+            finally:
+                region.close()
+            self._effect_cache_key = key
+        return self._effect_cache, QRectF(left, top, right - left, bottom - top)
 
 
 class ImageView(QGraphicsView):
     zoomChanged = Signal(int)
     pointerMoved = Signal(int)
+    annotationSizeSelected = Signal(int)
+    annotationSelected = Signal(str, str, int)
+    annotationSelectionCleared = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -442,6 +919,16 @@ class ImageView(QGraphicsView):
         self._draft_item: MarkupItem | None = None
         self._annotations: list[AnnotationSpec] = []
         self._annotation_items: list[MarkupItem] = []
+        self._annotation_history: list[list[AnnotationSpec]] = []
+        self._pending_annotation_history: list[AnnotationSpec] | None = None
+        self._annotation_color = "#ff4c48"
+        self._annotation_size = 6
+        self._annotation_font_size = 20
+        self._text_editor: QLineEdit | None = None
+        self._text_editor_scene_point: QPointF | None = None
+        self._text_editor_annotation_index: int | None = None
+        self._text_editor_color = self._annotation_color
+        self._text_editor_size = self._annotation_font_size
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
 
     @property
@@ -456,7 +943,12 @@ class ImageView(QGraphicsView):
     def annotations(self) -> tuple[AnnotationSpec, ...]:
         return tuple(self._annotations)
 
+    @property
+    def has_inline_text_editor(self) -> bool:
+        return self._text_editor is not None
+
     def set_image(self, image: QImage, *, fit: bool = True) -> None:
+        self._cancel_inline_text_editor()
         self.scene().clear()
         self._source_qimage = image.copy()
         self._pixmap_item = self.scene().addPixmap(QPixmap.fromImage(image))
@@ -464,6 +956,8 @@ class ImageView(QGraphicsView):
         self.scene().setSceneRect(self._pixmap_item.boundingRect())
         self._annotations.clear()
         self._annotation_items.clear()
+        self._annotation_history.clear()
+        self._pending_annotation_history = None
         self._draft_item = None
         self._annotation_start = None
         if fit:
@@ -472,10 +966,16 @@ class ImageView(QGraphicsView):
             self.actual_size()
 
     def clear_image(self) -> None:
+        self._cancel_inline_text_editor()
         self.scene().clear()
         self._pixmap_item = None
         self._source_qimage = None
         self._annotations.clear()
+        self._annotation_items.clear()
+        self._annotation_history.clear()
+        self._pending_annotation_history = None
+        self._draft_item = None
+        self._annotation_start = None
         self.zoomChanged.emit(100)
 
     def fit_to_window(self) -> None:
@@ -484,6 +984,7 @@ class ImageView(QGraphicsView):
         self._fit_mode = True
         self.resetTransform()
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+        self._refresh_inline_text_editor()
         self.zoomChanged.emit(self.zoom_percent())
 
     def actual_size(self) -> None:
@@ -492,6 +993,7 @@ class ImageView(QGraphicsView):
         self._fit_mode = False
         self.resetTransform()
         self.centerOn(self._pixmap_item)
+        self._refresh_inline_text_editor()
         self.zoomChanged.emit(100)
 
     def zoom_percent(self) -> int:
@@ -504,38 +1006,132 @@ class ImageView(QGraphicsView):
         self._fit_mode = False
         self.resetTransform()
         self.scale(bounded / 100.0, bounded / 100.0)
+        self._refresh_inline_text_editor()
         self.zoomChanged.emit(bounded)
 
     def step_zoom(self, delta: int) -> None:
         self.set_zoom_percent(self.zoom_percent() + delta)
 
     def set_annotation_tool(self, tool: str) -> None:
-        self._annotation_tool = tool if tool in {"rectangle", "arrow"} else ""
+        supported = {
+            "select",
+            "rectangle",
+            "arrow",
+            "line",
+            "ellipse",
+            "freehand",
+            "text",
+            "number",
+            "mosaic",
+            "blur",
+            "redact",
+        }
+        if self._text_editor is not None:
+            self._commit_inline_text_editor()
+        self.scene().clearSelection()
+        self._annotation_tool = tool if tool in supported else ""
         self.setDragMode(
             QGraphicsView.DragMode.NoDrag
             if self._annotation_tool
             else QGraphicsView.DragMode.ScrollHandDrag
         )
         self.viewport().setCursor(
-            Qt.CursorShape.CrossCursor if self._annotation_tool else Qt.CursorShape.ArrowCursor
+            Qt.CursorShape.CrossCursor
+            if self._annotation_tool and self._annotation_tool != "select"
+            else Qt.CursorShape.ArrowCursor
         )
 
-    def undo_annotation(self) -> None:
-        if not self._annotations:
+    def set_annotation_color(self, color: str) -> None:
+        candidate = QColor(color)
+        if candidate.isValid():
+            self._annotation_color = candidate.name()
+            if self._text_editor is not None:
+                self._text_editor_color = self._annotation_color
+                self._refresh_inline_text_editor()
+                return
+            selected = self._selected_markup_item()
+            if selected is not None and selected.spec.color != self._annotation_color:
+                self._record_annotation_history()
+                selected.set_color(self._annotation_color)
+
+    def set_annotation_size(self, size: int) -> None:
+        selected = self._selected_markup_item()
+        if selected is not None and self._text_editor is None:
+            if selected.spec.kind == "text":
+                self._annotation_font_size = max(8, min(96, int(size)))
+                scale = max(0.01, abs(self.transform().m11()))
+                scene_size = max(1, round(self._annotation_font_size / scale))
+                if selected.spec.size != scene_size:
+                    self._record_annotation_history()
+                    selected.set_size(scene_size)
+            else:
+                self._annotation_size = max(2, min(32, int(size)))
+                if selected.spec.size != self._annotation_size:
+                    self._record_annotation_history()
+                    selected.set_size(self._annotation_size)
             return
-        self._annotations.pop()
-        item = self._annotation_items.pop()
-        self.scene().removeItem(item)
+        if self._annotation_tool == "text" or self._text_editor is not None:
+            self._annotation_font_size = max(8, min(96, int(size)))
+        else:
+            self._annotation_size = max(2, min(32, int(size)))
+        if self._text_editor is not None:
+            self._text_editor_size = self._annotation_font_size
+            self._refresh_inline_text_editor()
+
+    def add_annotation(self, spec: AnnotationSpec) -> None:
+        item = MarkupItem(
+            spec,
+            self._source_qimage,
+            changed=self._annotation_item_changed,
+            change_started=self._begin_annotation_change,
+        )
+        self.scene().addItem(item)
+        self._annotations.append(spec)
+        self._annotation_items.append(item)
+
+    def undo_annotation(self) -> None:
+        if not self._annotation_history:
+            return
+        snapshot = self._annotation_history.pop()
+        self._restore_annotations(snapshot)
 
     def clear_annotations(self) -> None:
+        self._cancel_inline_text_editor()
         for item in self._annotation_items:
             self.scene().removeItem(item)
         self._annotations.clear()
         self._annotation_items.clear()
+        self._annotation_history.clear()
+        self._pending_annotation_history = None
         if self._draft_item is not None:
             self.scene().removeItem(self._draft_item)
             self._draft_item = None
         self._annotation_start = None
+
+    def commit_pending_text(self) -> None:
+        if self._text_editor is not None:
+            self._commit_inline_text_editor()
+
+    def undo_inline_text(self) -> bool:
+        if self._text_editor is None:
+            return False
+        self._text_editor.undo()
+        return True
+
+    def cancel_markup_interaction(self) -> bool:
+        if self._text_editor is not None:
+            self._cancel_inline_text_editor()
+            return True
+        if self._draft_item is not None:
+            self.scene().removeItem(self._draft_item)
+            self._draft_item = None
+            self._annotation_start = None
+            return True
+        if self._selected_markup_item() is not None:
+            self.scene().clearSelection()
+            self.annotationSelectionCleared.emit()
+            return True
+        return False
 
     def composited_pil(self, base: Image.Image) -> Image.Image:
         output = base.convert("RGBA")
@@ -543,28 +1139,135 @@ class ImageView(QGraphicsView):
         for annotation in self._annotations:
             start = (round(annotation.start.x()), round(annotation.start.y()))
             end = (round(annotation.end.x()), round(annotation.end.y()))
+            left, right = sorted((max(0, start[0]), min(output.width, end[0])))
+            top, bottom = sorted((max(0, start[1]), min(output.height, end[1])))
+            box = (left, top, right, bottom)
+            width = max(2, annotation.size)
             if annotation.kind == "rectangle":
-                draw.rectangle((*start, *end), outline="#ff4c48", width=4)
+                draw.rectangle(box, outline=annotation.color, width=width)
                 continue
-            draw.line((*start, *end), fill="#ff4c48", width=4)
-            angle = math.atan2(end[1] - start[1], end[0] - start[0])
-            length = 16
+            if annotation.kind == "ellipse":
+                draw.ellipse(box, outline=annotation.color, width=width)
+                continue
+            if annotation.kind == "freehand":
+                points = annotation.points or (annotation.start, annotation.end)
+                draw.line(
+                    [(round(point.x()), round(point.y())) for point in points],
+                    fill=annotation.color,
+                    width=width,
+                    joint="curve",
+                )
+                continue
+            if annotation.kind == "text":
+                font = _markup_font(max(1, annotation.size))
+                draw.multiline_text(
+                    start,
+                    annotation.text or "文字",
+                    fill=annotation.color,
+                    font=font,
+                    spacing=max(1, annotation.size),
+                    stroke_width=max(0, round(annotation.size / 24)),
+                    stroke_fill="#101214",
+                )
+                continue
+            if annotation.kind == "number":
+                radius = max(15, annotation.size * 3)
+                circle = (
+                    start[0] - radius,
+                    start[1] - radius,
+                    start[0] + radius,
+                    start[1] + radius,
+                )
+                draw.ellipse(circle, fill=annotation.color)
+                font = _markup_font(max(12, annotation.size * 3))
+                label = str(annotation.number)
+                label_box = draw.textbbox((0, 0), label, font=font)
+                label_width = label_box[2] - label_box[0]
+                label_height = label_box[3] - label_box[1]
+                draw.text(
+                    (start[0] - label_width / 2, start[1] - label_height / 2 - label_box[1]),
+                    label,
+                    fill="#ffffff",
+                    font=font,
+                )
+                continue
+            if annotation.kind == "redact":
+                draw.rectangle(box, fill="#111315")
+                continue
+            if annotation.kind in {"mosaic", "blur"} and right > left and bottom > top:
+                region = output.crop(box)
+                try:
+                    if annotation.kind == "mosaic":
+                        cell = max(4, annotation.size * 2)
+                        small = region.resize(
+                            (max(1, region.width // cell), max(1, region.height // cell)),
+                            Image.Resampling.BILINEAR,
+                        )
+                        try:
+                            effect = small.resize(region.size, Image.Resampling.NEAREST)
+                        finally:
+                            small.close()
+                    else:
+                        effect = region.filter(
+                            ImageFilter.GaussianBlur(radius=max(2, annotation.size))
+                        )
+                    try:
+                        output.paste(effect, (left, top))
+                    finally:
+                        effect.close()
+                finally:
+                    region.close()
+                continue
+            control = annotation.control or QPointF(
+                (annotation.start.x() + annotation.end.x()) / 2,
+                (annotation.start.y() + annotation.end.y()) / 2,
+            )
+            distance = math.hypot(
+                annotation.end.x() - annotation.start.x(),
+                annotation.end.y() - annotation.start.y(),
+            )
+            segments = max(24, min(160, round(distance / 4)))
+            curve: list[tuple[float, float]] = []
+            for step in range(segments + 1):
+                t = step / segments
+                inverse = 1.0 - t
+                curve.append(
+                    (
+                        inverse * inverse * annotation.start.x()
+                        + 2 * inverse * t * control.x()
+                        + t * t * annotation.end.x(),
+                        inverse * inverse * annotation.start.y()
+                        + 2 * inverse * t * control.y()
+                        + t * t * annotation.end.y(),
+                    )
+                )
+            draw.line(curve, fill=annotation.color, width=width, joint="curve")
+            if annotation.kind == "line":
+                continue
+            tangent_x = annotation.end.x() - control.x()
+            tangent_y = annotation.end.y() - control.y()
+            if math.hypot(tangent_x, tangent_y) < 0.01:
+                tangent_x = annotation.end.x() - annotation.start.x()
+                tangent_y = annotation.end.y() - annotation.start.y()
+            angle = math.atan2(tangent_y, tangent_x)
+            length = max(16, annotation.size * 4)
             wing = math.radians(28)
-            left = (
+            arrow_left = (
                 end[0] - math.cos(angle - wing) * length,
                 end[1] - math.sin(angle - wing) * length,
             )
-            right = (
+            arrow_right = (
                 end[0] - math.cos(angle + wing) * length,
                 end[1] - math.sin(angle + wing) * length,
             )
-            draw.polygon([end, left, right], fill="#ff4c48")
+            draw.polygon([end, arrow_left, arrow_right], fill=annotation.color)
         return output
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         if self._fit_mode and self._pixmap_item is not None:
             self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+            self._refresh_inline_text_editor()
             self.zoomChanged.emit(self.zoom_percent())
 
     def wheelEvent(self, event: QWheelEvent) -> None:
@@ -578,7 +1281,10 @@ class ImageView(QGraphicsView):
         self.pointerMoved.emit(round(event.position().y()))
         if self._annotation_tool and self._draft_item is not None:
             point = self._bounded_scene_point(event.position().toPoint())
-            self._draft_item.set_end(point)
+            if self._annotation_tool == "freehand":
+                self._draft_item.add_point(point)
+            else:
+                self._draft_item.set_end(point)
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -590,20 +1296,84 @@ class ImageView(QGraphicsView):
             and event.button() == Qt.MouseButton.LeftButton
         ):
             point = self._bounded_scene_point(event.position().toPoint())
+            if self._annotation_tool == "select":
+                target = self._markup_item_at(point)
+                if target is not None:
+                    self._select_annotation_item(target)
+                    super().mousePressEvent(event)
+                else:
+                    self.scene().clearSelection()
+                    self.annotationSelectionCleared.emit()
+                    event.accept()
+                return
+            self.scene().clearSelection()
+            if self._annotation_tool == "text":
+                self._annotation_start = point
+                self._text_editor_annotation_index = self._text_annotation_at(point)
+                if self._text_editor_annotation_index is not None:
+                    self._annotation_start = self._annotations[
+                        self._text_editor_annotation_index
+                    ].start
+                event.accept()
+                return
             self._annotation_start = point
-            spec = AnnotationSpec(self._annotation_tool, point, point)
-            self._draft_item = MarkupItem(spec)
+            number = 1 + sum(spec.kind == "number" for spec in self._annotations)
+            spec = AnnotationSpec(
+                self._annotation_tool,
+                point,
+                point,
+                color=self._annotation_color,
+                size=self._annotation_size,
+                number=number,
+                points=(point,) if self._annotation_tool == "freehand" else (),
+            )
+            self._draft_item = MarkupItem(
+                spec,
+                self._source_qimage,
+                draft=True,
+                changed=self._annotation_item_changed,
+                change_started=self._begin_annotation_change,
+            )
             self.scene().addItem(self._draft_item)
             event.accept()
             return
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._annotation_tool == "text"
+            and self._annotation_start is not None
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            point = self._annotation_start
+            index = self._text_editor_annotation_index
+            self._annotation_start = None
+            self._begin_inline_text_editor(point, index)
+            event.accept()
+            return
         if self._draft_item is not None and event.button() == Qt.MouseButton.LeftButton:
             spec = self._draft_item.spec
-            if abs(spec.end.x() - spec.start.x()) + abs(spec.end.y() - spec.start.y()) >= 4:
+            point_tool = spec.kind == "number"
+            if (
+                point_tool
+                and abs(spec.end.x() - spec.start.x()) + abs(spec.end.y() - spec.start.y()) < 4
+            ):
+                self._draft_item.set_end(
+                    QPointF(
+                        spec.start.x() + max(120, spec.size * 24),
+                        spec.start.y() + max(42, spec.size * 7),
+                    )
+                )
+            if (
+                point_tool
+                or abs(spec.end.x() - spec.start.x()) + abs(spec.end.y() - spec.start.y()) >= 4
+            ):
+                self._record_annotation_history()
+                self.scene().clearSelection()
+                self._draft_item.finish_draft()
                 self._annotations.append(spec)
                 self._annotation_items.append(self._draft_item)
+                self._select_annotation_item(self._draft_item)
             else:
                 self.scene().removeItem(self._draft_item)
             self._draft_item = None
@@ -612,6 +1382,267 @@ class ImageView(QGraphicsView):
             return
         super().mouseReleaseEvent(event)
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if self._pixmap_item is not None and event.button() == Qt.MouseButton.LeftButton:
+            point = self._bounded_scene_point(event.position().toPoint())
+            target = self._markup_item_at(point)
+            if target is not None and target.spec.kind == "text":
+                try:
+                    index = self._annotation_items.index(target)
+                except ValueError:
+                    index = None
+                if index is not None:
+                    self._annotation_tool = "select"
+                    self._begin_inline_text_editor(target.spec.start, index)
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        selected = self._selected_markup_item()
+        if selected is not None and event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
+            try:
+                index = self._annotation_items.index(selected)
+            except ValueError:
+                index = None
+            if index is not None:
+                self._record_annotation_history()
+                self.scene().removeItem(selected)
+                self._annotation_items.pop(index)
+                self._annotations.pop(index)
+                self.annotationSelectionCleared.emit()
+                event.accept()
+                return
+        if selected is not None and event.key() == Qt.Key.Key_Escape:
+            self.scene().clearSelection()
+            self.annotationSelectionCleared.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self._text_editor and isinstance(event, QKeyEvent):
+            if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+                self._cancel_inline_text_editor()
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
+    def _text_annotation_at(self, point: QPointF) -> int | None:
+        for index in range(len(self._annotation_items) - 1, -1, -1):
+            spec = self._annotations[index]
+            item = self._annotation_items[index]
+            if spec.kind == "text" and item.boundingRect().contains(point):
+                return index
+        return None
+
+    def _markup_item_at(self, point: QPointF) -> MarkupItem | None:
+        for candidate in self.scene().items(point):
+            if isinstance(candidate, MarkupItem) and candidate is not self._draft_item:
+                return candidate
+        return None
+
+    def _selected_markup_item(self) -> MarkupItem | None:
+        for candidate in self.scene().selectedItems():
+            if isinstance(candidate, MarkupItem):
+                return candidate
+        return None
+
+    def _select_annotation_item(self, item: MarkupItem) -> None:
+        self.scene().clearSelection()
+        item.setSelected(True)
+        self._annotation_tool = "select"
+        self._annotation_item_changed(item)
+
+    def _annotation_item_changed(self, item: MarkupItem) -> None:
+        self._commit_pending_annotation_history()
+        if not item.isSelected():
+            return
+        size = item.spec.size
+        if item.spec.kind == "text":
+            scale = max(0.01, abs(self.transform().m11()))
+            size = max(8, min(96, round(size * scale)))
+            self._annotation_font_size = size
+        else:
+            size = max(2, min(32, size))
+            self._annotation_size = size
+        self._annotation_color = item.spec.color
+        self.annotationSelected.emit(item.spec.kind, item.spec.color, size)
+
+    def _snapshot_annotations(self) -> list[AnnotationSpec]:
+        return [_clone_annotation_spec(spec) for spec in self._annotations]
+
+    @staticmethod
+    def _snapshot_signature(snapshot: list[AnnotationSpec]) -> tuple[tuple[object, ...], ...]:
+        return tuple(_annotation_signature(spec) for spec in snapshot)
+
+    def _record_annotation_history(self) -> None:
+        self._pending_annotation_history = None
+        snapshot = self._snapshot_annotations()
+        if self._annotation_history and self._snapshot_signature(
+            self._annotation_history[-1]
+        ) == self._snapshot_signature(snapshot):
+            return
+        self._annotation_history.append(snapshot)
+
+    def _begin_annotation_change(self) -> None:
+        self._pending_annotation_history = self._snapshot_annotations()
+
+    def _commit_pending_annotation_history(self) -> None:
+        pending = self._pending_annotation_history
+        self._pending_annotation_history = None
+        if pending is None:
+            return
+        if self._snapshot_signature(pending) == self._snapshot_signature(
+            self._snapshot_annotations()
+        ):
+            return
+        if self._annotation_history and self._snapshot_signature(
+            self._annotation_history[-1]
+        ) == self._snapshot_signature(pending):
+            return
+        self._annotation_history.append(pending)
+
+    def _restore_annotations(self, snapshot: list[AnnotationSpec]) -> None:
+        self._cancel_inline_text_editor()
+        for item in self._annotation_items:
+            self.scene().removeItem(item)
+        self._annotations.clear()
+        self._annotation_items.clear()
+        self._pending_annotation_history = None
+        for spec in snapshot:
+            self.add_annotation(_clone_annotation_spec(spec))
+        self.scene().clearSelection()
+        self.annotationSelectionCleared.emit()
+
+    def _begin_inline_text_editor(self, point: QPointF, index: int | None) -> None:
+        self._cancel_inline_text_editor()
+        initial_text = ""
+        color = self._annotation_color
+        size = self._annotation_font_size
+        if index is not None:
+            spec = self._annotations[index]
+            initial_text = spec.text
+            color = spec.color
+            scale = max(0.01, abs(self.transform().m11()))
+            size = max(8, min(96, round(spec.size * scale)))
+            self._annotation_font_size = size
+            self._annotation_items[index].setVisible(False)
+            self.annotationSizeSelected.emit(size)
+
+        editor = QLineEdit(self.viewport())
+        editor.setAccessibleName("图片上的文字标注输入框")
+        editor.setPlaceholderText("输入文字，Enter 确认，Esc 取消")
+        editor.setText(initial_text)
+        editor.installEventFilter(self)
+        editor.returnPressed.connect(self._commit_inline_text_editor)
+        editor.editingFinished.connect(self._commit_inline_text_editor)
+        editor.textChanged.connect(self._refresh_inline_text_editor)
+
+        self._text_editor = editor
+        self._text_editor_scene_point = point
+        self._text_editor_annotation_index = index
+        self._text_editor_color = color
+        self._text_editor_size = size
+        self._refresh_inline_text_editor()
+        editor.show()
+        editor.raise_()
+        editor.setFocus(Qt.FocusReason.MouseFocusReason)
+        if initial_text:
+            editor.selectAll()
+
+    def _refresh_inline_text_editor(self) -> None:
+        editor = self._text_editor
+        point = self._text_editor_scene_point
+        if editor is None or point is None:
+            return
+        color = self._text_editor_color
+        size = self._text_editor_size
+        editor.setStyleSheet(
+            f"QLineEdit {{color: {color}; background: rgba(18, 21, 25, 238);"
+            f"border: 2px solid {color}; border-radius: 7px; padding: 5px 8px;}}"
+        )
+        font = QFont("Microsoft YaHei UI")
+        font.setPixelSize(max(8, size))
+        font.setWeight(QFont.Weight.DemiBold)
+        editor.setFont(font)
+        metrics = editor.fontMetrics()
+        desired_width = max(
+            220,
+            min(520, metrics.horizontalAdvance(editor.text() or "输入文字") + 52),
+        )
+        desired_height = max(38, metrics.height() + 16)
+        viewport_point = self.mapFromScene(point)
+        x = max(4, min(self.viewport().width() - desired_width - 4, viewport_point.x()))
+        y = max(4, min(self.viewport().height() - desired_height - 4, viewport_point.y()))
+        editor.setGeometry(x, y, desired_width, desired_height)
+
+    def _commit_inline_text_editor(self) -> None:
+        editor = self._text_editor
+        point = self._text_editor_scene_point
+        if editor is None or point is None:
+            return
+        text = editor.text().strip()
+        index = self._text_editor_annotation_index
+        if not text:
+            self._cancel_inline_text_editor()
+            return
+
+        scale = max(0.01, abs(self.transform().m11()))
+        metrics = editor.fontMetrics()
+        scene_width = (metrics.horizontalAdvance(text) + 12) / scale
+        scene_height = (metrics.height() + 8) / scale
+        end = QPointF(
+            min(self.sceneRect().right(), point.x() + scene_width),
+            min(self.sceneRect().bottom(), point.y() + scene_height),
+        )
+        color = self._text_editor_color
+        view_size = self._text_editor_size
+        scene_size = max(1, round(view_size / scale))
+        self._remove_inline_text_editor()
+        if index is None:
+            self._record_annotation_history()
+            self.add_annotation(
+                AnnotationSpec("text", point, end, color=color, size=scene_size, text=text)
+            )
+            self._select_annotation_item(self._annotation_items[-1])
+            return
+
+        spec = self._annotations[index]
+        item = self._annotation_items[index]
+        if (
+            spec.start != point
+            or spec.end != end
+            or spec.text != text
+            or spec.color != color
+            or spec.size != scene_size
+        ):
+            self._record_annotation_history()
+        item.prepareGeometryChange()
+        spec.start = point
+        spec.end = end
+        spec.text = text
+        spec.color = color
+        spec.size = scene_size
+        item.setVisible(True)
+        item.update()
+
+    def _cancel_inline_text_editor(self) -> None:
+        index = self._text_editor_annotation_index
+        self._remove_inline_text_editor()
+        if index is not None and 0 <= index < len(self._annotation_items):
+            self._annotation_items[index].setVisible(True)
+
+    def _remove_inline_text_editor(self) -> None:
+        editor = self._text_editor
+        self._text_editor = None
+        self._text_editor_scene_point = None
+        self._text_editor_annotation_index = None
+        if editor is not None:
+            editor.removeEventFilter(self)
+            editor.hide()
+            editor.deleteLater()
+
     def _bounded_scene_point(self, viewport_point: QPoint) -> QPointF:
         point = self.mapToScene(viewport_point)
         rect = self.sceneRect()
@@ -619,6 +1650,19 @@ class ImageView(QGraphicsView):
             max(rect.left(), min(rect.right(), point.x())),
             max(rect.top(), min(rect.bottom(), point.y())),
         )
+
+
+def _markup_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for candidate in (
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "DejaVuSans.ttf",
+    ):
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size=size)
 
 
 class NavigationButton(QPushButton):
@@ -810,14 +1854,19 @@ class FilmstripPanel(QFrame):
 
 class MarkupToolbar(QFrame):
     toolChanged = Signal(str)
+    colorChanged = Signal(str)
+    sizeChanged = Signal(int)
     undoRequested = Signal()
     cancelRequested = Signal()
-    copyRequested = Signal()
     replaceRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("markupToolbar")
+        self._active_tool = "rectangle"
+        self._property_kind = "rectangle"
+        self._shape_size = 6
+        self._font_size = 20
         self.setStyleSheet(
             f"""
             #markupToolbar {{background: {SURFACE_HIGH}; border: 1px solid {BORDER};
@@ -826,35 +1875,180 @@ class MarkupToolbar(QFrame):
                           padding: 6px 11px; font: 12px 'Microsoft YaHei UI';}}
             QPushButton:hover {{background: #303640;}}
             QPushButton:checked {{background: #3d5266; color: white;}}
+            QLineEdit, QSpinBox {{color: {TEXT}; background: {SURFACE};
+                                  border: 1px solid {BORDER}; border-radius: 8px;
+                                  padding: 5px 8px; font: 12px 'Microsoft YaHei UI';}}
             """
         )
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(7, 5, 7, 5)
-        layout.setSpacing(2)
-        self.rect_button = QPushButton("矩形", self)
-        self.arrow_button = QPushButton("箭头", self)
-        for tool, button in (("rectangle", self.rect_button), ("arrow", self.arrow_button)):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(7, 6, 7, 6)
+        layout.setSpacing(3)
+        tools_layout = QHBoxLayout()
+        tools_layout.setSpacing(2)
+        self.tool_buttons: dict[str, QPushButton] = {}
+        tools = (
+            ("select", "选择"),
+            ("rectangle", "矩形"),
+            ("arrow", "箭头"),
+            ("line", "直线"),
+            ("ellipse", "椭圆"),
+            ("freehand", "画笔"),
+            ("text", "文字"),
+            ("number", "序号"),
+            ("mosaic", "马赛克"),
+            ("blur", "模糊"),
+            ("redact", "遮挡"),
+        )
+        for tool, label in tools:
+            button = QPushButton(label, self)
             button.setCheckable(True)
             button.clicked.connect(
                 lambda checked, value=tool: self._select_tool(value) if checked else None
             )
-            layout.addWidget(button)
+            tools_layout.addWidget(button)
+            self.tool_buttons[tool] = button
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(True)
-        self.tool_group.addButton(self.rect_button)
-        self.tool_group.addButton(self.arrow_button)
+        for button in self.tool_buttons.values():
+            self.tool_group.addButton(button)
+        self.rect_button = self.tool_buttons["rectangle"]
+        self.arrow_button = self.tool_buttons["arrow"]
+        layout.addLayout(tools_layout)
+
+        action_layout = QHBoxLayout()
+        action_layout.setSpacing(2)
+        self.color_button = QPushButton("颜色", self)
+        self.color_button.setToolTip("选择标注颜色")
+        self.color_button.clicked.connect(self._choose_color)
+        action_layout.addWidget(self.color_button)
+        self.size_spin = QSpinBox(self)
+        self.size_spin.setRange(2, 32)
+        self.size_spin.setValue(6)
+        self.size_spin.setPrefix("大小 ")
+        self.size_spin.setToolTip("调整线宽、字号或效果强度")
+        self.size_spin.valueChanged.connect(self._size_changed)
+        action_layout.addWidget(self.size_spin)
+        action_layout.addStretch(1)
         for text, signal in (
             ("撤销", self.undoRequested),
             ("取消修改", self.cancelRequested),
-            ("仅复制", self.copyRequested),
             ("替换原图", self.replaceRequested),
         ):
             button = QPushButton(text, self)
             button.clicked.connect(signal.emit)
-            layout.addWidget(button)
+            action_layout.addWidget(button)
+            if text == "替换原图":
+                self.replace_button = button
+        layout.addLayout(action_layout)
+
+        self._color = QColor("#ff4c48")
+        self._update_color_button()
+
+    def set_read_only_source(self, read_only: bool) -> None:
+        """Use an export action for document formats that cannot be overwritten safely."""
+
+        if read_only:
+            self.replace_button.setText("导出副本")
+            self.replace_button.setToolTip("源格式只读，将当前编辑结果导出为普通图片")
+            self.replace_button.setAccessibleName("导出编辑副本")
+        else:
+            self.replace_button.setText("替换原图")
+            self.replace_button.setToolTip("确认后用当前编辑结果替换原文件")
+            self.replace_button.setAccessibleName("替换原图")
 
     def _select_tool(self, tool: str) -> None:
+        button = self.tool_buttons.get(tool)
+        if button is None:
+            return
+        if self._property_kind == "text":
+            self._font_size = self.size_spin.value()
+        else:
+            self._shape_size = self.size_spin.value()
+        self._active_tool = tool
+        if tool != "select":
+            self._property_kind = tool
+        button.setChecked(True)
+        self.size_spin.blockSignals(True)
+        if self._property_kind == "text":
+            self.size_spin.setRange(8, 96)
+            self.size_spin.setPrefix("字号 ")
+            self.size_spin.setSuffix(" px")
+            self.size_spin.setValue(self._font_size)
+        else:
+            self.size_spin.setRange(2, 32)
+            self.size_spin.setPrefix("大小 ")
+            self.size_spin.setSuffix("")
+            self.size_spin.setValue(self._shape_size)
+        self.size_spin.blockSignals(False)
+        controls_enabled = tool != "select"
+        self.color_button.setEnabled(controls_enabled)
+        self.size_spin.setEnabled(controls_enabled)
         self.toolChanged.emit(tool)
+        self.sizeChanged.emit(self.size_spin.value())
+
+    def select_tool(self, tool: str) -> None:
+        self._select_tool(tool)
+
+    def sync_annotation(self, tool: str, color: str, size: int) -> None:
+        if tool not in self.tool_buttons:
+            return
+        self._active_tool = "select"
+        self._property_kind = tool
+        self.tool_buttons["select"].setChecked(True)
+        self.size_spin.blockSignals(True)
+        if tool == "text":
+            self._font_size = max(8, min(96, int(size)))
+            self.size_spin.setRange(8, 96)
+            self.size_spin.setPrefix("字号 ")
+            self.size_spin.setSuffix(" px")
+            self.size_spin.setValue(self._font_size)
+        else:
+            self._shape_size = max(2, min(32, int(size)))
+            self.size_spin.setRange(2, 32)
+            self.size_spin.setPrefix("大小 ")
+            self.size_spin.setSuffix("")
+            self.size_spin.setValue(self._shape_size)
+        self.size_spin.blockSignals(False)
+        self.color_button.setEnabled(True)
+        self.size_spin.setEnabled(True)
+        candidate = QColor(color)
+        if candidate.isValid():
+            self._color = candidate
+            self._update_color_button()
+
+    def clear_annotation_selection(self) -> None:
+        if self._active_tool != "select":
+            return
+        self.color_button.setEnabled(False)
+        self.size_spin.setEnabled(False)
+
+    def set_size(self, size: int) -> None:
+        bounded = max(self.size_spin.minimum(), min(self.size_spin.maximum(), int(size)))
+        if self._property_kind == "text":
+            self._font_size = bounded
+        else:
+            self._shape_size = bounded
+        self.size_spin.setValue(bounded)
+
+    def _size_changed(self, size: int) -> None:
+        if self._property_kind == "text":
+            self._font_size = int(size)
+        else:
+            self._shape_size = int(size)
+        self.sizeChanged.emit(int(size))
+
+    def _choose_color(self) -> None:
+        color = QColorDialog.getColor(self._color, self, "选择标注颜色")
+        if not color.isValid():
+            return
+        self._color = color
+        self._update_color_button()
+        self.colorChanged.emit(color.name())
+
+    def _update_color_button(self) -> None:
+        self.color_button.setStyleSheet(
+            f"QPushButton {{color: white; background: {self._color.name()};}}"
+        )
 
 
 class ViewerSettingsDialog(QDialog):

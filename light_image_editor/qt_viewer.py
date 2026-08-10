@@ -39,6 +39,7 @@ from image_ops import ConflictPolicy, ExportOptions, save_image
 
 from .image_loader import ImageLoader
 from .navigation import NavigationSession
+from .pdf_support import PDF_EXTENSION
 from .qt_viewer_config import QtViewerConfig, parse_window_geometry
 from .qt_viewer_widgets import (
     CANVAS,
@@ -57,6 +58,8 @@ from .qt_viewer_widgets import (
 )
 from .settings import SettingsStore
 from .thumbnails import ThumbnailLoader
+
+READ_ONLY_EDIT_SOURCE_EXTENSIONS = {PDF_EXTENSION, ".psd"}
 
 
 class _UiBridge(QObject):
@@ -85,6 +88,9 @@ class ViewerWindow(QMainWindow):
         self.image_loader = ImageLoader()
         self.thumbnail_loader = ThumbnailLoader()
         self.current_image: Image.Image | None = None
+        self._document_path: Path | None = None
+        self._document_page_index = 0
+        self._document_page_count = 1
         self._load_generation = 0
         self._filmstrip_scope = "folder"
         self._shortcut_actions: list[QAction] = []
@@ -95,7 +101,7 @@ class ViewerWindow(QMainWindow):
         self.bridge.imageLoaded.connect(self._finish_image_load)
         self.bridge.thumbnailLoaded.connect(self._finish_thumbnail_load)
 
-        self.setWindowTitle("轻量图片查看器")
+        self.setWindowTitle("CSImage")
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setAcceptDrops(True)
@@ -117,7 +123,7 @@ class ViewerWindow(QMainWindow):
 
         self.empty_state = QWidget(self.root)
         self.empty_state.setObjectName("viewerEmptyState")
-        self.empty_state.setAccessibleName("未打开图片")
+        self.empty_state.setAccessibleName("未打开图片或文档")
         self.empty_state.setStyleSheet(
             """
             #viewerEmptyState {
@@ -144,14 +150,16 @@ class ViewerWindow(QMainWindow):
         self.empty_icon = QLabel("＋", self.empty_state)
         self.empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_icon.setStyleSheet("color: #89c8ff; font: 36px 'Microsoft YaHei UI';")
-        self.empty_title = QLabel("还没有打开图片", self.empty_state)
+        self.empty_title = QLabel("还没有打开图片或文档", self.empty_state)
         self.empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_title.setStyleSheet("color: #f5f7fa; font: 600 20px 'Microsoft YaHei UI';")
-        self.empty_hint = QLabel("点击按钮选择图片，或直接拖放图片到这里", self.empty_state)
+        self.empty_hint = QLabel(
+            "点击按钮选择图片、PSD 或 PDF，也可以直接拖放到这里", self.empty_state
+        )
         self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_hint.setStyleSheet(f"color: {MUTED}; font: 13px 'Microsoft YaHei UI';")
-        self.empty_open_button = QPushButton("打开图片", self.empty_state)
-        self.empty_open_button.setAccessibleName("打开图片")
+        self.empty_open_button = QPushButton("打开文件", self.empty_state)
+        self.empty_open_button.setAccessibleName("打开图片或文档")
         self.empty_open_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.empty_open_button.setFixedSize(168, 44)
         self.empty_open_button.clicked.connect(self.choose_images)
@@ -183,9 +191,15 @@ class ViewerWindow(QMainWindow):
         self.markup_toolbar = MarkupToolbar(self.root)
         self.markup_toolbar.hide()
         self.markup_toolbar.toolChanged.connect(self.image_view.set_annotation_tool)
+        self.markup_toolbar.colorChanged.connect(self.image_view.set_annotation_color)
+        self.markup_toolbar.sizeChanged.connect(self.image_view.set_annotation_size)
+        self.image_view.annotationSizeSelected.connect(self.markup_toolbar.set_size)
+        self.image_view.annotationSelected.connect(self.markup_toolbar.sync_annotation)
+        self.image_view.annotationSelectionCleared.connect(
+            self.markup_toolbar.clear_annotation_selection
+        )
         self.markup_toolbar.undoRequested.connect(self.image_view.undo_annotation)
         self.markup_toolbar.cancelRequested.connect(self.leave_markup)
-        self.markup_toolbar.copyRequested.connect(self.copy_markup)
         self.markup_toolbar.replaceRequested.connect(self.replace_original)
 
         self._resize_filter = NativeResizeFilter(self)
@@ -204,7 +218,7 @@ class ViewerWindow(QMainWindow):
 
     def _build_toolbar(self) -> None:
         self.open_button = ViewerIconButton(
-            text="打开", tooltip="打开图片（Ctrl+O）", parent=self.toolbar, width=58
+            text="打开", tooltip="打开图片、PSD 或 PDF（Ctrl+O）", parent=self.toolbar, width=58
         )
         self.open_button.clicked.connect(self.choose_images)
         self.toolbar.add_button(self.open_button)
@@ -248,9 +262,6 @@ class ViewerWindow(QMainWindow):
         settings = ViewerIconButton("settings", tooltip="看图设置", parent=self.toolbar)
         settings.clicked.connect(self.show_settings)
         self.toolbar.add_button(settings)
-        fullscreen = ViewerIconButton("fullscreen", tooltip="切换全屏（F11）", parent=self.toolbar)
-        fullscreen.clicked.connect(self.toggle_fullscreen)
-        self.toolbar.add_button(fullscreen)
 
     def _install_shortcuts(self) -> None:
         for action in self._shortcut_actions:
@@ -339,11 +350,14 @@ class ViewerWindow(QMainWindow):
         self._layout_overlays()
 
     def choose_images(self) -> None:
+        image_patterns = (
+            "*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff *.avif *.heic *.heif *.psd"
+        )
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "打开图片",
+            "打开图片或文档",
             str(self.navigation.current.parent if self.navigation.current else Path.home()),
-            "图片 (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff *.avif *.heic *.heif)",
+            f"支持的文件 ({image_patterns} *.pdf);;图片 ({image_patterns});;PDF 文档 (*.pdf)",
         )
         if paths:
             self.open_paths(paths)
@@ -373,10 +387,23 @@ class ViewerWindow(QMainWindow):
         if path is None:
             self._set_empty_state_visible(True)
             return
+        if self.markup_toolbar.isVisible():
+            self.leave_markup()
+        if path.suffix.casefold() == PDF_EXTENSION:
+            if self._document_path != path:
+                self._document_path = path
+                self._document_page_index = 0
+                self._document_page_count = 1
+            page_index: int | None = self._document_page_index
+        else:
+            self._document_path = None
+            self._document_page_index = 0
+            self._document_page_count = 1
+            page_index = None
         self._set_empty_state_visible(False)
         self._load_generation += 1
         generation = self._load_generation
-        preview = self.image_loader.cached_preview(path)
+        preview = self.image_loader.cached_preview(path, page_index)
         if preview is not None:
             try:
                 self.image_view.set_image(pil_to_qimage(preview), fit=True)
@@ -386,7 +413,7 @@ class ViewerWindow(QMainWindow):
         def completed(future: Future[Image.Image]) -> None:
             self.bridge.imageLoaded.emit(str(path), (generation, future))
 
-        self.image_loader.load(path, completed, take_cached=True)
+        self.image_loader.load(path, completed, take_cached=True, page_index=page_index)
         self.image_loader.prefetch(self.navigation.neighbors())
         self._update_chrome(path)
 
@@ -406,13 +433,25 @@ class ViewerWindow(QMainWindow):
         if self.current_image is not None:
             self.current_image.close()
         self.current_image = image
+        if Path(path_text).suffix.casefold() == PDF_EXTENSION:
+            self._document_page_index = int(
+                image.info.get("pdf_page_index", self._document_page_index)
+            )
+            self._document_page_count = max(1, int(image.info.get("pdf_page_count", 1)))
         self.image_view.set_image(pil_to_qimage(image), fit=True)
         self._set_empty_state_visible(False)
         self._update_chrome(Path(path_text))
 
     def _update_chrome(self, path: Path) -> None:
-        self.setWindowTitle(path.name)
-        self.title_bar.set_title(path.name)
+        is_pdf = path.suffix.casefold() == PDF_EXTENSION
+        if is_pdf:
+            page_position = f"第 {self._document_page_index + 1} / {self._document_page_count} 页"
+            title = f"{path.name} · {page_position}"
+        else:
+            page_position = ""
+            title = path.name
+        self.setWindowTitle(title)
+        self.title_bar.set_title(title)
         position = self.navigation.position or (1, 1)
         try:
             size = path.stat().st_size
@@ -425,11 +464,22 @@ class ViewerWindow(QMainWindow):
             width = height = 0
             fmt = path.suffix.lstrip(".").upper()
         size_text = self._human_size(size)
-        self.info_label.setText(
-            f"{fmt}  ·  {width} × {height}  ·  {size_text}  ·  第 {position[0]} / {position[1]} 张"
-        )
+        if is_pdf:
+            file_position = f"  ·  文件 {position[0]} / {position[1]}" if position[1] > 1 else ""
+            info = f"PDF  ·  {width} × {height}  ·  {size_text}  ·  {page_position}{file_position}"
+        elif path.suffix.casefold() == ".psd":
+            info = (
+                f"PSD 合成预览  ·  {width} × {height}  ·  {size_text}"
+                f"  ·  第 {position[0]} / {position[1]} 张"
+            )
+        else:
+            info = (
+                f"{fmt}  ·  {width} × {height}  ·  {size_text}"
+                f"  ·  第 {position[0]} / {position[1]} 张"
+            )
+        self.info_label.setText(info)
         self.info_label.adjustSize()
-        has_many = len(self.navigation.files) > 1
+        has_many = self._has_navigation_targets()
         self.previous_button.setEnabled(has_many)
         self.next_button.setEnabled(has_many)
         self.previous_button.setVisible(has_many)
@@ -454,7 +504,7 @@ class ViewerWindow(QMainWindow):
             self.filmstrip.hide()
             self.markup_toolbar.hide()
         else:
-            has_many = len(self.navigation.files) > 1
+            has_many = self._has_navigation_targets()
             self.previous_button.setVisible(has_many)
             self.next_button.setVisible(has_many)
             chrome_visible = not self._clean_mode
@@ -472,8 +522,22 @@ class ViewerWindow(QMainWindow):
         return "0 B"
 
     def navigate(self, direction: int) -> None:
+        if self.markup_toolbar.isVisible():
+            return
+        path = self.navigation.current
+        if path is not None and path.suffix.casefold() == PDF_EXTENSION:
+            page_index = self._document_page_index + direction
+            if 0 <= page_index < self._document_page_count:
+                self._document_page_index = page_index
+                self.load_current()
+                return
+            if len(self.navigation.files) <= 1:
+                return
         if self.navigation.target(direction) is not None:
             self.load_current()
+
+    def _has_navigation_targets(self) -> bool:
+        return len(self.navigation.files) > 1 or self._document_page_count > 1
 
     def select_path(self, path_text: str) -> None:
         path = Path(path_text)
@@ -485,6 +549,7 @@ class ViewerWindow(QMainWindow):
                 self.navigation = NavigationSession(favorites, favorites.index(path), "我的收藏")
             else:
                 self.navigation = NavigationSession.from_activation([path])
+        self._document_path = None
         self.load_current()
 
     def toggle_filmstrip(self) -> None:
@@ -603,35 +668,38 @@ class ViewerWindow(QMainWindow):
             self._apply_toolbar_mode()
 
     def enter_markup(self) -> None:
-        if self.current_image is None:
+        path = self.navigation.current
+        if self.current_image is None or path is None:
             return
+        self.markup_toolbar.set_read_only_source(
+            path.suffix.casefold() in READ_ONLY_EDIT_SOURCE_EXTENSIONS
+        )
         self.markup_toolbar.show()
-        self.image_view.set_annotation_tool("rectangle")
-        self.markup_toolbar.rect_button.setChecked(True)
+        self.markup_toolbar.select_tool("rectangle")
+        self.previous_button.hide()
+        self.next_button.hide()
         self._layout_overlays()
 
     def leave_markup(self) -> None:
         self.image_view.clear_annotations()
         self.image_view.set_annotation_tool("")
         self.markup_toolbar.hide()
+        path = self.navigation.current
+        if path is not None:
+            self._update_chrome(path)
 
     def _undo_in_viewer(self) -> None:
         if self.markup_toolbar.isVisible():
+            if self.image_view.undo_inline_text():
+                return
             self.image_view.undo_annotation()
-
-    def copy_markup(self) -> None:
-        if self.current_image is None:
-            return
-        composited = self.image_view.composited_pil(self.current_image)
-        try:
-            QApplication.clipboard().setImage(pil_to_qimage(composited))
-        finally:
-            composited.close()
-        self.leave_markup()
 
     def replace_original(self) -> None:
         path = self.navigation.current
         if self.current_image is None or path is None:
+            return
+        if path.suffix.casefold() in READ_ONLY_EDIT_SOURCE_EXTENSIONS:
+            self._export_markup_copy(path)
             return
         answer = QMessageBox.question(
             self,
@@ -642,6 +710,7 @@ class ViewerWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        self.image_view.commit_pending_text()
         composited = self.image_view.composited_pil(self.current_image)
         try:
             save_image(
@@ -661,6 +730,55 @@ class ViewerWindow(QMainWindow):
         self.leave_markup()
         self.load_current()
 
+    def _export_markup_copy(self, source_path: Path) -> None:
+        if self.current_image is None:
+            return
+        if source_path.suffix.casefold() == PDF_EXTENSION:
+            stem = f"{source_path.stem}-第{self._document_page_index + 1}页-已编辑"
+        else:
+            stem = f"{source_path.stem}-已编辑"
+        output_text, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出编辑结果",
+            str(source_path.with_name(f"{stem}.png")),
+            "PNG 图片 (*.png);;JPEG 图片 (*.jpg *.jpeg);;WebP 图片 (*.webp)",
+        )
+        if not output_text:
+            return
+        output_path = Path(output_text)
+        format_by_suffix = {".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}
+        output_format = format_by_suffix.get(output_path.suffix.casefold())
+        if output_format is None:
+            output_path = output_path.with_suffix(".png")
+            output_format = "PNG"
+        try:
+            if output_path.resolve() == source_path.resolve():
+                QMessageBox.warning(
+                    self, "无法导出", "PSD 和 PDF 源文件只读，请选择新的图片文件名。"
+                )
+                return
+        except OSError:
+            pass
+
+        self.image_view.commit_pending_text()
+        composited = self.image_view.composited_pil(self.current_image)
+        try:
+            save_image(
+                composited,
+                output_path,
+                ExportOptions(output_format),
+                conflict_policy=ConflictPolicy.OVERWRITE,
+                allow_animation_flatten=True,
+                allow_transparency_flatten=True,
+            )
+        except Exception as error:
+            QMessageBox.warning(self, "无法导出", str(error))
+            composited.close()
+            return
+        composited.close()
+        self.leave_markup()
+        QMessageBox.information(self, "导出完成", f"编辑结果已保存到：\n{output_path}")
+
     def show_settings(self) -> None:
         dialog = ViewerSettingsDialog(self.config, self)
         if dialog.exec() != ViewerSettingsDialog.DialogCode.Accepted:
@@ -673,7 +791,8 @@ class ViewerWindow(QMainWindow):
 
     def _escape(self) -> None:
         if self.markup_toolbar.isVisible():
-            self.leave_markup()
+            if not self.image_view.cancel_markup_interaction():
+                self.leave_markup()
         elif self.filmstrip.isVisible():
             self.filmstrip.hide()
         elif self.isFullScreen():
@@ -715,9 +834,7 @@ class QtViewerApplication:
     def __init__(self) -> None:
         os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
         existing = QApplication.instance()
-        self.qt_app = (
-            existing if isinstance(existing, QApplication) else QApplication(["轻量图片查看器"])
-        )
+        self.qt_app = existing if isinstance(existing, QApplication) else QApplication(["CSImage"])
         self.qt_app.setStyle("Fusion")
         self.qt_app.setFont(QFont("Microsoft YaHei UI", 10))
         self.window = ViewerWindow()

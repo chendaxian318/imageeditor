@@ -114,7 +114,7 @@ class ExperienceUiTests(unittest.TestCase):
                 app.update_idletasks()
                 self.assertEqual(app.localizer.locale, "zh-CN")
                 self.assertFalse(hasattr(app, "locale_var"))
-                self.assertEqual(app.title(), "轻量图片编辑器")
+                self.assertEqual(app.title(), "CSImage")
                 self.assertEqual(str(app.canvas.cget("takefocus")), "1")
                 self.assertEqual(
                     getattr(app.canvas, "accessible_name"),
@@ -149,7 +149,7 @@ class ExperienceUiTests(unittest.TestCase):
                 apply_button.invoke()
                 app.update_idletasks()
                 self.assertEqual(app.localizer.locale, "zh-CN")
-                self.assertEqual(app.title(), "轻量图片编辑器")
+                self.assertEqual(app.title(), "CSImage")
                 self.assertEqual(
                     getattr(app.canvas, "accessible_name"),
                     "图片预览与编辑画布",

@@ -38,6 +38,7 @@ class DependencyLockTests(unittest.TestCase):
         requirements = read_lock(Path("requirements-dev.lock"))
 
         self.assertEqual(requirements["pillow"], "11.3.0")
+        self.assertEqual(requirements["pypdfium2"], "5.12.1")
         self.assertEqual(requirements["pyinstaller"], "6.17.0")
         self.assertEqual(requirements["ruff"], "0.16.1")
         self.assertGreaterEqual(len(requirements), 10)

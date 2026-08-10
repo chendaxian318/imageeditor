@@ -6,11 +6,11 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from image_ops import SUPPORTED_INPUTS, natural_sort_key
+from image_ops import VIEWER_INPUTS, natural_sort_key
 
 
 def _supported_file(path: Path) -> bool:
-    return path.is_file() and path.suffix.lower() in SUPPORTED_INPUTS
+    return path.is_file() and path.suffix.lower() in VIEWER_INPUTS
 
 
 def expand_activation_paths(paths: Iterable[str | Path]) -> list[Path]:

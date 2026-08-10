@@ -198,7 +198,7 @@ class UpdateCache:
 
     def stage(self, installer: Path, manifest: UpdateManifest) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
-        target = self.root / f"LightImageEditor-Setup-x64-{manifest.version}.exe"
+        target = self.root / f"CSImage-Setup-x64-{manifest.version}.exe"
         if installer.resolve() != target.resolve():
             staging = target.with_suffix(".staging")
             shutil.copy2(installer, staging)

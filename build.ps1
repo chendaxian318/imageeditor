@@ -382,7 +382,7 @@ try {
     )
 
     $portableSource = Join-Path $Dist "portable\LightImageEditorPortable.exe"
-    $portableName = "LightImageEditor-Portable-x64-$version.exe"
+    $portableName = "CSImage-Portable-x64-$version.exe"
     $portableExecutable = Join-Path $Release $portableName
     if (-not (Test-Path -LiteralPath $portableSource -PathType Leaf)) {
         throw "PyInstaller did not create $portableSource"
@@ -400,7 +400,7 @@ try {
         "/DReleaseNotesFile=$releaseNotesDocument",
         $InnoScript
     )
-    $setupName = "LightImageEditor-Setup-x64-$version.exe"
+    $setupName = "CSImage-Setup-x64-$version.exe"
     $installerExecutable = Join-Path $Release $setupName
     if (-not (Test-Path -LiteralPath $installerExecutable -PathType Leaf)) {
         throw "Inno Setup did not create $installerExecutable"
@@ -452,7 +452,7 @@ try {
         if (-not (Test-Path -LiteralPath $RollbackInstaller -PathType Leaf)) {
             throw "Rollback installer does not exist: $RollbackInstaller"
         }
-        $rollbackName = "LightImageEditor-Rollback-x64-$RollbackVersion.exe"
+        $rollbackName = "CSImage-Rollback-x64-$RollbackVersion.exe"
         $rollbackReleasePath = Join-Path $Release $rollbackName
         Copy-Item -LiteralPath $RollbackInstaller -Destination $rollbackReleasePath
         if ($signingReady) {

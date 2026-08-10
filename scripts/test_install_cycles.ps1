@@ -32,12 +32,12 @@ if ([System.Version]$TargetVersion -le [System.Version]$PreviousVersion) {
     throw "TargetVersion must be newer than PreviousVersion."
 }
 if (-not $Installer) {
-    $Installer = Join-Path $Root "release\LightImageEditor-Setup-x64-$TargetVersion.exe"
+    $Installer = Join-Path $Root "release\CSImage-Setup-x64-$TargetVersion.exe"
 }
 if (-not $PreviousInstaller) {
     $PreviousInstaller = Join-Path `
         $Root `
-        "release\LightImageEditor-Rollback-x64-$PreviousVersion.exe"
+        "release\CSImage-Rollback-x64-$PreviousVersion.exe"
 }
 
 $rootPrefix = [System.IO.Path]::GetFullPath($Root).TrimEnd("\") + "\"
