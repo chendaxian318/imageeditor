@@ -149,8 +149,8 @@ class QtViewerDocumentFormatTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "pages.pdf"
-            first = Image.new("RGB", (120, 80), "#245680")
-            second = Image.new("RGB", (120, 80), "#a03040")
+            first = Image.new("RGB", (600, 800), "#245680")
+            second = Image.new("RGB", (600, 800), "#a03040")
             try:
                 first.save(source, save_all=True, append_images=[second])
             finally:
@@ -168,6 +168,7 @@ class QtViewerDocumentFormatTests(unittest.TestCase):
                 self.assertEqual(window._document_page_count, 2)
                 self.assertIn("第 1 / 2 页", window.info_label.text())
                 self.assertTrue(window.image_view.document_mode)
+                self.assertEqual(window.image_view.zoom_percent(), 100)
                 self.assertGreater(window.image_view.verticalScrollBar().maximum(), 0)
                 self.assertFalse(window.previous_button.isVisible())
                 self.assertFalse(window.next_button.isVisible())

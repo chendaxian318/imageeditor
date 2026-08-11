@@ -472,6 +472,7 @@ class ViewerWindow(QMainWindow):
                 {0: pil_to_qimage(image)},
                 current_index=0,
             )
+            self.image_view.actual_size()
         else:
             if self.current_image is not None:
                 self.current_image.close()
