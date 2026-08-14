@@ -80,7 +80,7 @@ def verify(
         blockers.append(f"V1-TRACE: v{expected_version} is not an annotated tag")
 
     expected_artifacts = {
-        "LightImageEditor/ImageEditor.exe",
+        "LightImageEditor/CSImage.exe",
         f"CSImage-Portable-x64-{expected_version}.exe",
         f"CSImage-Setup-x64-{expected_version}.exe",
         "SBOM.cdx.json",

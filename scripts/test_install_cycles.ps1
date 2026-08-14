@@ -75,7 +75,7 @@ if (-not $Output.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnor
 }
 
 $InstallDirectory = Join-Path $env:LOCALAPPDATA "Programs\LightImageEditor"
-$Executable = Join-Path $InstallDirectory "ImageEditor.exe"
+$Executable = Join-Path $InstallDirectory "CSImage.exe"
 $Uninstaller = Join-Path $InstallDirectory "unins000.exe"
 $RegisteredApplications = "HKCU:\Software\RegisteredApplications"
 $AppRegistryRoot = "HKCU:\Software\LightImageEditor"

@@ -4,6 +4,7 @@
 /dist/
 /release/
 /artifacts/
+/tmp/
 __pycache__/
 *.py[cod]
 *.spec

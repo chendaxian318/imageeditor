@@ -110,7 +110,7 @@ def _verify_artifacts(
         f"CSImage-Portable-x64-{target}.exe",
         f"CSImage-Setup-x64-{target}.exe",
         f"CSImage-Rollback-x64-{previous}.exe",
-        "LightImageEditor/ImageEditor.exe",
+        "LightImageEditor/CSImage.exe",
     )
     checksummed = (
         *executables,

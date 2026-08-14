@@ -50,7 +50,7 @@ class V2InstallPreflightTests(unittest.TestCase):
             "CSImage-Portable-x64-2.0.0.exe",
             "CSImage-Setup-x64-2.0.0.exe",
             "CSImage-Rollback-x64-1.1.3.exe",
-            "LightImageEditor/ImageEditor.exe",
+            "LightImageEditor/CSImage.exe",
         )
         for name in executable_names:
             self._write_fake_pe(release / name)
@@ -155,7 +155,7 @@ class V2InstallPreflightTests(unittest.TestCase):
             contract = self._write_complete_repository(root)
             portable = root / "release/CSImage-Portable-x64-2.0.0.exe"
             self._write_fake_pe(portable, machine=0x014C)
-            (root / "release/LightImageEditor/ImageEditor.exe").write_bytes(b"not-a-pe")
+            (root / "release/LightImageEditor/CSImage.exe").write_bytes(b"not-a-pe")
             sbom_path = root / "release/SBOM.cdx.json"
             sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
             sbom["metadata"]["component"]["version"] = "1.1.3"

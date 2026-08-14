@@ -22,6 +22,8 @@ class VersionInfoTests(unittest.TestCase):
 
         self.assertIn(f"StringStruct('ProductVersion', '{VERSION}')", content)
         self.assertIn(f"StringStruct('OriginalFilename', '{EXECUTABLE_NAME}')", content)
+        self.assertIn("StringStruct('FileDescription', 'CSImage')", content)
+        self.assertIn("StringStruct('ProductName', 'CSImage')", content)
 
     def test_generation_is_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -82,6 +84,9 @@ class ReleaseRecipeTests(unittest.TestCase):
         self.assertIn("PrepareToInstall", script)
         self.assertIn("InitializeUninstall", script)
         self.assertIn("uninsdeletekeyifempty", script)
+        self.assertIn('#define MyAppExeName "CSImage.exe"', script)
+        self.assertIn('#define LegacyAppExeName "ImageEditor.exe"', script)
+        self.assertIn("Flags: deletekey dontcreatekey", script)
         self.assertNotIn("taskkill", script.casefold())
 
     def test_build_stops_on_failures_and_pins_installer_download(self) -> None:

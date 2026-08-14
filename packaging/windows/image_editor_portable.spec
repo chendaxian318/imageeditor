@@ -2,11 +2,12 @@
 """Deterministic PyInstaller recipe for the portable one-file executable."""
 
 from pathlib import Path
+from runpy import run_path
 
 
 ROOT = Path(SPECPATH).resolve().parents[1]
 ICON = ROOT / "resources" / "icons" / "app.ico"
-VERSION_INFO = ROOT / "build" / "version" / "ImageEditor.version.txt"
+VERSION_INFO = ROOT / "build" / "version" / "CSImage.version.txt"
 LOCALES = ROOT / "resources" / "locales"
 UPDATE_KEYS = ROOT / "resources" / "update"
 PYPDFIUM_LICENSES = (
@@ -16,9 +17,13 @@ PSDTOOLS_LICENSES = (
     ROOT / ".venv" / "Lib" / "site-packages" / "psd_tools-1.17.4.dist-info" / "licenses"
 )
 ATTRS_LICENSES = ROOT / ".venv" / "Lib" / "site-packages" / "attrs-26.1.0.dist-info" / "licenses"
+BUILD_CONFIG = run_path(str(ROOT / "packaging" / "windows" / "viewer_build_config.py"))
+VIEWER_ENTRYPOINT = BUILD_CONFIG["VIEWER_ENTRYPOINT"]
+VIEWER_EXCLUDES = BUILD_CONFIG["VIEWER_EXCLUDES"]
+KEEP_VIEWER_BUNDLE_ENTRY = BUILD_CONFIG["keep_viewer_bundle_entry"]
 
 a = Analysis(
-    [str(ROOT / "image_editor.py")],
+    [str(ROOT / VIEWER_ENTRYPOINT)],
     pathex=[str(ROOT)],
     binaries=[],
     datas=[
@@ -32,10 +37,12 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=list(VIEWER_EXCLUDES),
     noarchive=False,
     optimize=0,
 )
+a.binaries = [entry for entry in a.binaries if KEEP_VIEWER_BUNDLE_ENTRY(entry)]
+a.datas = [entry for entry in a.datas if KEEP_VIEWER_BUNDLE_ENTRY(entry)]
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -44,7 +51,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="LightImageEditorPortable",
+    name="CSImagePortable",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -196,7 +196,9 @@ class ImageLoader:
         page_index: int | None = None,
     ) -> Future[Image.Image]:
         key = self._key(path, page_index)
+        direct_pdf_transfer = take_cached and Path(path).suffix.casefold() == PDF_EXTENSION
         new_base_future: Future[None] | None = None
+        discarded_preview: Image.Image | None = None
         with self._lock:
             cached = self._cache.get(key)
             if cached is not None:
@@ -209,19 +211,33 @@ class ImageLoader:
                     # for the first render; adjacent prefetch repopulates the full
                     # cache when the user moves on again.
                     self._cache.pop(key)
+                    if "#page=" in key:
+                        # PDF pages are already retained by the continuous
+                        # document view. Keeping another full-page proxy in the
+                        # loader only duplicates memory and is never used for
+                        # folder navigation.
+                        discarded_preview = self._preview_cache.pop(key, None)
                     future.set_result(cached)
                 else:
                     self._cache.move_to_end(key)
                     future.set_result(cached.copy())
             else:
                 base_future = self._inflight.get(key)
-                if base_future is None:
-                    base_future = self._executor.submit(
-                        self._decode_into_cache, key, path, page_index
-                    )
-                    self._inflight[key] = base_future
-                    new_base_future = base_future
-                future = self._copy_after_cached(key, base_future)
+                if base_future is None and direct_pdf_transfer:
+                    # The continuous PDF view owns every rendered page it asks
+                    # for. Decode directly into that owner instead of first
+                    # creating full-size and proxy copies in the navigation LRU.
+                    future = self._executor.submit(decode_image, path, page_index or 0)
+                else:
+                    if base_future is None:
+                        base_future = self._executor.submit(
+                            self._decode_into_cache, key, path, page_index
+                        )
+                        self._inflight[key] = base_future
+                        new_base_future = base_future
+                    future = self._copy_after_cached(key, base_future)
+        if discarded_preview is not None:
+            discarded_preview.close()
         if new_base_future is not None:
 
             def clear(completed: Future[None], cache_key: str = key) -> None:

@@ -38,6 +38,41 @@ class InstallerTests(unittest.TestCase):
             ("LICENSE", "NOTICE.md", "PRIVACY.md", "THIRD_PARTY_LICENSES.md"),
         )
 
+    def test_user_facing_installer_notice_does_not_expose_repository_urls(self) -> None:
+        script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
+        self.assertIn(r"InfoAfterFile={#SourcePath}\INSTALLER_NOTICE.txt", script)
+        self.assertNotIn("AppPublisherURL=", script)
+        self.assertNotIn("AppSupportURL=", script)
+        self.assertNotIn("AppUpdatesURL=", script)
+        notice = Path("packaging/windows/INSTALLER_NOTICE.txt").read_text(encoding="utf-8")
+        for forbidden in ("http://", "https://", "github", "gitee"):
+            self.assertNotIn(forbidden, notice.casefold())
+
+    def test_license_agreement_defaults_to_accepted(self) -> None:
+        script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
+        self.assertIn(r"LicenseFile={#SourcePath}\INSTALLER_LICENSE.txt", script)
+        self.assertIn("WizardForm.LicenseAcceptedRadio.Checked := True", script)
+
+    def test_user_facing_installer_license_does_not_expose_repository_urls(self) -> None:
+        license_text = Path("packaging/windows/INSTALLER_LICENSE.txt").read_text(encoding="utf-8")
+        for forbidden in ("http://", "https://", "github", "gitee"):
+            self.assertNotIn(forbidden, license_text.casefold())
+
+    def test_upgrade_removes_stale_pyinstaller_runtime_before_copying_viewer(self) -> None:
+        script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
+        self.assertIn("[InstallDelete]", script)
+        self.assertIn('Type: filesandordirs; Name: "{app}\\_internal"', script)
+
+    def test_upgrade_can_replace_an_idle_broken_executable(self) -> None:
+        script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
+        self.assertIn("function ExecutableCanBeReplaced", script)
+        self.assertIn(".upgrade-probe", script)
+        self.assertIn("if ExecutableCanBeReplaced(ExecutablePath) then", script)
+        self.assertLess(
+            script.index("if ExecutableCanBeReplaced(ExecutablePath) then"),
+            script.index("'--request-exit-for-upgrade'"),
+        )
+
     def test_supported_extensions_cover_documented_image_formats(self) -> None:
         self.assertEqual(
             SUPPORTED_EXTENSIONS,
@@ -77,15 +112,15 @@ class InstallerTests(unittest.TestCase):
             self.assertIn(f'ValueName: "{extension}"; ValueData: "{{#ProgId}}"', script)
 
     def test_open_command_quotes_executable_and_file(self) -> None:
-        target = Path(r"C:\Users\Test User\LightImageEditor\ImageEditor.exe")
+        target = Path(r"C:\Users\Test User\LightImageEditor\CSImage.exe")
         self.assertEqual(open_command(target), f'"{target}" "%1"')
 
-    def test_non_destructive_project_has_its_own_file_type(self) -> None:
+    def test_hidden_project_format_is_not_registered_by_viewer_installer(self) -> None:
         self.assertEqual(PROJECT_EXTENSION, ".lieproj")
         self.assertEqual(PROJECT_PROG_ID, "LightImageEditor.Project")
         script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
-        self.assertIn("LightImageEditor.Project", script)
-        self.assertIn(r"Software\Classes\.lieproj", script)
+        self.assertNotIn("LightImageEditor.Project", script)
+        self.assertNotIn(r"Software\Classes\.lieproj", script)
 
     def test_default_apps_uri_targets_per_user_registration_on_windows_11(self) -> None:
         self.assertEqual(

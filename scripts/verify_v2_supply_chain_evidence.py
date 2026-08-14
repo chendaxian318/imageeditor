@@ -42,7 +42,7 @@ MULTI_ENGINE_FIELDS = {
 }
 MULTI_ARTIFACT_FIELDS = {"File", "Sha256", "Result"}
 EXPECTED_ARTIFACTS = {
-    "application": "LightImageEditor/ImageEditor.exe",
+    "application": "LightImageEditor/CSImage.exe",
     "portable": "CSImage-Portable-x64-2.0.0.exe",
     "installer": "CSImage-Setup-x64-2.0.0.exe",
     "rollback": "CSImage-Rollback-x64-1.1.3.exe",

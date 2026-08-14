@@ -12,10 +12,10 @@
 #define MyAppNameEn "CSImage"
 #define MyAppPublisher "chendaxian318"
 #define MyAppId "io.github.chendaxian318.imageeditor"
-#define MyAppExeName "ImageEditor.exe"
+#define MyAppExeName "CSImage.exe"
+#define LegacyAppExeName "ImageEditor.exe"
 #define RegistryName "LightImageEditor"
 #define ProgId "LightImageEditor.Image"
-#define ProjectProgId "LightImageEditor.Project"
 #ifndef ReleaseNotesFile
 #define ReleaseNotesFile SourcePath + "\..\..\docs\release\RELEASE_NOTES-v1.0.0.md"
 #endif
@@ -26,9 +26,6 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-AppPublisherURL=https://github.com/chendaxian318/imageeditor
-AppSupportURL=https://github.com/chendaxian318/imageeditor/issues
-AppUpdatesURL=https://github.com/chendaxian318/imageeditor/releases
 DefaultDirName=D:\CSImage
 DisableDirPage=no
 AllowNetworkDrive=no
@@ -46,8 +43,8 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
 VersionInfoVersion={#MyAppVersion}.0
 VersionInfoCompany={#MyAppPublisher}
-VersionInfoDescription={#MyAppName} ({#MyAppNameEn}) 安装程序
-VersionInfoProductName={#MyAppName} ({#MyAppNameEn})
+VersionInfoDescription={#MyAppName} 安装程序
+VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
@@ -55,8 +52,8 @@ WizardStyle=modern dynamic
 CloseApplications=no
 RestartApplications=no
 ChangesAssociations=yes
-LicenseFile={#SourcePath}\..\..\LICENSE
-InfoAfterFile={#SourcePath}\..\..\NOTICE.md
+LicenseFile={#SourcePath}\INSTALLER_LICENSE.txt
+InfoAfterFile={#SourcePath}\INSTALLER_NOTICE.txt
 SetupLogging=yes
 
 [Languages]
@@ -65,6 +62,12 @@ Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "快捷方式："; Flags: unchecked
 Name: "contextmenu"; Description: "添加“用 CSImage 查看”右键菜单"; GroupDescription: "Windows 集成："; Flags: checkedonce
+
+[InstallDelete]
+; PyInstaller's runtime directory changes between releases. Remove the old
+; generated runtime first so an upgrade cannot retain excluded heavyweight DLLs.
+Type: filesandordirs; Name: "{app}\_internal"
+Type: files; Name: "{app}\{#LegacyAppExeName}"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -81,6 +84,9 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{a
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Registry]
+; Remove the obsolete executable registration after upgrading from builds that
+; still shipped ImageEditor.exe. The stable ProgID and user data stay intact.
+Root: HKCU; Subkey: "Software\Classes\Applications\{#LegacyAppExeName}"; ValueType: none; Flags: deletekey dontcreatekey
 Root: HKCU; Subkey: "Software\{#RegistryName}"; Flags: uninsdeletekeyifempty
 Root: HKCU; Subkey: "Software\Classes\{#ProgId}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppName} 图像"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\{#ProgId}"; ValueType: string; ValueName: "FriendlyTypeName"; ValueData: "{#MyAppName} 图像"
@@ -106,11 +112,6 @@ Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; Va
 Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".pdf"; ValueData: "{#ProgId}"
 Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#RegistryName}"; ValueData: "Software\{#RegistryName}\Capabilities"; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExeName}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\{#ProjectProgId}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppName} 编辑项目"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\{#ProjectProgId}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"",0"
-Root: HKCU; Subkey: "Software\Classes\{#ProjectProgId}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
-Root: HKCU; Subkey: "Software\Classes\.lieproj"; ValueType: string; ValueName: ""; ValueData: "{#ProjectProgId}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\.lieproj\OpenWithProgids"; ValueType: none; ValueName: "{#ProjectProgId}"; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\image\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\image\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\image\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
@@ -417,6 +418,9 @@ end;
 
 procedure InitializeWizard();
 begin
+  { Keep the license page visible, but default to the affirmative option so
+    the user can continue without an unnecessary extra click. }
+  WizardForm.LicenseAcceptedRadio.Checked := True;
   { Avoid Windows Shell autocomplete/folder picker enumeration of disconnected
     network drives. The replacement browser enumerates only the local directory
     that the user explicitly opens. }
@@ -427,15 +431,40 @@ begin
     '可直接输入完整路径，或点击“浏览”用图形界面选择本地文件夹。';
 end;
 
-function RequestRunningAppExit(): Integer;
+function ExecutableCanBeReplaced(const ExecutablePath: String): Boolean;
+var
+  ProbePath: String;
+begin
+  Result := False;
+  if not FileExists(ExecutablePath) then
+  begin
+    Result := True;
+    exit;
+  end;
+  ProbePath := ExecutablePath + '.upgrade-probe';
+  DeleteFile(ProbePath);
+  if not RenameFile(ExecutablePath, ProbePath) then
+    exit;
+  if RenameFile(ProbePath, ExecutablePath) then
+    Result := True
+  else
+    RaiseException('升级占用检测后无法恢复主程序文件名，请检查安装目录权限。');
+end;
+
+function RequestExecutableExit(const ExecutablePath: String): Integer;
 var
   ResultCode: Integer;
 begin
   Result := 0;
-  if not FileExists(ExpandConstant('{app}\{#MyAppExeName}')) then
+  if not FileExists(ExecutablePath) then
+    exit;
+  { Do not launch an idle installed executable merely to ask it to exit. This
+    also lets a repaired installer replace an older executable that cannot
+    start because one of its bundled modules is damaged or missing. }
+  if ExecutableCanBeReplaced(ExecutablePath) then
     exit;
   if not Exec(
-    ExpandConstant('{app}\{#MyAppExeName}'),
+    ExecutablePath,
     '--request-exit-for-upgrade',
     ExpandConstant('{app}'),
     SW_HIDE,
@@ -447,6 +476,14 @@ begin
     exit;
   end;
   Result := ResultCode;
+end;
+
+function RequestRunningAppExit(): Integer;
+begin
+  Result := RequestExecutableExit(ExpandConstant('{app}\{#MyAppExeName}'));
+  if Result <> 0 then
+    exit;
+  Result := RequestExecutableExit(ExpandConstant('{app}\{#LegacyAppExeName}'));
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

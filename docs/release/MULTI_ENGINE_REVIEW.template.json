@@ -5,7 +5,7 @@
   "ReviewedUtc": "YYYY-MM-DDTHH:MM:SSZ",
   "Reviewer": "required",
   "Artifacts": [
-    {"File": "LightImageEditor/ImageEditor.exe", "Sha256": "replace-with-64-lowercase-hex", "Result": "passed"},
+    {"File": "LightImageEditor/CSImage.exe", "Sha256": "replace-with-64-lowercase-hex", "Result": "passed"},
     {"File": "LightImageEditor-Portable-x64-1.0.0.exe", "Sha256": "replace-with-64-lowercase-hex", "Result": "passed"},
     {"File": "LightImageEditor-Setup-x64-1.0.0.exe", "Sha256": "replace-with-64-lowercase-hex", "Result": "passed"},
     {"File": "LightImageEditor-Rollback-x64-0.9.0.exe", "Sha256": "replace-with-64-lowercase-hex", "Result": "passed"}

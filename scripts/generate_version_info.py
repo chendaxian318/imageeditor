@@ -8,7 +8,6 @@ from pathlib import Path
 
 from light_image_editor.identity import (
     COPYRIGHT,
-    DESCRIPTION,
     EXECUTABLE_NAME,
     INTERNAL_NAME,
     PRODUCT_NAME_EN,
@@ -46,8 +45,12 @@ def render_version_info(kind: str = "app") -> str:
     numeric_version = version_tuple(VERSION)
     original_filename = EXECUTABLE_NAME if kind == "app" else "ImageEditorSetup.exe"
     internal_name = INTERNAL_NAME if kind == "app" else f"{INTERNAL_NAME}Setup"
-    description = DESCRIPTION if kind == "app" else f"{PRODUCT_NAME_ZH}安装程序"
-    product_name = f"{PRODUCT_NAME_ZH} ({PRODUCT_NAME_EN})"
+    description = PRODUCT_NAME_ZH if kind == "app" else f"{PRODUCT_NAME_ZH}安装程序"
+    product_name = (
+        PRODUCT_NAME_ZH
+        if PRODUCT_NAME_ZH == PRODUCT_NAME_EN
+        else f"{PRODUCT_NAME_ZH} ({PRODUCT_NAME_EN})"
+    )
 
     strings = {
         "CompanyName": PUBLISHER,

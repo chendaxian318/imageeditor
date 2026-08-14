@@ -34,7 +34,7 @@ def _hash(path: Path) -> str:
 
 def create_evidence(root: Path, release: Path, tests_executed: bool) -> dict[str, Any]:
     critical = [
-        release / "LightImageEditor" / "ImageEditor.exe",
+        release / "LightImageEditor" / "CSImage.exe",
         release / f"CSImage-Portable-x64-{__version__}.exe",
         release / f"CSImage-Setup-x64-{__version__}.exe",
         release / "SBOM.cdx.json",

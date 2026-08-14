@@ -111,7 +111,7 @@ class ProductionGateTests(unittest.TestCase):
         ):
             (root / name).write_text("evidence", encoding="utf-8")
         artifact_paths = (
-            "LightImageEditor/ImageEditor.exe",
+            "LightImageEditor/CSImage.exe",
             "CSImage-Portable-x64-1.0.0.exe",
             "CSImage-Setup-x64-1.0.0.exe",
             "SBOM.cdx.json",

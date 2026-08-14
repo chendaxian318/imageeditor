@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 if (-not $Executable) {
-    $Executable = Join-Path $Root "release\LightImageEditor\ImageEditor.exe"
+    $Executable = Join-Path $Root "release\LightImageEditor\CSImage.exe"
 }
 $Executable = [System.IO.Path]::GetFullPath($Executable)
 $rootPrefix = [System.IO.Path]::GetFullPath($Root).TrimEnd("\") + "\"
@@ -25,7 +25,7 @@ $fixtureDirectory = Join-Path $env:TEMP ("light-image-editor-single-instance-" +
 New-Item -ItemType Directory -Path $fixtureDirectory | Out-Null
 
 function Get-TestProcesses {
-    @(Get-Process -Name "ImageEditor" -ErrorAction SilentlyContinue | Where-Object {
+    @(Get-Process -Name "CSImage" -ErrorAction SilentlyContinue | Where-Object {
         try {
             [System.IO.Path]::GetFullPath($_.Path) -eq $Executable
         }

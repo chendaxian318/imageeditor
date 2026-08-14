@@ -18,6 +18,7 @@ from light_image_editor.image_loader import ImageLoader, ImageLoadFailure, decod
 from light_image_editor.metadata import image_properties
 from light_image_editor.navigation import NavigationSession, expand_activation_paths
 from light_image_editor.preview import PreviewRenderer, render_preview
+from light_image_editor.progressive_image import ProgressiveImageLoader
 from light_image_editor.session import SessionStore
 from light_image_editor.settings import SettingsStore
 from light_image_editor.single_instance import SingleInstanceController, activation_message
@@ -72,6 +73,65 @@ class NavigationTests(unittest.TestCase):
 
 
 class ImageLoaderTests(unittest.TestCase):
+    def test_common_raster_format_matrix_decodes_at_original_size(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            base = Image.new("RGBA", (320, 240), (230, 50, 60, 255))
+            second = Image.new("RGBA", base.size, (40, 180, 90, 255))
+            cases: tuple[tuple[str, str, dict[str, object]], ...] = (
+                ("sample.png", "PNG", {}),
+                ("sample.jpg", "JPEG", {"quality": 92}),
+                ("sample.jpeg", "JPEG", {"quality": 92}),
+                ("sample.webp", "WEBP", {"quality": 90}),
+                ("sample.bmp", "BMP", {}),
+                ("sample.tiff", "TIFF", {"compression": "tiff_lzw"}),
+                ("sample.gif", "GIF", {}),
+                ("sample.avif", "AVIF", {"quality": 90}),
+            )
+            try:
+                for filename, output_format, options in cases:
+                    path = folder / filename
+                    source = base if output_format not in {"JPEG", "BMP"} else base.convert("RGB")
+                    try:
+                        source.save(path, output_format, **options)
+                    finally:
+                        if source is not base:
+                            source.close()
+
+                apng = folder / "sample.apng"
+                base.save(
+                    apng,
+                    "PNG",
+                    save_all=True,
+                    append_images=[second],
+                    duration=[80, 120],
+                    loop=0,
+                )
+
+                expected = {
+                    "sample.png": "PNG",
+                    "sample.jpg": "JPEG",
+                    "sample.jpeg": "JPEG",
+                    "sample.webp": "WEBP",
+                    "sample.bmp": "BMP",
+                    "sample.tiff": "TIFF",
+                    "sample.gif": "GIF",
+                    "sample.avif": "AVIF",
+                    "sample.apng": "PNG",
+                }
+                for filename, expected_format in expected.items():
+                    with self.subTest(filename=filename):
+                        decoded = decode_image(folder / filename)
+                        try:
+                            self.assertEqual(decoded.size, (320, 240))
+                            metadata = decoded.info["_light_image_editor_source_metadata"]
+                            self.assertEqual(metadata.original_format, expected_format)
+                        finally:
+                            decoded.close()
+            finally:
+                base.close()
+                second.close()
+
     def test_background_loader_decodes_and_prefetches_without_unbounded_cache(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
@@ -158,6 +218,59 @@ class ImageLoaderTests(unittest.TestCase):
 
         self.assertEqual(frame.image.size, (933, 700))
         self.assertLess(frame.scale, 1.0)
+
+
+class ProgressiveImageLoaderTests(unittest.TestCase):
+    def test_preview_tiles_and_full_image_have_separate_lifetimes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "large.png"
+            Image.new("RGB", (2400, 1600), "#245680").save(path)
+            loader = ProgressiveImageLoader(max_workers=1, max_cache_bytes=32 * 1024 * 1024)
+            try:
+                preview = loader.load_preview(path, (800, 600)).result(timeout=10)
+                self.assertEqual(preview.source_size, (2400, 1600))
+                self.assertLessEqual(preview.image.width, 800)
+                self.assertLessEqual(preview.image.height, 600)
+                self.assertLess(preview.image.width, preview.source_size[0])
+
+                tiles = loader.load_tiles(
+                    path,
+                    ((0, 0, 1024, 1024), (1024, 0, 2048, 1024)),
+                ).result(timeout=10)
+                self.assertEqual([tile.image.size for tile in tiles], [(1024, 1024)] * 2)
+                self.assertTrue(
+                    all(tile.image.getpixel((10, 10)) == (36, 86, 128) for tile in tiles)
+                )
+
+                cached_before_full = loader.cache_bytes
+                full = loader.load_full(path).result(timeout=10)
+                self.assertEqual(full.size, (2400, 1600))
+                self.assertEqual(loader.cache_bytes, cached_before_full)
+                full.close()
+                for tile in tiles:
+                    tile.image.close()
+                preview.image.close()
+            finally:
+                loader.shutdown()
+
+    def test_cache_evicts_by_decoded_bytes_instead_of_image_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths: list[Path] = []
+            for index in range(4):
+                path = root / f"{index}.png"
+                Image.new("RGB", (1200, 1200), (index * 20, 40, 80)).save(path)
+                paths.append(path)
+            budget = 8 * 1024 * 1024
+            loader = ProgressiveImageLoader(max_workers=1, max_cache_bytes=budget)
+            try:
+                for path in paths:
+                    preview = loader.load_preview(path, (1200, 1200)).result(timeout=10)
+                    preview.image.close()
+                    self.assertLessEqual(loader.cache_bytes, budget)
+                self.assertGreater(loader.cache_bytes, 0)
+            finally:
+                loader.shutdown()
 
     def test_preview_applies_edits_without_mutating_source(self) -> None:
         image = Image.new("RGB", (80, 40), "red")

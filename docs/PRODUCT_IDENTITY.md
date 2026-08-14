@@ -11,7 +11,7 @@
 | 内部名称 | CSImage（旧版注册表标识继续保留 `LightImageEditor` 以兼容升级） |
 | 发布者 | chendaxian318 |
 | 应用 ID | io.github.chendaxian318.imageeditor |
-| 可执行文件 | ImageEditor.exe |
+| 可执行文件 | CSImage.exe |
 | 注册表应用名 | LightImageEditor |
 | 文件类型 ProgID | LightImageEditor.Image |
 | 当前版本 | 1.0.0 |
@@ -22,7 +22,7 @@
 - 版本号只在 `light_image_editor/version.py` 修改，构建脚本、PE 资源、安装器和发布文件名均从这里读取。
 - `APP_ID`、`REGISTRY_NAME` 和 `PROG_ID` 发布后不得随意变更；如必须变更，需要提供注册表、设置和文件关联迁移。
 - 发布者名称必须与后续代码签名证书或 Microsoft Store 发布者身份一致。
-- 当前可执行文件名为兼容既有安装和关联保留为 `ImageEditor.exe`。
+- 当前可执行文件名为 `CSImage.exe`；安装升级时会清理旧的 `ImageEditor.exe`，注册表和用户数据标识继续保留以兼容升级。
 
 ## 许可证状态
 

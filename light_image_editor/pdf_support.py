@@ -10,7 +10,9 @@ from PIL import Image
 from .document import SourceMetadata, attach_source_metadata
 
 PDF_EXTENSION = ".pdf"
-DEFAULT_RENDER_DPI = 144
+# 120 DPI keeps text crisp at the default 100% view while reducing each
+# continuous-scroll page buffer by roughly 31% compared with 144 DPI.
+DEFAULT_RENDER_DPI = 120
 MAX_PDF_PAGES = 10_000
 MAX_RENDER_DIMENSION = 100_000
 MAX_RENDER_PIXELS = 120_000_000

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from runpy import run_path
 from typing import cast
 
 import image_editor
@@ -71,6 +74,56 @@ class FileServiceTests(unittest.TestCase):
 
 
 class EntryPointTests(unittest.TestCase):
+    def test_entry_point_does_not_eagerly_import_the_legacy_tk_editor(self) -> None:
+        command = (
+            "import image_editor, sys; print('light_image_editor.ui.main_window' in sys.modules)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", command],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.stdout.strip(), "False")
+
+    def test_production_viewer_entry_does_not_import_hidden_development_modules(self) -> None:
+        command = (
+            "import csimage_viewer, sys; "
+            "print(any(name == 'tkinter' or name.startswith('light_image_editor.ui') "
+            "for name in sys.modules))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", command],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.stdout.strip(), "False")
+
+    def test_pyinstaller_scope_uses_viewer_entry_and_excludes_hidden_product_areas(self) -> None:
+        config = run_path("packaging/windows/viewer_build_config.py")
+        self.assertEqual(config["VIEWER_ENTRYPOINT"], "csimage_viewer.py")
+        excluded = set(config["VIEWER_EXCLUDES"])
+        self.assertIn("tkinter", excluded)
+        self.assertIn("light_image_editor.ui", excluded)
+        self.assertIn("light_image_editor.domain", excluded)
+        self.assertIn("light_image_editor.providers", excluded)
+        self.assertIn("PySide6.QtWebEngineWidgets", excluded)
+        self.assertNotIn("PySide6.QtCore", excluded)
+        self.assertNotIn("PySide6.QtGui", excluded)
+        self.assertNotIn("PySide6.QtWidgets", excluded)
+        bundle_paths = set(config["EXCLUDED_BUNDLE_PATHS"])
+        self.assertIn("pyside6/qt6quick.dll", bundle_paths)
+        self.assertIn("pyside6/qt6qml.dll", bundle_paths)
+        self.assertIn("pyside6/qt6pdf.dll", bundle_paths)
+        self.assertIn("pyside6/opengl32sw.dll", bundle_paths)
+        for spec_name in ("image_editor.spec", "image_editor_portable.spec"):
+            spec = Path("packaging/windows") / spec_name
+            source = spec.read_text(encoding="utf-8")
+            self.assertIn("ROOT / VIEWER_ENTRYPOINT", source)
+            self.assertIn("excludes=list(VIEWER_EXCLUDES)", source)
+            self.assertIn("KEEP_VIEWER_BUNDLE_ENTRY(entry)", source)
+
     def test_command_line_file_is_opened_after_window_creation(self) -> None:
         class FakeApplication:
             def __init__(self) -> None:

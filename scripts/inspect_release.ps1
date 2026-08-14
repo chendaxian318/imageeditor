@@ -28,7 +28,7 @@ function Get-RelativeReleasePath {
 }
 
 $binaries = @(
-    (Join-Path $ReleasePath "LightImageEditor\ImageEditor.exe"),
+    (Join-Path $ReleasePath "LightImageEditor\CSImage.exe"),
     (Join-Path $ReleasePath "CSImage-Portable-x64-$Version.exe"),
     (Join-Path $ReleasePath "CSImage-Setup-x64-$Version.exe")
 )

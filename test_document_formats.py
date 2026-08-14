@@ -98,10 +98,40 @@ class DocumentFormatTests(unittest.TestCase):
                 return Image.new("RGBA", self.size, (10, 20, 30, 128))
 
         document = FakeDocument()
-        with patch("light_image_editor.psd_support.PSDImage.open", return_value=document):
+        with patch("light_image_editor.psd_support._psd_image_class") as psd_image_class:
+            psd_image_class.return_value.open.return_value = document
             decoded = render_psd_composite("broken-preview.psd")
         try:
             self.assertEqual(decoded.size, document.size)
+            self.assertEqual(decoded.getpixel((0, 0)), (10, 20, 30, 128))
+            self.assertEqual(document.calls, [False, True])
+        finally:
+            decoded.close()
+
+    def test_psd_rebuilds_from_layers_when_cached_preview_is_opaque_black(self) -> None:
+        class FakeDocument:
+            size = (20, 10)
+
+            def __init__(self) -> None:
+                self.calls: list[bool] = []
+
+            def composite(
+                self,
+                *,
+                ignore_preview: bool = False,
+                apply_icc: bool = True,
+            ) -> Image.Image:
+                del apply_icc
+                self.calls.append(ignore_preview)
+                if not ignore_preview:
+                    return Image.new("RGB", self.size, "black")
+                return Image.new("RGBA", self.size, (10, 20, 30, 128))
+
+        document = FakeDocument()
+        with patch("light_image_editor.psd_support._psd_image_class") as psd_image_class:
+            psd_image_class.return_value.open.return_value = document
+            decoded = render_psd_composite("black-preview.psd")
+        try:
             self.assertEqual(decoded.getpixel((0, 0)), (10, 20, 30, 128))
             self.assertEqual(document.calls, [False, True])
         finally:
@@ -136,6 +166,22 @@ class DocumentFormatTests(unittest.TestCase):
 
         self.assertNotIn(".pdf", SUPPORTED_INPUTS)
         self.assertIn(".pdf", VIEWER_INPUTS)
+
+    def test_transferred_pdf_page_does_not_leave_a_duplicate_preview_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "page.pdf"
+            page = Image.new("RGB", (320, 240), "white")
+            try:
+                page.save(path)
+            finally:
+                page.close()
+            loader = ImageLoader(max_workers=1, cache_size=2)
+            try:
+                transferred = loader.load(path, page_index=0, take_cached=True).result(timeout=5)
+                self.assertIsNone(loader.cached_preview(path, page_index=0))
+                transferred.close()
+            finally:
+                loader.shutdown()
 
     def test_pdf_rejects_an_invalid_page_number(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

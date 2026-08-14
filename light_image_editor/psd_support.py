@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from PIL import Image
-from psd_tools import PSDImage
 
 from .document import SourceMetadata, attach_source_metadata
 
@@ -19,11 +18,37 @@ class PsdSupportError(Exception):
     """Raised when a Photoshop document cannot be rendered safely."""
 
 
+def _psd_image_class():
+    from psd_tools import PSDImage
+
+    return PSDImage
+
+
 def _validate_canvas(width: int, height: int) -> None:
     if width <= 0 or height <= 0:
         raise PsdSupportError("Photoshop 文档画布尺寸无效。")
     if width > MAX_PSD_DIMENSION or height > MAX_PSD_DIMENSION or width * height > MAX_PSD_PIXELS:
         raise PsdSupportError(f"Photoshop 文档尺寸 {width} × {height} 超过安全上限，已停止解码。")
+
+
+def _is_opaque_black_preview(image: Image.Image) -> bool:
+    """Return whether a cached composite contains only opaque black pixels."""
+
+    rgb = image if image.mode == "RGB" else image.convert("RGB")
+    try:
+        if rgb.getbbox() is not None:
+            return False
+    finally:
+        if rgb is not image:
+            rgb.close()
+
+    if "A" not in image.getbands():
+        return True
+    alpha = image.getchannel("A")
+    try:
+        return alpha.histogram()[0] == 0
+    finally:
+        alpha.close()
 
 
 def render_psd_composite(path: str | Path) -> Image.Image:
@@ -36,7 +61,7 @@ def render_psd_composite(path: str | Path) -> Image.Image:
 
     image_path = Path(path)
     try:
-        document = PSDImage.open(
+        document = _psd_image_class().open(
             image_path,
             max_alloc_bytes=MAX_PSD_ALLOCATION_BYTES,
         )
@@ -50,6 +75,18 @@ def render_psd_composite(path: str | Path) -> Image.Image:
             if "configured budget" in str(preview_error).casefold():
                 raise
             composite = document.composite(ignore_preview=True, apply_icc=True)
+        if _is_opaque_black_preview(composite):
+            try:
+                rebuilt = document.composite(ignore_preview=True, apply_icc=True)
+            except (KeyboardInterrupt, SystemExit, MemoryError):
+                raise
+            except Exception:
+                # A genuinely black PSD is still a valid image. Keep its cached
+                # preview if the optional layer reconstruction is unavailable.
+                pass
+            else:
+                composite.close()
+                composite = rebuilt
         try:
             composite.load()
             source_mode = composite.mode

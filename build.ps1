@@ -110,7 +110,18 @@ function Remove-GeneratedDirectory {
         throw "Refusing to remove a directory outside the repository: $resolved"
     }
     if (Test-Path -LiteralPath $resolved) {
-        Remove-Item -LiteralPath $resolved -Recurse -Force
+        for ($attempt = 1; $attempt -le 20; $attempt++) {
+            try {
+                Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
+                break
+            }
+            catch {
+                if ($attempt -eq 20) {
+                    throw
+                }
+                Start-Sleep -Milliseconds 250
+            }
+        }
     }
 }
 
@@ -313,7 +324,7 @@ try {
     Invoke-Checked $Python @("-m", "ruff", "check", ".")
     Invoke-Checked $Python @(
         "-m", "mypy",
-        "image_editor.py", "image_ops.py", "installer.py",
+        "csimage_viewer.py", "image_editor.py", "image_ops.py", "installer.py",
         "light_image_editor", "scripts", "benchmarks",
         "test_architecture.py", "test_build_metadata.py", "test_identity_resources.py",
         "test_image_ops.py", "test_installer.py", "test_v03_safety.py",
@@ -337,7 +348,7 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $Build "version") -Force | Out-Null
     New-Item -ItemType Directory -Path $Release -Force | Out-Null
 
-    $appVersionInfo = Join-Path $Build "version\ImageEditor.version.txt"
+    $appVersionInfo = Join-Path $Build "version\CSImage.version.txt"
     Invoke-Checked $Python @(
         "-m", "scripts.generate_version_info", "--kind", "app", "--output", $appVersionInfo
     )
@@ -364,10 +375,15 @@ try {
     )
 
     $appDirectory = Join-Path $Dist "app\LightImageEditor"
-    $appExecutable = Join-Path $appDirectory "ImageEditor.exe"
+    $appExecutable = Join-Path $appDirectory "CSImage.exe"
     if (-not (Test-Path -LiteralPath $appExecutable -PathType Leaf)) {
         throw "PyInstaller did not create $appExecutable"
     }
+    Invoke-Checked $Python @(
+        (Join-Path $Root "scripts\verify_viewer_bundle.py"),
+        "--app-dir", $appDirectory,
+        "--pyz-toc", (Join-Path $Build "pyinstaller\app\image_editor\PYZ-00.toc")
+    )
     Sign-PublisherBinary $appExecutable
     Copy-Item -LiteralPath $appDirectory -Destination (Join-Path $Release "LightImageEditor") -Recurse
 
@@ -381,7 +397,7 @@ try {
         $PortableSpec
     )
 
-    $portableSource = Join-Path $Dist "portable\LightImageEditorPortable.exe"
+    $portableSource = Join-Path $Dist "portable\CSImagePortable.exe"
     $portableName = "CSImage-Portable-x64-$version.exe"
     $portableExecutable = Join-Path $Release $portableName
     if (-not (Test-Path -LiteralPath $portableSource -PathType Leaf)) {
@@ -675,7 +691,7 @@ try {
     Write-ReleaseChecksums -ReleasePath $Release -OutputPath $checksumPath
 
     Write-Host "Build complete (version $version):"
-    Write-Host "  $Release\LightImageEditor\ImageEditor.exe"
+    Write-Host "  $Release\LightImageEditor\CSImage.exe"
     Write-Host "  $Release\$portableName"
     Write-Host "  $Release\$setupName"
     Write-Host "  $Release\SHA256SUMS.txt"

@@ -5,8 +5,18 @@ from __future__ import annotations
 import ctypes
 import os
 import re
-import tkinter as tk
 from dataclasses import dataclass
+from types import ModuleType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import tkinter as tk
+
+
+def _tk_module() -> ModuleType:
+    import tkinter as tk
+
+    return tk
 
 
 @dataclass(frozen=True)
@@ -81,6 +91,7 @@ def fit_geometry_to_work_area(
 
 
 def monitor_work_area(root: tk.Misc) -> WorkArea:
+    tk = _tk_module()
     if os.name != "nt":
         return WorkArea(0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
 
@@ -117,6 +128,7 @@ class DpiManager:
         self.current_dpi = 96
 
     def refresh(self) -> bool:
+        tk = _tk_module()
         try:
             dpi = max(96, round(float(self.root.winfo_fpixels("1i"))))
         except tk.TclError:
@@ -145,6 +157,7 @@ class DpiManager:
     def constrain_to_current_work_area(self) -> bool:
         """Keep a window fully visible after Windows reports a monitor/DPI transition."""
 
+        tk = _tk_module()
         try:
             current = self.root.geometry()
         except tk.TclError:
