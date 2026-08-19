@@ -19,6 +19,7 @@ from .image_loader import (
 )
 from .pdf_support import PDF_EXTENSION, render_pdf_page
 from .psd_support import PSD_EXTENSIONS, render_psd_composite
+from .vector_support import VECTOR_EXTENSIONS, render_vector_image
 
 THUMBNAIL_SIZE = (66, 48)
 
@@ -49,8 +50,12 @@ def generate_thumbnail(
             rgb = result.convert("RGB")
             result.close()
             return rgb
-        if image_path.suffix.casefold() in PSD_EXTENSIONS:
-            rendered = render_psd_composite(image_path)
+        if image_path.suffix.casefold() in PSD_EXTENSIONS | VECTOR_EXTENSIONS:
+            rendered = (
+                render_psd_composite(image_path)
+                if image_path.suffix.casefold() in PSD_EXTENSIONS
+                else render_vector_image(image_path, dpi=96)
+            )
             try:
                 rgba = rendered.convert("RGBA")
                 try:

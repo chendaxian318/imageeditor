@@ -97,7 +97,10 @@ class OfflinePrivacyTests(unittest.TestCase):
         source = "\n".join(
             path.read_text(encoding="utf-8")
             for path in (ROOT / "light_image_editor").rglob("*.py")
-            if path.name != "updater.py"
+            # Updater, image-model calls and local-AI engine/model downloads are
+            # explicit user actions, not background clients. Their own tests
+            # cover consent, dispatch and lazy loading.
+            if path.name not in {"updater.py", "image_model_api.py", "local_ai_tools.py"}
         )
         for forbidden in ("import requests", "from requests", "urllib.request", "http.client"):
             self.assertNotIn(forbidden, source)

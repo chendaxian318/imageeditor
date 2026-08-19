@@ -66,7 +66,8 @@ class InstallerTests(unittest.TestCase):
     def test_upgrade_can_replace_an_idle_broken_executable(self) -> None:
         script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
         self.assertIn("function ExecutableCanBeReplaced", script)
-        self.assertIn(".upgrade-probe", script)
+        self.assertIn("fmOpenReadWrite or fmShareExclusive", script)
+        self.assertNotIn(".upgrade-probe", script)
         self.assertIn("if ExecutableCanBeReplaced(ExecutablePath) then", script)
         self.assertLess(
             script.index("if ExecutableCanBeReplaced(ExecutablePath) then"),
@@ -92,19 +93,55 @@ class InstallerTests(unittest.TestCase):
                 ".psd",
                 ".psdt",
                 ".pdf",
+                ".svg",
+                ".ai",
+                ".eps",
+                ".emf",
+                ".wmf",
+                ".tga",
+                ".dds",
+                ".ico",
+                ".exr",
+                ".hdr",
+                ".ktx2",
             ),
         )
 
-    def test_photoshop_formats_have_explicit_context_menu_keys(self) -> None:
+    def test_non_raster_formats_have_explicit_context_menu_keys(self) -> None:
         self.assertEqual(
             CONTEXT_MENU_EXTENSION_KEYS,
             (
                 r"Software\Classes\SystemFileAssociations\.psd\shell\LightImageEditor",
                 r"Software\Classes\SystemFileAssociations\.psdt\shell\LightImageEditor",
+                r"Software\Classes\SystemFileAssociations\.svg\shell\LightImageEditor",
+                r"Software\Classes\SystemFileAssociations\.ai\shell\LightImageEditor",
+                r"Software\Classes\SystemFileAssociations\.eps\shell\LightImageEditor",
+                r"Software\Classes\SystemFileAssociations\.emf\shell\LightImageEditor",
+                r"Software\Classes\SystemFileAssociations\.wmf\shell\LightImageEditor",
+                r"Software\Classes\SystemFileAssociations\.tga\shell\LightImageEditor",
+                r"Software\Classes\SystemFileAssociations\.dds\shell\LightImageEditor",
+                r"Software\Classes\SystemFileAssociations\.ico\shell\LightImageEditor",
+                r"Software\Classes\SystemFileAssociations\.exr\shell\LightImageEditor",
+                r"Software\Classes\SystemFileAssociations\.hdr\shell\LightImageEditor",
+                r"Software\Classes\SystemFileAssociations\.ktx2\shell\LightImageEditor",
             ),
         )
         script = Path("packaging/windows/LightImageEditor.iss").read_text(encoding="utf-8")
-        for extension in (".psd", ".psdt"):
+        for extension in (
+            ".psd",
+            ".psdt",
+            ".svg",
+            ".ai",
+            ".eps",
+            ".emf",
+            ".wmf",
+            ".tga",
+            ".dds",
+            ".ico",
+            ".exr",
+            ".hdr",
+            ".ktx2",
+        ):
             self.assertIn(
                 rf"Software\Classes\SystemFileAssociations\{extension}\shell\LightImageEditor",
                 script,

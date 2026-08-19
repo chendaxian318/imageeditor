@@ -19,3 +19,4 @@ htmlcov/
 .env
 *.pfx
 *.p12
+/light_image_editor/internal_default_image_api.py

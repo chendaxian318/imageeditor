@@ -38,13 +38,38 @@ SUPPORTED_EXTENSIONS = (
     ".psd",
     ".psdt",
     ".pdf",
+    ".svg",
+    ".ai",
+    ".eps",
+    ".emf",
+    ".wmf",
+    ".tga",
+    ".dds",
+    ".ico",
+    ".exr",
+    ".hdr",
+    ".ktx2",
 )
 PROJECT_EXTENSION = ".lieproj"
 PROJECT_PROG_ID = "LightImageEditor.Project"
 CONTEXT_MENU_KEY = r"Software\Classes\SystemFileAssociations\image\shell\LightImageEditor"
 CONTEXT_MENU_EXTENSION_KEYS = tuple(
     rf"Software\Classes\SystemFileAssociations\{extension}\shell\LightImageEditor"
-    for extension in (".psd", ".psdt")
+    for extension in (
+        ".psd",
+        ".psdt",
+        ".svg",
+        ".ai",
+        ".eps",
+        ".emf",
+        ".wmf",
+        ".tga",
+        ".dds",
+        ".ico",
+        ".exr",
+        ".hdr",
+        ".ktx2",
+    )
 )
 CAPABILITIES_KEY = rf"Software\{APP_REGISTRY_NAME}\Capabilities"
 REGISTERED_APPLICATIONS_KEY = r"Software\RegisteredApplications"

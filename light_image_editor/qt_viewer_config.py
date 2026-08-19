@@ -112,6 +112,8 @@ class QtViewerConfig:
     image_edge_glow_color: str = "auto"
     image_edge_glow_intensity: int = 50
     image_edge_glow_spread: int = 7
+    image_edit_api_endpoint: str = "https://api.openai.com/v1/images/edits"
+    image_edit_api_model: str = "gpt-image-2"
     navigator_position: tuple[float, float] | None = None
     topmost: bool = False
     zoom_step: int = 10
@@ -148,6 +150,12 @@ class QtViewerConfig:
         config.image_edge_glow_spread = _bounded_int(
             raw.get("viewer_image_edge_glow_spread"), 7, 2, 20
         )
+        endpoint = str(raw.get("viewer_image_edit_api_endpoint", "")).strip()
+        model = str(raw.get("viewer_image_edit_api_model", "")).strip()
+        if endpoint:
+            config.image_edit_api_endpoint = endpoint[:2048]
+        if model:
+            config.image_edit_api_model = model[:160]
         config.navigator_position = _normalized_position(raw.get("viewer_navigator_position"))
         config.topmost = bool(raw.get("viewer_topmost", False))
         config.zoom_step = _bounded_int(raw.get("viewer_zoom_step_percent"), 10, 1, 100)
@@ -213,6 +221,8 @@ class QtViewerConfig:
                 "viewer_image_edge_glow_color": self.image_edge_glow_color,
                 "viewer_image_edge_glow_intensity": self.image_edge_glow_intensity,
                 "viewer_image_edge_glow_spread": self.image_edge_glow_spread,
+                "viewer_image_edit_api_endpoint": self.image_edit_api_endpoint,
+                "viewer_image_edit_api_model": self.image_edit_api_model,
                 "viewer_navigator_position": (
                     list(self.navigator_position) if self.navigator_position is not None else None
                 ),

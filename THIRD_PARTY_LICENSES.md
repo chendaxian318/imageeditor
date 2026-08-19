@@ -1,6 +1,6 @@
 # Third-party licence inventory
 
-This document records the dependency audit updated on **2026-08-10**.
+This document records the dependency audit updated on **2026-08-19**.
 It is an engineering compliance inventory, not legal advice and not a
 substitute for the authoritative licence text distributed by each component.
 
@@ -11,6 +11,13 @@ substitute for the authoritative licence text distributed by each component.
 - Pillow: 11.3.0
 - attrs: 26.1.0
 - NumPy: 2.5.1
+- ONNX Runtime: 1.29.0
+- flatbuffers: 25.12.19
+- protobuf: 7.35.1
+- OpenEXR: 3.4.14
+- pyktx / KTX-Software: 4.4.2
+- cffi: 2.1.1
+- pycparser: 3.0
 - pypdfium2: 5.12.1 (bundled PDFium Windows x64 binary)
 - psd-tools: 1.17.4
 - PyInstaller: 6.17.0
@@ -32,6 +39,13 @@ process can copy them into a distributable notice bundle.
 | Pillow | 11.3.0 | Image decode, processing and encode | MIT-CMU, plus bundled native-library terms | `.venv/Lib/site-packages/pillow-11.3.0.dist-info/licenses/LICENSE` |
 | attrs | 26.1.0 | Runtime data-model dependency of psd-tools | MIT | `.venv/Lib/site-packages/attrs-26.1.0.dist-info/licenses/LICENSE` |
 | NumPy | 2.5.1 | Float32 colour processing, curves, histograms and analysis | BSD-3-Clause, plus bundled third-party terms | `.venv/Lib/site-packages/numpy-2.5.1.dist-info/licenses/` |
+| ONNX Runtime | 1.29.0 | One-shot local BiRefNet inference worker | MIT, plus native third-party notices | `.venv/Lib/site-packages/onnxruntime/LICENSE` and `onnxruntime/ThirdPartyNotices.txt` |
+| flatbuffers | 25.12.19 | ONNX Runtime model metadata | Apache-2.0 | FlatBuffers terms included in the ONNX Runtime third-party notice bundle |
+| protobuf | 7.35.1 | ONNX Runtime model metadata | BSD-3-Clause | `.venv/Lib/site-packages/protobuf-7.35.1.dist-info/LICENSE` |
+| OpenEXR | 3.4.14 | EXR half-float RGBA encoding | BSD-3-Clause | `.venv/Lib/site-packages/openexr-3.4.14.dist-info/licenses/LICENSE.md` |
+| pyktx / KTX-Software | 4.4.2 | KTX2 container, Basis compression and mipmap output | Apache-2.0 with bundled KTX-Software notices | `.venv/Lib/site-packages/pyktx-4.4.2.dist-info/licenses/LICENSE` and `resources/runtime/ktx/license.html` |
+| cffi | 2.1.1 | Native binding runtime used by pyktx | MIT-0 | `.venv/Lib/site-packages/cffi-2.1.1.dist-info/licenses/LICENSE` |
+| pycparser | 3.0 | Runtime dependency of cffi | BSD-3-Clause | `.venv/Lib/site-packages/pycparser-3.0.dist-info/licenses/LICENSE` |
 | pypdfium2 / PDFium | 5.12.1 | Multi-page PDF inspection and raster rendering | pypdfium2: Apache-2.0 OR BSD-3-Clause; PDFium: BSD-style, plus bundled native dependency terms | `.venv/Lib/site-packages/pypdfium2-5.12.1.dist-info/licenses/` |
 | psd-tools | 1.17.4 | Read-only PSD/PSDT parsing and flattened composite rendering | MIT | `.venv/Lib/site-packages/psd_tools-1.17.4.dist-info/licenses/LICENSE` |
 | PyInstaller | 6.17.0 | Build tool and embedded bootloader/runtime hooks | GPL-2.0-or-later WITH Bootloader-exception; runtime hooks Apache-2.0 | `.venv/Lib/site-packages/pyinstaller-6.17.0.dist-info/licenses/COPYING.txt` |
@@ -154,6 +168,31 @@ The base application includes `psd-tools==1.17.4` and its `attrs==26.1.0`
 runtime dependency for bounded, read-only PSD/PSDT composite previews. Their
 MIT licence texts are copied into `licenses/psd-tools/` and `licenses/attrs/`
 by both PyInstaller recipes and must remain in installed and portable builds.
+
+## Local intelligent image processing
+
+CSImage includes `onnxruntime==1.29.0` (MIT) for the optional, one-shot local
+background-removal worker. Its licence and native third-party notices are
+shipped in `licenses/onnxruntime/`; the protobuf runtime licence is shipped in
+`licenses/protobuf/`. The BiRefNet Lite ONNX model is not embedded in the
+installer. On first use, CSImage downloads the pinned fp32 file from
+`onnx-community/BiRefNet_lite-ONNX`, verifies its exact size and SHA-256, and
+stores it in the current user's local application-data directory. The model
+card identifies the model as MIT licensed:
+
+- <https://huggingface.co/onnx-community/BiRefNet_lite-ONNX>
+
+The optional Upscayl runtime and `upscayl-standard-4x` model are also not
+embedded in the installer. On first use, CSImage downloads the pinned official
+Windows runtime and model into the current user's local application-data
+directory and invokes it as a separate process. Upscayl and `upscayl-ncnn` are
+AGPL-3.0 software. Preserve their copyright and licence notices and re-evaluate
+source-provision obligations before conveying copies outside the organisation
+or modifying the upstream runtime:
+
+- <https://github.com/upscayl/upscayl>
+- <https://github.com/upscayl/upscayl-ncnn>
+- <https://www.gnu.org/licenses/agpl-3.0.html>
 
 ## Reproducible audit command
 

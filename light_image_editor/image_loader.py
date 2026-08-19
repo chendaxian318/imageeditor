@@ -21,6 +21,7 @@ from .document import (
 from .formats import HEIF_EXTENSIONS, AnimationSequence, decode_animation, register_optional_heif
 from .pdf_support import PDF_EXTENSION, PdfSupportError, render_pdf_page
 from .psd_support import PSD_EXTENSIONS, PsdSupportError, render_psd_composite
+from .vector_support import VECTOR_EXTENSIONS, VectorSupportError, render_vector_image
 
 MAX_DECODE_PIXELS = 120_000_000
 MAX_IMAGE_DIMENSION = 100_000
@@ -35,6 +36,9 @@ SUPPORTED_DECODE_FORMATS = {
     "AVIF",
     "HEIF",
     "PSD",
+    "TGA",
+    "DDS",
+    "ICO",
 }
 CACHED_PREVIEW_MAX_SIZE = (1600, 1600)
 
@@ -67,6 +71,8 @@ def friendly_load_failure(path: str | Path, error: BaseException) -> ImageLoadFa
         return ImageLoadFailure(image_path, "pdf", str(error))
     if isinstance(error, PsdSupportError):
         return ImageLoadFailure(image_path, "psd", str(error))
+    if isinstance(error, VectorSupportError):
+        return ImageLoadFailure(image_path, "vector", str(error))
     if isinstance(error, (Image.DecompressionBombError, Image.DecompressionBombWarning)):
         return ImageLoadFailure(image_path, "too_large", "图片尺寸过大，已停止解码以保护内存。")
     if isinstance(error, UnidentifiedImageError):
@@ -87,6 +93,34 @@ def decode_image(path: str | Path, page_index: int = 0) -> Image.Image:
             return render_pdf_page(image_path, page_index)
         if image_path.suffix.casefold() in PSD_EXTENSIONS:
             return render_psd_composite(image_path)
+        if image_path.suffix.casefold() in VECTOR_EXTENSIONS:
+            return render_vector_image(image_path)
+        if image_path.suffix.casefold() in {".exr", ".hdr", ".ktx2"}:
+            from .advanced_formats import decode_exr, decode_hdr, decode_ktx2
+
+            decoder = {
+                ".exr": decode_exr,
+                ".hdr": decode_hdr,
+                ".ktx2": decode_ktx2,
+            }[image_path.suffix.casefold()]
+            decoded = decoder(image_path)
+            if (
+                decoded.width <= 0
+                or decoded.height <= 0
+                or decoded.width > MAX_IMAGE_DIMENSION
+                or decoded.height > MAX_IMAGE_DIMENSION
+                or decoded.width * decoded.height > MAX_DECODE_PIXELS
+            ):
+                decoded.close()
+                raise ValueError(
+                    f"图片尺寸 {decoded.width} × {decoded.height} 超过安全上限，已停止解码。"
+                )
+            metadata = SourceMetadata(
+                original_format=image_path.suffix[1:].upper(),
+                original_mode=decoded.mode,
+                has_alpha="A" in decoded.getbands(),
+            )
+            return attach_source_metadata(decoded, metadata)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", Image.DecompressionBombWarning)
             with Image.open(image_path) as source:

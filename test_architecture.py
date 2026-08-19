@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
@@ -112,10 +113,12 @@ class EntryPointTests(unittest.TestCase):
         self.assertNotIn("PySide6.QtCore", excluded)
         self.assertNotIn("PySide6.QtGui", excluded)
         self.assertNotIn("PySide6.QtWidgets", excluded)
+        self.assertNotIn("PySide6.QtSvg", excluded)
         bundle_paths = set(config["EXCLUDED_BUNDLE_PATHS"])
         self.assertIn("pyside6/qt6quick.dll", bundle_paths)
         self.assertIn("pyside6/qt6qml.dll", bundle_paths)
         self.assertIn("pyside6/qt6pdf.dll", bundle_paths)
+        self.assertNotIn("pyside6/qt6svg.dll", bundle_paths)
         self.assertIn("pyside6/opengl32sw.dll", bundle_paths)
         for spec_name in ("image_editor.spec", "image_editor_portable.spec"):
             spec = Path("packaging/windows") / spec_name
@@ -123,6 +126,34 @@ class EntryPointTests(unittest.TestCase):
             self.assertIn("ROOT / VIEWER_ENTRYPOINT", source)
             self.assertIn("excludes=list(VIEWER_EXCLUDES)", source)
             self.assertIn("KEEP_VIEWER_BUNDLE_ENTRY(entry)", source)
+
+    def test_lightweight_viewer_modules_do_not_import_excluded_product_areas(self) -> None:
+        config = run_path("packaging/windows/viewer_build_config.py")
+        hidden = tuple(config["HIDDEN_DEVELOPMENT_MODULES"])
+        runtime_sources = (
+            Path("light_image_editor/qt_viewer.py"),
+            Path("light_image_editor/qt_image_tools.py"),
+            Path("light_image_editor/qt_creation_tools.py"),
+        )
+        violations: list[str] = []
+        for source_path in runtime_sources:
+            tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+            for node in ast.walk(tree):
+                imported: list[str] = []
+                if isinstance(node, ast.Import):
+                    imported = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    prefix = "light_image_editor." if node.level == 1 else ""
+                    imported = [prefix + node.module]
+                for module_name in imported:
+                    if any(
+                        module_name == excluded or module_name.startswith(f"{excluded}.")
+                        for excluded in hidden
+                    ):
+                        violations.append(
+                            f"{source_path}:{getattr(node, 'lineno', 0)} imports {module_name}"
+                        )
+        self.assertEqual(violations, [])
 
     def test_command_line_file_is_opened_after_window_creation(self) -> None:
         class FakeApplication:

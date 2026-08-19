@@ -21,6 +21,7 @@ from PySide6.QtGui import (
     QImage,
     QKeySequence,
     QPainter,
+    QPalette,
 )
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -44,11 +45,14 @@ from light_image_editor.qt_viewer_widgets import (
     MarkupItem,
     MarkupToolbar,
     NativeResizeFilter,
+    NavigationButton,
     ViewerCheckBox,
     ViewerIconButton,
     ViewerSettingsDialog,
     pil_to_qimage,
     qimage_to_pil,
+    set_viewer_theme,
+    viewer_theme_colors,
 )
 from light_image_editor.settings import SettingsStore
 
@@ -83,7 +87,7 @@ class QtViewerEmptyStateTests(unittest.TestCase):
                 self.assertEqual(window.empty_open_button.text(), "打开文件")
                 self.assertEqual(
                     window.empty_hint.text(),
-                    "点击按钮选择图片、PSD/PSDT 或 PDF，也可以直接拖放到这里",
+                    "点击按钮选择图片、矢量图、PSD/PSDT 或 PDF，也可以直接拖放到这里",
                 )
                 self.assertFalse(window.previous_button.isVisible())
                 self.assertFalse(window.next_button.isVisible())
@@ -207,20 +211,46 @@ class QtViewerEmptyStateTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
-    def test_theme_button_switches_the_whole_shell_and_persists_the_choice(self) -> None:
+    def test_scale_mode_button_toggles_fit_and_actual_and_shows_zoom_hud(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = ViewerWindow(SettingsStore(Path(directory) / "settings.json"))
+            image = QImage(1200, 800, QImage.Format.Format_RGB32)
+            image.fill("#336699")
+            try:
+                window.image_view.set_image(image, fit=True)
+                self.application.processEvents()
+                self.assertTrue(window.image_view.is_fit_mode())
+                self.assertEqual(window.scale_mode_button.text(), "1:1")
+                self.assertEqual(window.scale_mode_button.icon_name, "")
+
+                window._toggle_fit_actual()
+                self.assertFalse(window.image_view.is_fit_mode())
+                self.assertEqual(window.scale_mode_button.text(), "")
+                self.assertEqual(window.scale_mode_button.icon_name, "fit")
+
+                window._toggle_fit_actual()
+                self.assertTrue(window.image_view.is_fit_mode())
+                self.assertEqual(window.scale_mode_button.text(), "1:1")
+
+                window.image_view.set_zoom_percent(137)
+                self.assertEqual(window.zoom_hud.text(), "137%")
+                self.assertFalse(window.zoom_hud.isHidden())
+                self.assertTrue(window._zoom_hud_timer.isActive())
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_theme_action_switches_the_whole_shell_and_persists_the_choice(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SettingsStore(Path(directory) / "settings.json")
             window = ViewerWindow(store)
             try:
                 self.assertEqual(window.config.theme, "dark")
-                self.assertEqual(window.theme_button.icon_name, "sun")
 
-                window.theme_button.click()
+                window.toggle_theme()
                 self.application.processEvents()
 
                 self.assertEqual(window.config.theme, "light")
-                self.assertEqual(window.theme_button.icon_name, "moon")
-                self.assertEqual(window.theme_button.toolTip(), "切换到黑暗模式")
                 self.assertIn("#e8ebef", window.root.styleSheet())
                 self.assertIn("#f7f8fa", window.title_bar.styleSheet())
                 self.assertIn("#ffffff", window.toolbar.styleSheet())
@@ -233,8 +263,7 @@ class QtViewerEmptyStateTests(unittest.TestCase):
             restored = ViewerWindow(store)
             try:
                 self.assertEqual(restored.config.theme, "light")
-                self.assertEqual(restored.theme_button.icon_name, "moon")
-                restored.theme_button.click()
+                restored.toggle_theme()
                 self.assertEqual(restored.config.theme, "dark")
                 self.assertIn("#050607", restored.root.styleSheet())
             finally:
@@ -286,6 +315,13 @@ class QtViewerEmptyStateTests(unittest.TestCase):
                 self.assertEqual(
                     [action.text() for action in menu.actions() if not action.isSeparator()],
                     [
+                        "打开…",
+                        "顺时针旋转 90°",
+                        "收藏当前图片",
+                        "窗口置顶",
+                        "切换到明亮模式",
+                        "看图设置…",
+                        "图片工具",
                         "复制图片",
                         "复制文件",
                         "复制文件路径",
@@ -296,6 +332,37 @@ class QtViewerEmptyStateTests(unittest.TestCase):
                         "在文件夹中显示",
                     ],
                 )
+                favorite_action = next(
+                    action for action in menu.actions() if action.text() == "收藏当前图片"
+                )
+                topmost_action = next(
+                    action for action in menu.actions() if action.text() == "窗口置顶"
+                )
+                image_tools_action = next(
+                    action for action in menu.actions() if action.text() == "图片工具"
+                )
+                image_tools_menu = image_tools_action.menu()
+                self.assertIsNotNone(image_tools_menu)
+                assert image_tools_menu is not None
+                self.assertEqual(
+                    [action.text() for action in image_tools_menu.actions()],
+                    [
+                        "处理图片  ·  裁剪、尺寸与格式",
+                        "制图",
+                    ],
+                )
+                self.assertTrue(favorite_action.isCheckable())
+                self.assertFalse(favorite_action.isChecked())
+                self.assertTrue(topmost_action.isCheckable())
+                self.assertFalse(topmost_action.isChecked())
+
+                favorite_action.trigger()
+                self.assertTrue(window.config.is_favorite(window.navigation.current))
+                self.assertTrue(favorite_action.isChecked())
+
+                topmost_action.trigger()
+                self.assertTrue(window.config.topmost)
+                self.assertTrue(topmost_action.isChecked())
                 transparency_action = next(
                     action for action in menu.actions() if action.text() == "透明区域背景"
                 )
@@ -534,22 +601,10 @@ class QtViewerEmptyStateTests(unittest.TestCase):
                         window.close()
                         self.application.processEvents()
 
-    def test_rotation_button_uses_the_compact_square_design_without_a_separator(self) -> None:
+    def test_context_only_actions_are_removed_from_the_compact_toolbar(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             window = ViewerWindow(SettingsStore(Path(directory) / "settings.json"))
             try:
-                button = window.rotate_button
-                self.assertEqual((button.width(), button.height()), (40, 36))
-                self.assertEqual((button.minimumWidth(), button.maximumWidth()), (40, 40))
-                self.assertEqual(button.icon_name, "rotate-cw")
-                self.assertEqual(button.text(), "")
-                self.assertEqual(button.toolTip(), "顺时针旋转 90°")
-                self.assertEqual(button.objectName(), "rotatePreviewButton")
-                self.assertIn("background: transparent", button.styleSheet())
-                self.assertIn("border: 0", button.styleSheet())
-                self.assertIn("border-radius: 10px", button.styleSheet())
-                self.assertNotIn("border-color", button.styleSheet())
-
                 layout = window.toolbar.button_layout
                 self.assertEqual(layout.spacing(), 2)
                 toolbar_buttons = [
@@ -557,17 +612,21 @@ class QtViewerEmptyStateTests(unittest.TestCase):
                     for index in range(layout.count())
                     if isinstance(layout.itemAt(index).widget(), ViewerIconButton)
                 ]
-                self.assertIs(toolbar_buttons[-1], window.settings_button)
-                self.assertEqual(window.settings_button.icon_name, "settings")
                 self.assertEqual(
-                    (window.settings_button.width(), window.settings_button.height()),
-                    (40, 36),
+                    [(button.icon_name, button.text()) for button in toolbar_buttons],
+                    [
+                        ("minus", ""),
+                        ("", "100%"),
+                        ("plus", ""),
+                        ("", "1:1"),
+                        ("edit", ""),
+                        ("", "工具"),
+                    ],
                 )
-                self.assertIn("background: transparent", window.settings_button.styleSheet())
                 compact_buttons = [
                     candidate
                     for candidate in toolbar_buttons
-                    if candidate is not window.zoom_button
+                    if candidate not in {window.zoom_button, window.image_tools_button}
                 ]
                 self.assertTrue(compact_buttons)
                 self.assertTrue(
@@ -579,12 +638,52 @@ class QtViewerEmptyStateTests(unittest.TestCase):
                 self.assertEqual(
                     (window.zoom_button.width(), window.zoom_button.height()), (52, 36)
                 )
-                rotate_index = layout.indexOf(button)
-                self.assertGreaterEqual(rotate_index, 0)
-                self.assertIs(layout.itemAt(rotate_index + 1).widget(), window.favorite_button)
+                self.assertEqual(
+                    (window.image_tools_button.width(), window.image_tools_button.height()),
+                    (52, 36),
+                )
+                self.assertFalse(
+                    {
+                        "rotate-cw",
+                        "favorite",
+                        "pin",
+                        "sun",
+                        "moon",
+                        "settings",
+                    }
+                    & {button.icon_name for button in toolbar_buttons}
+                )
+                self.assertNotIn("打开", {button.text() for button in toolbar_buttons})
             finally:
                 window.close()
                 self.application.processEvents()
+
+    def test_navigation_button_keeps_transparent_hit_area_and_uses_a_large_arrow(self) -> None:
+        button = NavigationButton(1)
+        button.resize(100, 200)
+        button.show()
+        try:
+            QTest.mouseMove(button, QPoint(50, 100))
+            self.application.processEvents()
+            rendered = QImage(100, 200, QImage.Format.Format_ARGB32)
+            rendered.fill(Qt.GlobalColor.transparent)
+            button.render(rendered)
+
+            self.assertEqual(rendered.pixelColor(15, 50).alpha(), 0)
+            painted = [
+                (x, y)
+                for y in range(rendered.height())
+                for x in range(rendered.width())
+                if rendered.pixelColor(x, y).alpha() > 0
+            ]
+            self.assertTrue(painted)
+            xs = [point[0] for point in painted]
+            ys = [point[1] for point in painted]
+            self.assertGreaterEqual(max(xs) - min(xs), 17)
+            self.assertGreaterEqual(max(ys) - min(ys), 36)
+        finally:
+            button.close()
+            self.application.processEvents()
 
     def test_visible_topmost_toggle_keeps_the_same_native_window(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -611,7 +710,6 @@ class QtViewerEmptyStateTests(unittest.TestCase):
                 raise_window.assert_not_called()
                 self.assertEqual(int(window.winId()), original_handle)
                 self.assertTrue(window.config.topmost)
-                self.assertTrue(window.pin_button._selected)
             finally:
                 window.close()
                 self.application.processEvents()
@@ -663,6 +761,24 @@ class QtViewerSettingsTests(unittest.TestCase):
         finally:
             dialog.close()
             self.application.processEvents()
+
+    def test_settings_combo_popup_uses_the_active_theme_palette(self) -> None:
+        set_viewer_theme("dark")
+        colors = viewer_theme_colors()
+        dialog = ViewerSettingsDialog(QtViewerConfig())
+        try:
+            view = dialog.toolbar_mode.view()
+            self.assertEqual(view.objectName(), "viewerComboPopup")
+            self.assertEqual(
+                view.palette().color(QPalette.ColorRole.Base).name(),
+                colors["surface_high"],
+            )
+            self.assertEqual(
+                view.palette().color(QPalette.ColorRole.Text).name(),
+                colors["text"],
+            )
+        finally:
+            dialog.close()
 
     def test_edge_glow_controls_preview_apply_and_persist_custom_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2305,6 +2421,41 @@ class QtViewerMarkupTests(unittest.TestCase):
                 self.assertLessEqual(window.markup_toolbar.width(), window.root.width() - 24)
                 self.assertGreaterEqual(window.markup_toolbar.x(), 12)
                 self.assertGreaterEqual(window.markup_toolbar.y(), window.title_bar.height())
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_edit_button_toggles_markup_mode_on_and_off(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "toggle-markup.png"
+            Image.new("RGB", (640, 400), "#334455").save(source)
+            window = ViewerWindow(SettingsStore(root / "settings.json"))
+            try:
+                window.resize(900, 650)
+                window.show()
+                window.open_path(source)
+                deadline = time.monotonic() + 5
+                while not window.image_view.has_image and time.monotonic() < deadline:
+                    self.application.processEvents()
+                    time.sleep(0.01)
+
+                self.assertFalse(window.markup_toolbar.isVisible())
+                self.assertFalse(window.edit_button._selected)
+                window.edit_button.click()
+                self.application.processEvents()
+
+                self.assertTrue(window.markup_toolbar.isVisible())
+                self.assertTrue(window.edit_button._selected)
+                self.assertEqual(window.edit_button.toolTip(), "退出标注模式")
+
+                window.edit_button.click()
+                self.application.processEvents()
+
+                self.assertFalse(window.markup_toolbar.isVisible())
+                self.assertFalse(window.edit_button._selected)
+                self.assertEqual(window.image_view.annotation_tool, "")
+                self.assertEqual(window.edit_button.toolTip(), "在副本上标注图片")
             finally:
                 window.close()
                 self.application.processEvents()

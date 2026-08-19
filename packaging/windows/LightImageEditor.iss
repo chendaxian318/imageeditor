@@ -110,6 +110,17 @@ Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; Va
 Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".psd"; ValueData: "{#ProgId}"
 Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".psdt"; ValueData: "{#ProgId}"
 Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".pdf"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".svg"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".ai"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".eps"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".emf"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".wmf"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".tga"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".dds"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".ico"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".exr"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".hdr"; ValueData: "{#ProgId}"
+Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".ktx2"; ValueData: "{#ProgId}"
 Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#RegistryName}"; ValueData: "Software\{#RegistryName}\Capabilities"; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExeName}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\image\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
@@ -121,6 +132,39 @@ Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.psd\shell\LightIma
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.psdt\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.psdt\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.psdt\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.svg\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.svg\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.svg\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.ai\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.ai\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.ai\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.eps\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.eps\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.eps\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.emf\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.emf\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.emf\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.wmf\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.wmf\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.wmf\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.tga\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.tga\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.tga\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.dds\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.dds\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.dds\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.ico\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.ico\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.ico\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.exr\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.exr\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.exr\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.hdr\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.hdr\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.hdr\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.ktx2\shell\LightImageEditor"; ValueType: string; ValueName: ""; ValueData: "用{#MyAppName}查看"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.ktx2\shell\LightImageEditor"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.ktx2\shell\LightImageEditor\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "启动{#MyAppName}"; Flags: nowait postinstall skipifsilent
@@ -433,7 +477,7 @@ end;
 
 function ExecutableCanBeReplaced(const ExecutablePath: String): Boolean;
 var
-  ProbePath: String;
+  Stream: TFileStream;
 begin
   Result := False;
   if not FileExists(ExecutablePath) then
@@ -441,14 +485,21 @@ begin
     Result := True;
     exit;
   end;
-  ProbePath := ExecutablePath + '.upgrade-probe';
-  DeleteFile(ProbePath);
-  if not RenameFile(ExecutablePath, ProbePath) then
-    exit;
-  if RenameFile(ProbePath, ExecutablePath) then
-    Result := True
-  else
-    RaiseException('升级占用检测后无法恢复主程序文件名，请检查安装目录权限。');
+  { Windows can rename a running executable even though replacing it later
+    fails with access denied.  An exclusive read/write handle is the reliable
+    non-destructive probe for whether setup can replace the file now. }
+  try
+    Stream := TFileStream.Create(ExecutablePath, fmOpenReadWrite or fmShareExclusive);
+    try
+      Result := True;
+    finally
+      Stream.Free;
+    end;
+  except
+  begin
+    Result := False;
+  end;
+  end;
 end;
 
 function RequestExecutableExit(const ExecutablePath: String): Integer;

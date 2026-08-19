@@ -11,7 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps, PngImagePlugin
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps, ImageSequence, PngImagePlugin
 
 if TYPE_CHECKING:
     from light_image_editor.commands import EditTimeline
@@ -32,12 +32,43 @@ SUPPORTED_INPUTS = {
     ".heif",
     ".psd",
     ".psdt",
+    ".svg",
+    ".ai",
+    ".eps",
+    ".emf",
+    ".wmf",
+    ".tga",
+    ".dds",
+    ".ico",
+    ".exr",
+    ".hdr",
+    ".ktx2",
 }
 
 DOCUMENT_INPUTS = {".pdf"}
 VIEWER_INPUTS = SUPPORTED_INPUTS | DOCUMENT_INPUTS
 
-SUPPORTED_FORMATS = ("JPEG", "PNG", "WEBP", "AVIF", "BMP", "TIFF", "GIF")
+SUPPORTED_FORMATS = (
+    "JPEG",
+    "PNG",
+    "WEBP",
+    "AVIF",
+    "BMP",
+    "TIFF",
+    "GIF",
+    "APNG",
+    "TGA",
+    "DDS",
+    "EXR",
+    "HDR",
+    "ICO",
+    "KTX2",
+    "SVG",
+    "AI",
+    "EPS",
+    "EMF",
+    "WMF",
+)
 _NATURAL_PARTS = re.compile(r"(\d+)")
 
 
@@ -73,6 +104,12 @@ class ExportOptions:
     watermark_opacity: int = 35
     watermark_size_percent: int = 5
     preserve_metadata: bool = True
+    animation_mode: str = "preserve"
+    tga_rle: bool = True
+    dds_pixel_format: str = "DXT5"
+    generate_mipmaps: bool = True
+    ico_sizes: tuple[int, ...] = (16, 24, 32, 48, 64, 128, 256)
+    ktx2_mode: str = "uastc"
 
 
 class ConflictPolicy(StrEnum):
@@ -107,6 +144,8 @@ def normalize_format(value: str) -> str:
     fmt = value.strip().upper()
     if fmt == "JPG":
         fmt = "JPEG"
+    if fmt == "RADIANCE":
+        fmt = "HDR"
     if fmt not in SUPPORTED_FORMATS:
         raise ValueError(f"不支持的输出格式: {value}")
     return fmt
@@ -114,11 +153,10 @@ def normalize_format(value: str) -> str:
 
 def extension_for_format(output_format: str) -> str:
     fmt = normalize_format(output_format)
-    if fmt == "JPEG":
-        return ".jpg"
-    if fmt == "TIFF":
-        return ".tif"
-    return "." + fmt.lower()
+    return {
+        "JPEG": ".jpg",
+        "TIFF": ".tif",
+    }.get(fmt, "." + fmt.lower())
 
 
 def natural_sort_key(path: str | Path) -> tuple[tuple[int, int | str], ...]:
@@ -292,6 +330,22 @@ def encode_image(
     options: ExportOptions,
     extra_kwargs: dict[str, object] | None = None,
 ) -> bytes:
+    from light_image_editor.advanced_formats import (
+        ADVANCED_OUTPUT_FORMATS,
+        encode_advanced_image,
+    )
+
+    if output_format in ADVANCED_OUTPUT_FORMATS:
+        return encode_advanced_image(
+            image,
+            output_format,
+            quality=options.quality,
+            tga_rle=options.tga_rle,
+            dds_pixel_format=options.dds_pixel_format,
+            generate_mipmaps=options.generate_mipmaps,
+            ico_sizes=options.ico_sizes,
+            ktx2_mode=options.ktx2_mode,
+        )
     kwargs = save_kwargs_for(
         output_format,
         options.quality,
@@ -311,7 +365,8 @@ def encode_image(
             extra_kwargs=extra_kwargs,
         )
     buffer = BytesIO()
-    image.save(buffer, output_format, **kwargs)
+    pillow_format = "PNG" if output_format == "APNG" else output_format
+    image.save(buffer, pillow_format, **kwargs)
     return buffer.getvalue()
 
 
@@ -369,7 +424,7 @@ def save_kwargs_for(
     if output_format == "WEBP":
         kwargs["lossless"] = bool(webp_lossless)
         kwargs["method"] = 6
-    if output_format == "PNG":
+    if output_format in {"PNG", "APNG"}:
         kwargs["optimize"] = True
         kwargs["compress_level"] = 9
     if output_format == "TIFF":
@@ -382,14 +437,22 @@ def convert_for_format(
     output_format: str,
     options: ExportOptions | None = None,
 ) -> Image.Image:
-    if output_format == "JPEG" and image.mode in {"RGBA", "LA", "P"}:
+    if output_format in {"JPEG", "BMP", "HDR", "AI", "EPS", "EMF", "WMF"} and image.mode in {
+        "RGBA",
+        "LA",
+        "P",
+    }:
         rgba = image.convert("RGBA") if image.mode == "P" else image
         background = Image.new("RGB", rgba.size, "white")
         background.paste(rgba, mask=rgba.getchannel("A") if "A" in rgba.getbands() else None)
         return background
     if output_format in {"BMP", "TIFF"} and image.mode == "P":
         return image.convert("RGB")
-    if output_format == "PNG" and options is not None and options.png_palette_colors is not None:
+    if (
+        output_format in {"PNG", "APNG"}
+        and options is not None
+        and options.png_palette_colors is not None
+    ):
         colors = int(options.png_palette_colors)
         if not 2 <= colors <= 256:
             raise ValueError("PNG 调色板颜色数必须位于 2 到 256 之间")
@@ -467,15 +530,38 @@ def save_image(
         )
         return target_path
 
-    if metadata is not None and metadata.is_animated and not allow_animation_flatten:
+    preserves_animation = (
+        metadata is not None
+        and metadata.is_animated
+        and output_format in {"GIF", "APNG"}
+        and options.animation_mode == "preserve"
+        and source_path is not None
+        and timeline is None
+    )
+    if (
+        metadata is not None
+        and metadata.is_animated
+        and not preserves_animation
+        and not allow_animation_flatten
+    ):
         raise AnimationFlatteningRequired("动画图片将被导出为单帧，需要明确确认。")
     if (
         metadata is not None
         and metadata.has_alpha
-        and output_format in {"JPEG", "BMP"}
+        and output_format in {"JPEG", "BMP", "HDR", "AI", "EPS", "EMF", "WMF"}
         and not allow_transparency_flatten
     ):
         raise TransparencyFlatteningRequired("目标格式不支持透明通道，需要明确确认使用白色背景。")
+
+    if preserves_animation:
+        encoded = _encode_animation_source(Path(source_path), output_format, options)
+        _atomic_replace_bytes(
+            target_path,
+            encoded,
+            backup_on_overwrite=backup_on_overwrite,
+            before_replace=before_replace,
+        )
+        return target_path
 
     if timeline is not None:
         from light_image_editor.renderer import render_image
@@ -502,6 +588,60 @@ def save_image(
         before_replace=before_replace,
     )
     return target_path
+
+
+def _encode_animation_source(
+    source_path: Path,
+    output_format: str,
+    options: ExportOptions,
+) -> bytes:
+    frames: list[Image.Image] = []
+    durations: list[int] = []
+    loop = 0
+    with Image.open(source_path) as animated:
+        loop = int(animated.info.get("loop", 0))
+        for frame in ImageSequence.Iterator(animated):
+            rgba = frame.convert("RGBA")
+            try:
+                prepared = prepare_image(rgba, options)
+                frames.append(prepared.convert("RGBA"))
+                prepared.close()
+            finally:
+                rgba.close()
+            duration = frame.info.get("duration", animated.info.get("duration", 100))
+            durations.append(max(1, int(duration)))
+    if not frames:
+        raise ValueError("动画文件中没有可导出的帧")
+    buffer = BytesIO()
+    first, remaining = frames[0], frames[1:]
+    try:
+        if output_format == "GIF":
+            first.save(
+                buffer,
+                "GIF",
+                save_all=True,
+                append_images=remaining,
+                duration=durations,
+                loop=loop,
+                disposal=2,
+                optimize=True,
+            )
+        else:
+            first.save(
+                buffer,
+                "PNG",
+                save_all=True,
+                append_images=remaining,
+                duration=durations,
+                loop=loop,
+                disposal=0,
+                blend=0,
+                optimize=True,
+            )
+        return buffer.getvalue()
+    finally:
+        for frame in frames:
+            frame.close()
 
 
 def metadata_save_kwargs(output_format: str, metadata: SourceMetadata | None) -> dict[str, object]:

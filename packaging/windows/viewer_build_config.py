@@ -3,7 +3,7 @@
 VIEWER_ENTRYPOINT = "csimage_viewer.py"
 
 # These modules remain in the repository for later development, but the current
-# product exposes only the Qt viewer and its quick-markup workflow.
+# product exposes only the Qt viewer, quick-markup and lightweight image tools.
 HIDDEN_DEVELOPMENT_MODULES = (
     "light_image_editor.accessibility",
     "light_image_editor.annotations",
@@ -27,7 +27,7 @@ HIDDEN_DEVELOPMENT_MODULES = (
     "light_image_editor.ui",
 )
 
-# The viewer uses only QtCore, QtGui and QtWidgets. PySide's package metadata
+# The viewer uses QtCore, QtGui, QtWidgets and QtSvg. PySide's package metadata
 # advertises every installed binding, so PyInstaller otherwise collects large
 # QML, Quick, WebEngine, PDF, multimedia and developer-only libraries.
 UNUSED_QT_MODULES = (
@@ -75,7 +75,6 @@ UNUSED_QT_MODULES = (
     "PySide6.QtSpatialAudio",
     "PySide6.QtSql",
     "PySide6.QtStateMachine",
-    "PySide6.QtSvg",
     "PySide6.QtSvgWidgets",
     "PySide6.QtTest",
     "PySide6.QtTextToSpeech",
@@ -110,7 +109,6 @@ EXCLUDED_BUNDLE_PATHS = frozenset(
         "pyside6/qt6qmlmodels.dll",
         "pyside6/qt6qmlworkerscript.dll",
         "pyside6/qt6quick.dll",
-        "pyside6/qt6svg.dll",
         "pyside6/qt6virtualkeyboard.dll",
         "pyside6/plugins/generic/qtuiotouchplugin.dll",
         "pyside6/plugins/iconengines/qsvgicon.dll",

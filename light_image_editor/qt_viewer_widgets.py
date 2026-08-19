@@ -46,6 +46,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPainterPathStroker,
     QPaintEvent,
+    QPalette,
     QPen,
     QPixmap,
     QPolygonF,
@@ -172,6 +173,43 @@ def set_viewer_theme(theme: str) -> str:
 
 def viewer_theme_colors() -> dict[str, str]:
     return dict(THEME_PALETTES[_ACTIVE_THEME])
+
+
+def _style_viewer_combo_popup(combo: QComboBox) -> None:
+    """Apply the active viewer palette to a combo's separate popup window."""
+
+    colors = viewer_theme_colors()
+    view = combo.view()
+    view.setObjectName("viewerComboPopup")
+    view.setAlternatingRowColors(False)
+    view.setStyleSheet(
+        f"""
+        QAbstractItemView {{
+            color: {colors["text"]}; background-color: {colors["surface_high"]};
+            border: 1px solid {colors["border"]}; outline: 0; padding: 4px;
+            selection-color: {colors["text"]};
+            selection-background-color: {colors["selected"]};
+        }}
+        QAbstractItemView::item {{
+            color: {colors["text"]}; background-color: {colors["surface_high"]};
+            min-height: 30px; padding: 0 8px; border-radius: 6px;
+        }}
+        QAbstractItemView::item:hover, QAbstractItemView::item:selected {{
+            color: {colors["text"]}; background-color: {colors["selected"]};
+        }}
+        """
+    )
+    palette = view.palette()
+    palette.setColor(QPalette.ColorRole.Base, QColor(colors["surface_high"]))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(colors["surface_high"]))
+    palette.setColor(QPalette.ColorRole.Window, QColor(colors["surface_high"]))
+    palette.setColor(QPalette.ColorRole.Text, QColor(colors["text"]))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(colors["text"]))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(colors["selected"]))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(colors["text"]))
+    view.setPalette(palette)
+    view.viewport().setAutoFillBackground(True)
+    view.viewport().setPalette(palette)
 
 
 set_viewer_theme("dark")
@@ -2671,6 +2709,9 @@ class ImageView(QGraphicsView):
     def zoom_percent(self) -> int:
         return max(1, min(800, round(self.transform().m11() * 100)))
 
+    def is_fit_mode(self) -> bool:
+        return self._fit_mode
+
     def set_zoom_percent(self, percent: int) -> None:
         if self._pixmap_item is None and not self._document_page_rects:
             return
@@ -3674,17 +3715,16 @@ class NavigationButton(QPushButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         hovered = self.underMouse() and self.isEnabled()
-        if hovered:
-            painter.setBrush(QColor(HOVER))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(self.rect().adjusted(10, 18, -10, -18), 24, 24)
-        pen = QPen(QColor(TEXT if hovered else ACCENT), 3.2)
+        pen = QPen(QColor(TEXT if hovered else ACCENT), 4.4)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
         cx, cy = self.rect().center().x(), self.rect().center().y()
-        offset = 8 if self.direction > 0 else -8
-        painter.drawLine(cx - offset // 2, cy - 12, cx + offset // 2, cy)
-        painter.drawLine(cx + offset // 2, cy, cx - offset // 2, cy + 12)
+        half_width = 7 if self.direction > 0 else -7
+        path = QPainterPath(QPointF(cx - half_width, cy - 17))
+        path.lineTo(QPointF(cx + half_width, cy))
+        path.lineTo(QPointF(cx - half_width, cy + 17))
+        painter.drawPath(path)
         painter.end()
 
     def enterEvent(self, event: QEnterEvent) -> None:
@@ -4366,6 +4406,7 @@ class ViewerSettingsDialog(QDialog):
         self.toolbar_mode = QComboBox(self)
         self.toolbar_mode.addItem("固定显示", "fixed")
         self.toolbar_mode.addItem("自动隐藏", "auto")
+        _style_viewer_combo_popup(self.toolbar_mode)
         self.toolbar_mode.setCurrentIndex(0 if config.toolbar_mode == "fixed" else 1)
         self.toolbar_visible = ViewerCheckBox("启用顶部工具栏", self)
         self.toolbar_visible.setChecked(config.toolbar_visible)

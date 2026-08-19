@@ -19,22 +19,31 @@ REQUIRED_MODULES = (
     "light_image_editor.commands",
     "light_image_editor.identity",
     "light_image_editor.image_loader",
+    "light_image_editor.local_ai_tools",
     "light_image_editor.pdf_support",
     "light_image_editor.psd_support",
+    "light_image_editor.qt_image_tools",
     "light_image_editor.qt_viewer",
+    "light_image_editor.vector_support",
     "PIL",
     "psd_tools",
     "pypdfium2",
+    "onnxruntime",
 )
 REQUIRED_FILES = (
     "CSImage.exe",
     "_internal/PySide6/Qt6Core.dll",
     "_internal/PySide6/Qt6Gui.dll",
+    "_internal/PySide6/Qt6Svg.dll",
+    "_internal/PySide6/QtSvg.pyd",
     "_internal/PySide6/Qt6Widgets.dll",
     "_internal/pypdfium2_raw/pdfium.dll",
+    "_internal/onnxruntime/capi/onnxruntime.dll",
 )
-MAX_BUNDLE_BYTES = 145 * 1024 * 1024
-MAX_BUNDLE_FILES = 400
+# ONNX Runtime adds the inference engine, while the 214 MB BiRefNet model and
+# Upscayl runtime remain first-use downloads outside the application bundle.
+MAX_BUNDLE_BYTES = 190 * 1024 * 1024
+MAX_BUNDLE_FILES = 450
 
 
 def _module_names(pyz_toc: Path) -> set[str]:
