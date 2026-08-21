@@ -331,6 +331,7 @@ class ViewerIconButton(QPushButton):
         super().__init__(text, parent)
         self.icon_name = icon_name
         self._selected = False
+        self.setProperty("selected", False)
         self.setToolTip(tooltip)
         self.setAccessibleName(tooltip)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -345,9 +346,11 @@ class ViewerIconButton(QPushButton):
                 color: {TEXT}; background: transparent; border: 0;
                 border-radius: 10px; padding: 0;
                 font: 500 14px 'Microsoft YaHei UI';
+                text-align: center;
             }}
             QPushButton:hover {{ background: {HOVER}; }}
             QPushButton:pressed {{ background: {PRESSED}; }}
+            QPushButton[selected="true"] {{ background: {SELECTED}; }}
             QPushButton:disabled {{ color: {DISABLED}; }}
             """
         )
@@ -355,6 +358,9 @@ class ViewerIconButton(QPushButton):
 
     def set_selected(self, selected: bool) -> None:
         self._selected = bool(selected)
+        self.setProperty("selected", self._selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
         self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:

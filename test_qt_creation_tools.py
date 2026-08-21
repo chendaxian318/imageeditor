@@ -161,11 +161,16 @@ class QtCreationToolsTests(unittest.TestCase):
                 panel.api_toggle.setChecked(True)
                 self.application.processEvents()
                 self.assertFalse(panel.api_card.isHidden())
+                self.assertFalse(panel.default_config_card.isHidden())
+                self.assertEqual(panel.default_config_status.text(), "仅本次使用")
                 QApplication.clipboard().setText("sk-test-key")
                 panel._paste_api_key()
                 self.assertEqual(panel.api_key_edit.text(), "sk-test-key")
                 self.assertIn("已填写", panel.api_status_badge.text())
                 self.assertIn("不会保存", panel.key_status.text())
+                panel.remember_key.setChecked(True)
+                self.assertEqual(panel.default_config_status.text(), "✓ 已设为默认")
+                self.assertTrue(panel.default_config_card.property("active"))
             finally:
                 panel.close()
 
@@ -213,12 +218,46 @@ class QtCreationToolsTests(unittest.TestCase):
                 self.assertIn("公司默认", panel.model_summary.text())
                 self.assertIn("可直接使用", panel.api_status_badge.text())
                 self.assertTrue(panel.api_key_edit.isHidden())
+                self.assertTrue(panel.default_config_card.isHidden())
                 self.assertFalse(panel.quality_combo.isEnabled())
                 panel.replacement_text.setText("新标题")
                 self.assertEqual(panel.request().api_key, "company-secret")
                 self.assertEqual(panel.request().model, "gpt-image-2-all")
             finally:
                 panel.close()
+
+    def test_viewer_keeps_apilio_endpoint_and_model_without_bundled_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            source.write_bytes(_png_bytes())
+            window = ViewerWindow(SettingsStore(root / "settings.json"))
+            try:
+                window.open_path(source)
+                deadline = time.monotonic() + 5
+                while window.current_image is None and time.monotonic() < deadline:
+                    self.application.processEvents()
+                    time.sleep(0.01)
+                with patch(
+                    "light_image_editor.secure_image_api_key.SecureImageApiKeyStore.read",
+                    return_value=None,
+                ):
+                    window.open_creation_panel()
+                panel = window._creation_panel
+                self.assertIsInstance(panel, ImageTextCreationPanel)
+                assert isinstance(panel, ImageTextCreationPanel)
+                self.assertEqual(panel.provider_combo.currentData(), "custom")
+                self.assertEqual(
+                    panel.endpoint_edit.text(),
+                    "https://api.apilio.ai/v1/images/edits",
+                )
+                self.assertEqual(panel.model_edit.text(), "gpt-image-2-all")
+                self.assertEqual(panel.api_key_edit.text(), "")
+                self.assertIn("Apilio", panel.api_service_detail.text())
+                self.assertEqual(panel.api_status_badge.text(), "需要密钥")
+            finally:
+                window.close()
+                self.application.processEvents()
 
     def test_viewer_runs_model_result_preview_and_saves_a_new_png(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -359,6 +398,130 @@ class QtCreationToolsTests(unittest.TestCase):
                 self.assertTrue(window._creation_preview_active)
                 panel.original_button.click()
                 self.assertFalse(window._creation_preview_active)
+
+                with patch.object(QFileDialog, "getSaveFileName", return_value=(str(target), "")):
+                    panel.save_button.click()
+                deadline = time.monotonic() + 5
+                while window.navigation.current != target.resolve() and time.monotonic() < deadline:
+                    self.application.processEvents()
+                    time.sleep(0.01)
+                self.assertTrue(target.is_file())
+                self.assertEqual(window.navigation.current, target.resolve())
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_continuous_creation_chain_reuses_each_accepted_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            target = root / "source_制图结果.png"
+            source.write_bytes(_png_bytes("#112233"))
+            window = ViewerWindow(SettingsStore(root / "settings.json"))
+            try:
+                window.open_path(source)
+                deadline = time.monotonic() + 5
+                while window.current_image is None and time.monotonic() < deadline:
+                    self.application.processEvents()
+                    time.sleep(0.01)
+                with (
+                    patch(
+                        "light_image_editor.secure_image_api_key.SecureImageApiKeyStore.read",
+                        return_value=None,
+                    ),
+                    patch(
+                        "light_image_editor.internal_default_image_api.IMAGE_API_KEY",
+                        "",
+                    ),
+                ):
+                    window.open_creation_panel()
+                panel = window._creation_panel
+                self.assertIsInstance(panel, ImageTextCreationPanel)
+                assert isinstance(panel, ImageTextCreationPanel)
+                panel.endpoint_edit.setText("http://127.0.0.1:9000/v1/images/edits")
+                panel.model_edit.setText("local-image-model")
+                panel.replacement_text.setText("新标题")
+
+                with patch(
+                    "light_image_editor.image_model_api.edit_image_text",
+                    return_value=ImageTextEditApiResult(_png_bytes("#334455"), "prompt"),
+                ):
+                    panel._submit()
+                    deadline = time.monotonic() + 5
+                    while window._creation_result is None and time.monotonic() < deadline:
+                        self.application.processEvents()
+                        time.sleep(0.01)
+                panel.continue_button.click()
+                self.assertEqual(window._creation_step_labels, ["文字改写"])
+
+                worker_inputs: list[tuple[str, tuple[int, int, int, int]]] = []
+
+                def run_worker(
+                    operation: str,
+                    input_path: Path,
+                    output_path: Path,
+                    **kwargs: object,
+                ) -> dict[str, object]:
+                    with Image.open(input_path) as incoming:
+                        pixel = incoming.convert("RGBA").getpixel((0, 0))
+                    worker_inputs.append((operation, pixel))
+                    color = "#556677" if operation == "remove-background" else "#778899"
+                    Image.new("RGBA", (96, 64), color).save(output_path, "PNG")
+                    return {
+                        "model": "test-local-model",
+                        "resolution": kwargs.get("resolution", ""),
+                    }
+
+                with (
+                    patch(
+                        "light_image_editor.local_ai_tools.birefnet_status",
+                        return_value=SimpleNamespace(available=True),
+                    ),
+                    patch(
+                        "light_image_editor.local_ai_tools.upscayl_status",
+                        return_value=SimpleNamespace(available=True),
+                    ),
+                    patch(
+                        "light_image_editor.local_ai_tools.run_worker_process",
+                        side_effect=run_worker,
+                    ),
+                    patch.object(
+                        window._conversion_executor,
+                        "submit",
+                        side_effect=lambda function, *args: function(*args),
+                    ),
+                ):
+                    panel.remove_background_button.click()
+                    self.application.processEvents()
+                    panel.continue_button.click()
+                    panel.upscale_resolution_buttons["4K"].click()
+                    panel.upscale_button.click()
+                    self.application.processEvents()
+                    panel.continue_button.click()
+
+                self.assertEqual(
+                    worker_inputs,
+                    [
+                        ("remove-background", (51, 68, 85, 255)),
+                        ("upscale", (85, 102, 119, 255)),
+                    ],
+                )
+                self.assertEqual(
+                    window._creation_step_labels,
+                    ["文字改写", "智能去背景", "高清优化 4K"],
+                )
+                self.assertEqual(
+                    window._creation_working_image.convert("RGBA").getpixel((0, 0)),
+                    (119, 136, 153, 255),
+                )
+                self.assertTrue(panel.undo_step_button.isEnabled())
+
+                panel.undo_step_button.click()
+                self.assertEqual(window._creation_step_labels, ["文字改写", "智能去背景"])
+                self.assertEqual(
+                    window._creation_working_image.convert("RGBA").getpixel((0, 0)),
+                    (85, 102, 119, 255),
+                )
 
                 with patch.object(QFileDialog, "getSaveFileName", return_value=(str(target), "")):
                     panel.save_button.click()

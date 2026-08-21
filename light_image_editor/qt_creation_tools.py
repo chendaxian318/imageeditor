@@ -7,7 +7,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QCloseEvent,
     QDesktopServices,
@@ -65,6 +65,9 @@ class ImageTextCreationPanel(QFrame):
     generateRequested = Signal(object)
     previewRequested = Signal(bool)
     saveRequested = Signal()
+    continueRequested = Signal()
+    discardRequested = Signal()
+    undoStepRequested = Signal()
     settingsChanged = Signal(str, str)
     connectionChecked = Signal(bool, str)
     credentialSaveRequested = Signal(str)
@@ -94,6 +97,7 @@ class ImageTextCreationPanel(QFrame):
         self.source_path = source_path.resolve()
         self.source_size = source_size
         self._busy = False
+        self._candidate_pending = False
         self._local_tool_buttons: list[QPushButton] = []
         self._result_bytes: bytes | None = None
         self._company_default = bool(company_default)
@@ -101,6 +105,7 @@ class ImageTextCreationPanel(QFrame):
         self._company_model = model.strip()
         self._company_key = api_key.strip() if company_default else ""
         self._company_display_name = provider_display_name.strip() or "公司默认 AI"
+        self._custom_display_name = provider_display_name.strip() or "自定义兼容接口"
         self._connection_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="csimage-api-check",
@@ -131,6 +136,7 @@ class ImageTextCreationPanel(QFrame):
         outer.addLayout(header)
 
         scroll = QScrollArea(self)
+        self.scroll_area = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -149,7 +155,7 @@ class ImageTextCreationPanel(QFrame):
         source_name = QLabel(self.source_path.name, source_card)
         source_name.setStyleSheet("font-weight: 600;")
         source_detail = QLabel(
-            f"{self.source_size[0]} × {self.source_size[1]} · 原图只读，结果需要另存为",
+            f"{self.source_size[0]} × {self.source_size[1]} · 原图只读，支持连续处理",
             source_card,
         )
         source_detail.setObjectName("mutedLabel")
@@ -157,11 +163,34 @@ class ImageTextCreationPanel(QFrame):
         source_layout.addWidget(source_detail)
         content_layout.addWidget(source_card)
 
+        self.workflow_card = QFrame(content)
+        self.workflow_card.setObjectName("workflowCard")
+        workflow_layout = QHBoxLayout(self.workflow_card)
+        workflow_layout.setContentsMargins(12, 10, 10, 10)
+        workflow_layout.setSpacing(9)
+        workflow_text = QVBoxLayout()
+        workflow_text.setSpacing(2)
+        workflow_title = QLabel("连续处理", self.workflow_card)
+        workflow_title.setStyleSheet("font-weight: 700;")
+        self.workflow_detail = QLabel(
+            "当前工作图：原图 · 每一步采用后都可继续处理",
+            self.workflow_card,
+        )
+        self.workflow_detail.setObjectName("mutedLabel")
+        self.workflow_detail.setWordWrap(True)
+        workflow_text.addWidget(workflow_title)
+        workflow_text.addWidget(self.workflow_detail)
+        workflow_layout.addLayout(workflow_text, 1)
+        self.undo_step_button = QPushButton("撤回上一步", self.workflow_card)
+        self.undo_step_button.setEnabled(False)
+        workflow_layout.addWidget(self.undo_step_button)
+        content_layout.addWidget(self.workflow_card)
+
         local_section = QLabel("本地智能制图", content)
         local_section.setStyleSheet("font-weight: 600;")
         content_layout.addWidget(local_section)
         local_hint = QLabel(
-            "图片不会上传；引擎仅在执行时加载，结果会以 PNG 另存到原图所在文件夹。",
+            "图片不会上传；每一步先生成候选，采用后可继续处理，最后统一另存为 PNG。",
             content,
         )
         local_hint.setObjectName("mutedLabel")
@@ -336,7 +365,12 @@ class ImageTextCreationPanel(QFrame):
                 f"公司默认 · {self._company_display_name}", self._COMPANY_PROVIDER
             )
         self.provider_combo.addItem("OpenAI 官方（推荐）", self._OPENAI_PROVIDER)
-        self.provider_combo.addItem("自定义兼容接口", self._CUSTOM_PROVIDER)
+        custom_provider_label = (
+            f"{self._custom_display_name}（填写 API 密钥）"
+            if provider_display_name.strip()
+            else "自定义兼容接口"
+        )
+        self.provider_combo.addItem(custom_provider_label, self._CUSTOM_PROVIDER)
         _style_combo_popup(self.provider_combo, colors)
         api_layout.addWidget(self.provider_combo)
         self.model_summary = QLabel("", self.api_card)
@@ -380,14 +414,36 @@ class ImageTextCreationPanel(QFrame):
         key_help_row.addWidget(self.key_help_button)
         api_layout.addLayout(key_help_row)
 
+        self.default_config_card = QFrame(self.api_card)
+        self.default_config_card.setObjectName("defaultConfigCard")
+        default_config_layout = QVBoxLayout(self.default_config_card)
+        default_config_layout.setContentsMargins(12, 10, 12, 10)
+        default_config_layout.setSpacing(5)
         credential_row = QHBoxLayout()
-        self.remember_key = QCheckBox("设为默认配置（Windows 加密保存）", self.api_card)
+        self.remember_key = QCheckBox("设为默认配置", self.default_config_card)
+        self.remember_key.setObjectName("defaultConfigSwitch")
+        self.remember_key.setCursor(Qt.CursorShape.PointingHandCursor)
         self.remember_key.setChecked(credential_saved)
-        self.clear_key_button = QPushButton("清除密钥", self.api_card)
+        self.default_config_status = QLabel("", self.default_config_card)
+        self.default_config_status.setObjectName("defaultConfigStatus")
+        self.clear_key_button = QPushButton("清除已保存密钥", self.default_config_card)
         self.clear_key_button.setObjectName("linkButton")
         credential_row.addWidget(self.remember_key, 1)
-        credential_row.addWidget(self.clear_key_button)
-        api_layout.addLayout(credential_row)
+        credential_row.addWidget(self.default_config_status)
+        default_config_layout.addLayout(credential_row)
+        default_config_hint = QLabel(
+            "开启后使用 Windows 加密保存密钥，下次打开可直接使用。",
+            self.default_config_card,
+        )
+        default_config_hint.setObjectName("mutedLabel")
+        default_config_hint.setWordWrap(True)
+        default_config_layout.addWidget(default_config_hint)
+        default_config_layout.addWidget(
+            self.clear_key_button,
+            0,
+            Qt.AlignmentFlag.AlignRight,
+        )
+        api_layout.addWidget(self.default_config_card)
 
         self.quality_title = QLabel("3  选择生成质量", self.api_card)
         self.quality_title.setStyleSheet("font-weight: 600; margin-top: 4px;")
@@ -438,16 +494,22 @@ class ImageTextCreationPanel(QFrame):
             f"background: {colors['canvas']}; border: 1px solid {colors['border']}; "
             "border-radius: 9px;"
         )
-        result_actions = QHBoxLayout()
+        preview_actions = QHBoxLayout()
         self.original_button = QPushButton("查看原图", self.result_card)
         self.result_button = QPushButton("查看结果", self.result_card)
-        self.result_button.setObjectName("primaryButton")
-        self.save_button = QPushButton("另存为…", self.result_card)
-        result_actions.addWidget(self.original_button)
-        result_actions.addWidget(self.result_button)
+        preview_actions.addWidget(self.original_button)
+        preview_actions.addWidget(self.result_button)
+        result_actions = QHBoxLayout()
+        self.discard_button = QPushButton("放弃本步", self.result_card)
+        self.continue_button = QPushButton("采用并继续", self.result_card)
+        self.continue_button.setObjectName("primaryButton")
+        self.save_button = QPushButton("保存最终结果…", self.result_card)
+        result_actions.addWidget(self.discard_button)
+        result_actions.addWidget(self.continue_button)
         result_actions.addWidget(self.save_button)
         result_layout.addWidget(self.result_title)
         result_layout.addWidget(self.result_preview)
+        result_layout.addLayout(preview_actions)
         result_layout.addLayout(result_actions)
         self.result_card.setVisible(False)
         content_layout.addWidget(self.result_card)
@@ -489,6 +551,9 @@ class ImageTextCreationPanel(QFrame):
         self.original_button.clicked.connect(lambda: self.previewRequested.emit(False))
         self.result_button.clicked.connect(lambda: self.previewRequested.emit(True))
         self.save_button.clicked.connect(self.saveRequested)
+        self.continue_button.clicked.connect(self.continueRequested)
+        self.discard_button.clicked.connect(self.discardRequested)
+        self.undo_step_button.clicked.connect(self.undoStepRequested)
 
         self._custom_endpoint = ""
         self._custom_model = ""
@@ -567,6 +632,7 @@ class ImageTextCreationPanel(QFrame):
             self.clear_key_button,
         ):
             widget.setVisible(not company)
+        self.default_config_card.setVisible(not company)
         self.verify_key_button.setText("验证默认服务" if company else "验证密钥")
         self.quality_title.setText(
             "3  生成质量（由模型自动决定）" if company else "3  选择生成质量"
@@ -598,7 +664,7 @@ class ImageTextCreationPanel(QFrame):
         if self.provider_combo.currentData() == self._OPENAI_PROVIDER:
             QDesktopServices.openUrl(QUrl("https://platform.openai.com/api-keys"))
             return
-        self.status_label.setText("请向自定义 AI 服务的提供方获取 API 密钥。")
+        self.status_label.setText(f"请向 {self._custom_display_name} 获取 API 密钥。")
 
     def _clear_api_key(self) -> None:
         self.api_key_edit.clear()
@@ -616,12 +682,33 @@ class ImageTextCreationPanel(QFrame):
             self.credentialDeleteRequested.emit()
         self._update_api_status()
 
+    def _update_default_config_state(self) -> None:
+        if not hasattr(self, "default_config_card"):
+            return
+        checked = self.remember_key.isChecked()
+        has_key = bool(self.api_key_edit.text().strip())
+        active = checked and has_key
+        self.default_config_card.setProperty("active", checked)
+        self.default_config_status.setProperty("active", active)
+        if active:
+            status = "✓ 已设为默认"
+        elif checked:
+            status = "等待填写密钥"
+        else:
+            status = "仅本次使用"
+        self.default_config_status.setText(status)
+        for widget in (self.default_config_card, self.default_config_status):
+            style = widget.style()
+            style.unpolish(widget)
+            style.polish(widget)
+            widget.update()
+
     def _update_model_summary(self) -> None:
         provider_data = self.provider_combo.currentData()
         provider = (
             self._company_display_name
             if provider_data == self._COMPANY_PROVIDER
-            else "自定义兼容服务"
+            else self._custom_display_name
             if provider_data == self._CUSTOM_PROVIDER
             else "OpenAI 官方"
         )
@@ -704,13 +791,18 @@ class ImageTextCreationPanel(QFrame):
             status = "需要密钥"
             self.key_status.setText("请先粘贴密钥 · 不会保存")
         provider = (
-            self._company_display_name if company else "自定义接口" if custom else "OpenAI 官方"
+            self._company_display_name
+            if company
+            else self._custom_display_name
+            if custom
+            else "OpenAI 官方"
         )
         model = self.model_edit.text().strip()
         display_model = _display_model_name(model)
         if company:
             provider = provider.split("·", maxsplit=1)[0].strip()
         self.api_service_detail.setText(f"{provider}  ·  {display_model}")
+        self._update_default_config_state()
         self.api_status_badge.setText(status)
         self.api_status_badge.setProperty("ready", bool(key or (custom and local)))
         self.api_status_badge.style().unpolish(self.api_status_badge)
@@ -784,11 +876,25 @@ class ImageTextCreationPanel(QFrame):
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
-        self.generate_button.setEnabled(not busy)
+        can_start = not busy and not self._candidate_pending
+        self.generate_button.setEnabled(can_start)
         self.cancel_button.setEnabled(not busy)
         self.api_toggle.setEnabled(not busy)
         for button in self._local_tool_buttons:
+            button.setEnabled(can_start)
+        for button in (
+            self.original_button,
+            self.result_button,
+            self.save_button,
+            self.continue_button,
+            self.discard_button,
+        ):
             button.setEnabled(not busy)
+        self.undo_step_button.setEnabled(
+            not busy
+            and not self._candidate_pending
+            and bool(self.undo_step_button.property("hasHistory"))
+        )
         self.progress.setVisible(busy)
         self.cancel_button.setText("模型处理中" if busy else "关闭")
         if busy:
@@ -811,11 +917,67 @@ class ImageTextCreationPanel(QFrame):
         conversation_message: str = "已生成一版文字改写结果，可以查看原图或结果。",
     ) -> None:
         self.set_busy(False)
+        self._candidate_pending = True
+        if not self._set_result_preview(png_bytes):
+            self._candidate_pending = False
+            self.set_error("模型结果无法预览。")
+            return
+        self.result_title.setText(title)
+        self.result_button.setText("查看候选")
+        self.discard_button.setVisible(True)
+        self.continue_button.setVisible(True)
+        self.result_card.setVisible(True)
+        self.status_label.setText(status)
+        self._append_message("CSImage", conversation_message)
+        self.set_busy(False)
+        QTimer.singleShot(
+            0,
+            lambda: self.scroll_area.ensureWidgetVisible(self.result_card, 0, 12),
+        )
+
+    def set_working_state(
+        self,
+        png_bytes: bytes | None,
+        step_labels: tuple[str, ...],
+        working_size: tuple[int, int] | None,
+        *,
+        can_undo: bool | None = None,
+        status: str = "当前结果已进入处理链，可以继续选择其他操作。",
+    ) -> None:
+        self._candidate_pending = False
+        has_steps = bool(step_labels)
+        history_available = has_steps if can_undo is None else can_undo
+        self.undo_step_button.setProperty("hasHistory", history_available)
+        self.undo_step_button.setEnabled(history_available and not self._busy)
+        if has_steps:
+            size_text = (
+                f" · {working_size[0]} × {working_size[1]}" if working_size is not None else ""
+            )
+            self.workflow_detail.setText(
+                f"当前工作图：已完成 {len(step_labels)} 步{size_text}\n" + " → ".join(step_labels)
+            )
+        else:
+            self.workflow_detail.setText("当前工作图：原图 · 每一步采用后都可继续处理")
+        if png_bytes is None:
+            self._result_bytes = None
+            self.result_preview.clear()
+            self.result_card.setVisible(False)
+        else:
+            self._set_result_preview(png_bytes)
+            self.result_title.setText(f"当前工作图 · 已完成 {len(step_labels)} 步")
+            self.result_button.setText("查看工作图")
+            self.discard_button.setVisible(False)
+            self.continue_button.setVisible(False)
+            self.result_card.setVisible(True)
+        self.status_label.setText(status)
+        self.set_busy(False)
+        QTimer.singleShot(0, lambda: self.scroll_area.verticalScrollBar().setValue(0))
+
+    def _set_result_preview(self, png_bytes: bytes) -> bool:
         self._result_bytes = bytes(png_bytes)
         pixmap = QPixmap()
         if not pixmap.loadFromData(self._result_bytes):
-            self.set_error("模型结果无法预览。")
-            return
+            return False
         self.result_preview.setPixmap(
             pixmap.scaled(
                 360,
@@ -824,10 +986,7 @@ class ImageTextCreationPanel(QFrame):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
-        self.result_title.setText(title)
-        self.result_card.setVisible(True)
-        self.status_label.setText(status)
-        self._append_message("CSImage", conversation_message)
+        return True
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.api_key_edit.clear()

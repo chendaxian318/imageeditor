@@ -10,11 +10,18 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QImage, QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QFileDialog, QMessageBox
+from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QApplication,
+    QComboBox,
+    QFileDialog,
+    QMessageBox,
+)
 
+from light_image_editor.crop_presets import CropPresetCatalog, CropRatioPreset
 from light_image_editor.qt_image_tools import (
     ConversionRequest,
     CropCanvas,
@@ -130,6 +137,20 @@ class QtImageToolsTests(unittest.TestCase):
                 self.assertEqual(
                     workspace.body_splitter.handle(1).cursor().shape(),
                     Qt.CursorShape.SplitHCursor,
+                )
+                workspace.body_splitter.setSizes([820, 320])
+                self.application.processEvents()
+                self.assertEqual(
+                    workspace.settings_scroll.widget().width(),
+                    workspace.settings_scroll.viewport().width(),
+                )
+                self.assertLessEqual(
+                    workspace.custom_ratio_button.geometry().right(),
+                    workspace.ratio_card.contentsRect().right(),
+                )
+                self.assertLessEqual(
+                    workspace.manage_presets_button.geometry().right(),
+                    workspace.ratio_card.contentsRect().right(),
                 )
             finally:
                 workspace.close()
@@ -259,43 +280,138 @@ class QtImageToolsTests(unittest.TestCase):
                         "原图",
                         "1:1",
                         "5:3",
+                        "13:5",
                         "16:9",
                         "9:16",
+                        "5:4",
                         "4:3",
                         "3:4",
                         "3:2",
                         "2:3",
-                        "18:9",
-                        "9:18",
+                        "2:1",
+                        "1:2",
+                        "9:19",
+                        "9:20",
+                        "自定义",
                     },
                 )
                 self.assertTrue(workspace.lock_ratio.isChecked())
-                self.assertIn("已开启", workspace.lock_ratio_status.text())
+                self.assertEqual(workspace.lock_ratio_status.text(), "已锁定")
+                self.assertTrue(workspace.source_section.isHidden())
+                self.assertTrue(workspace.source_card.isHidden())
                 self.assertEqual(workspace.width_spin.suffix(), "")
                 self.assertEqual(workspace.height_spin.suffix(), "")
+                self.assertEqual(
+                    workspace.width_spin.buttonSymbols(),
+                    QAbstractSpinBox.ButtonSymbols.NoButtons,
+                )
+                self.assertEqual(
+                    workspace.target_size_spin.buttonSymbols(),
+                    QAbstractSpinBox.ButtonSymbols.NoButtons,
+                )
+                self.assertFalse(workspace._ratio_buttons["自由"].isHidden())
+                self.assertFalse(workspace._ratio_buttons["16:9"].isHidden())
+                self.assertTrue(workspace._ratio_buttons["4:3"].isHidden())
+                workspace.ratio_more_combo.setCurrentIndex(
+                    workspace.ratio_more_combo.findData("4:3")
+                )
+                self.assertEqual(workspace._active_ratio_label, "4:3")
+                self.assertEqual(workspace.ratio_more_combo.currentData(), "4:3")
+                self.assertTrue(workspace.naming_panel.isHidden())
+                workspace.naming_toggle.click()
+                self.assertFalse(workspace.naming_panel.isHidden())
+                workspace.naming_toggle.click()
+                self.assertTrue(workspace.naming_panel.isHidden())
                 self.assertEqual(
                     set(workspace.size_preset_buttons),
                     {
                         (512, 512),
                         (108, 108),
                         (28, 28),
+                        (650, 250),
+                        (500, 400),
                         (1440, 1440),
+                        (1280, 720),
                         (1920, 1080),
+                        (720, 1280),
                         (1080, 1920),
                         (1080, 2160),
                         (1080, 2280),
                         (1080, 2400),
                     },
                 )
+                self.assertTrue(workspace.size_preset_panel.isHidden())
+                workspace._ratio_buttons["1:1"].click()
+                visible_square_presets = {
+                    size
+                    for size, button in workspace.size_preset_buttons.items()
+                    if not button.isHidden()
+                }
+                self.assertEqual(
+                    visible_square_presets,
+                    {(512, 512), (108, 108), (28, 28), (1440, 1440)},
+                )
+                workspace.ratio_more_combo.setCurrentIndex(
+                    workspace.ratio_more_combo.findData("13:5")
+                )
+                self.assertEqual(
+                    {
+                        size
+                        for size, button in workspace.size_preset_buttons.items()
+                        if not button.isHidden()
+                    },
+                    {(650, 250)},
+                )
+                workspace.ratio_more_combo.setCurrentIndex(
+                    workspace.ratio_more_combo.findData("5:4")
+                )
+                self.assertEqual(
+                    {
+                        size
+                        for size, button in workspace.size_preset_buttons.items()
+                        if not button.isHidden()
+                    },
+                    {(500, 400)},
+                )
+                workspace._ratio_buttons["16:9"].click()
+                self.assertEqual(
+                    {
+                        size
+                        for size, button in workspace.size_preset_buttons.items()
+                        if not button.isHidden()
+                    },
+                    {(1280, 720), (1920, 1080)},
+                )
+                workspace.ratio_more_combo.setCurrentIndex(
+                    workspace.ratio_more_combo.findData("9:16")
+                )
+                self.assertEqual(
+                    {
+                        size
+                        for size, button in workspace.size_preset_buttons.items()
+                        if not button.isHidden()
+                    },
+                    {(720, 1280), (1080, 1920)},
+                )
+                workspace._ratio_buttons["1:2"].click()
+                self.assertFalse(workspace.size_preset_buttons[(1080, 2160)].isHidden())
                 workspace.size_preset_buttons[(1080, 2160)].click()
                 preset_request = workspace.request()
                 self.assertEqual((preset_request.width, preset_request.height), (1080, 2160))
                 self.assertEqual(preset_request.crop_box, (150, 0, 250, 200))
-                workspace.format_buttons["WEBP"].click()
+                self.assertFalse(workspace.format_buttons["PNG"].isHidden())
+                self.assertFalse(workspace.format_buttons["JPEG"].isHidden())
+                self.assertTrue(workspace.format_buttons["WEBP"].isHidden())
+                workspace.other_format_combo.setCurrentIndex(
+                    workspace.other_format_combo.findData("WEBP")
+                )
                 self.assertEqual(workspace.request().output_format, "WEBP")
                 self.assertTrue(workspace._output_filename().endswith(".webp"))
+                self.assertIn(".webp", workspace.output_preview_line.text())
+                self.assertIn("1080 × 2160", workspace.output_preview_line.text())
+                self.assertIn("WEBP", workspace.output_preview_line.text())
                 workspace.lock_ratio.setChecked(False)
-                self.assertIn("已关闭", workspace.lock_ratio_status.text())
+                self.assertEqual(workspace.lock_ratio_status.text(), "未锁定")
 
                 with patch.object(
                     QFileDialog,
@@ -307,6 +423,153 @@ class QtImageToolsTests(unittest.TestCase):
                 self.assertEqual(workspace.output_path_edit.text(), str(output.resolve()))
             finally:
                 workspace.close()
+
+    def test_custom_crop_ratio_normalizes_and_applies_to_crop_and_size_presets(self) -> None:
+        workspace = ImageEditWorkspace(
+            Path("sample.png"),
+            _test_qimage(),
+            colors=viewer_theme_colors(),
+        )
+        try:
+            workspace._apply_custom_crop_ratio(14, 10)
+            self.assertEqual(workspace._custom_ratio, (7, 5))
+            self.assertTrue(workspace.custom_ratio_button.isChecked())
+            self.assertEqual(workspace.custom_ratio_button.text(), "自定义  7:5")
+            self.assertAlmostEqual(workspace.canvas._aspect_ratio or 0.0, 7 / 5)
+            self.assertEqual(workspace.canvas.crop_box(), (60, 0, 340, 200))
+
+            workspace._apply_custom_crop_ratio(9, 19)
+            self.assertFalse(workspace.size_preset_buttons[(1080, 2280)].isHidden())
+            workspace.size_preset_buttons[(1080, 2280)].click()
+            self.assertEqual(workspace._custom_ratio, (9, 19))
+            self.assertEqual(workspace.custom_ratio_button.text(), "自定义  9:19")
+            self.assertFalse(workspace.custom_ratio_button.isChecked())
+            self.assertTrue(workspace._ratio_buttons["9:19"].isChecked())
+        finally:
+            workspace.close()
+
+    def test_edit_workspace_rebuilds_ratio_and_size_buttons_from_catalog(self) -> None:
+        workspace = ImageEditWorkspace(
+            Path("sample.png"),
+            _test_qimage(),
+            colors=viewer_theme_colors(),
+        )
+        changed: list[CropPresetCatalog] = []
+        workspace.presetCatalogChanged.connect(changed.append)
+        catalog = CropPresetCatalog(
+            (
+                CropRatioPreset(7, 3, ((1400, 600), (700, 300))),
+                CropRatioPreset(4, 5, ((800, 1000),)),
+            )
+        )
+        try:
+            workspace._replace_preset_catalog(catalog)
+            self.assertEqual(workspace.preset_catalog, catalog)
+            self.assertIn("7:3", workspace._ratio_buttons)
+            self.assertNotIn("16:9", workspace._ratio_buttons)
+            workspace._ratio_buttons["7:3"].click()
+            self.assertFalse(workspace.size_preset_buttons[(1400, 600)].isHidden())
+            self.assertTrue(workspace.size_preset_buttons[(800, 1000)].isHidden())
+            self.assertEqual(changed, [catalog])
+        finally:
+            workspace.close()
+
+    def test_viewer_persists_portable_ratio_and_size_catalog(self) -> None:
+        catalog = CropPresetCatalog((CropRatioPreset(7, 3, ((1400, 600),)),))
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "settings.json")
+            first = ViewerWindow(store)
+            try:
+                first._save_crop_preset_catalog(catalog)
+            finally:
+                first.close()
+            second = ViewerWindow(store)
+            try:
+                self.assertEqual(second._crop_preset_catalog, catalog)
+            finally:
+                second.close()
+
+    def test_batch_source_list_switches_preview_and_remembers_each_crop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.png"
+            second = root / "second.png"
+            Image.new("RGB", (400, 200), "#336699").save(first)
+            Image.new("RGB", (200, 400), "#cc6633").save(second)
+            workspace = ImageEditWorkspace(
+                first,
+                _test_qimage(400, 200),
+                colors=viewer_theme_colors(),
+            )
+            requested: list[Path] = []
+            workspace.sourcePreviewRequested.connect(requested.append)
+            try:
+                workspace.add_sources([second])
+                workspace._apply_crop_ratio("1:1", 1.0)
+                workspace.source_list.setCurrentRow(1)
+                self.assertEqual(requested[-1], second.resolve())
+
+                workspace.set_source_preview(second, _test_qimage(200, 400))
+                self.assertEqual(workspace.active_source_path, second.resolve())
+                self.assertEqual(workspace.canvas.image().size().toTuple(), (200, 400))
+                self.assertEqual(workspace.canvas.crop_box(), (0, 100, 200, 300))
+                self.assertIn("当前：second.png", workspace.source_summary.text())
+                self.assertEqual(workspace._output_filename(), "second_edited.png")
+                self.assertIn("second_edited.png", workspace.output_preview_line.text())
+                self.assertIn("second_edited.png", workspace.output_summary.text())
+
+                workspace.canvas._set_crop_rect(QRectF(0, 50, 150, 150))
+                workspace.source_list.setCurrentRow(0)
+                workspace.set_source_preview(first, _test_qimage(400, 200))
+                self.assertEqual(workspace.canvas.crop_box(), (100, 0, 300, 200))
+                self.assertEqual(workspace._output_filename(), "first_edited.png")
+                self.assertIn("first_edited.png", workspace.output_summary.text())
+
+                crop_boxes = dict(workspace.request().source_crop_boxes)
+                self.assertEqual(crop_boxes[first.resolve()], (100, 0, 300, 200))
+                self.assertEqual(crop_boxes[second.resolve()], (0, 50, 150, 200))
+            finally:
+                workspace.close()
+
+    def test_viewer_loads_the_selected_batch_source_into_the_edit_canvas(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.png"
+            second = root / "second.png"
+            Image.new("RGB", (120, 80), "#336699").save(first)
+            Image.new("RGB", (60, 140), "#cc6633").save(second)
+            window = ViewerWindow(SettingsStore(root / "settings.json"))
+            try:
+                window.open_path(first)
+                deadline = time.monotonic() + 5
+                while window.current_image is None and time.monotonic() < deadline:
+                    self.application.processEvents()
+                    time.sleep(0.01)
+                window.open_conversion_dialog()
+                deadline = time.monotonic() + 5
+                while window._image_edit_workspace is None and time.monotonic() < deadline:
+                    self.application.processEvents()
+                    time.sleep(0.01)
+                workspace = window._image_edit_workspace
+                self.assertIsInstance(workspace, ImageEditWorkspace)
+                assert isinstance(workspace, ImageEditWorkspace)
+                workspace.add_sources([second])
+                workspace.source_list.setCurrentRow(1)
+
+                deadline = time.monotonic() + 5
+                while (
+                    workspace.active_source_path != second.resolve() and time.monotonic() < deadline
+                ):
+                    self.application.processEvents()
+                    time.sleep(0.01)
+                self.assertEqual(workspace.active_source_path, second.resolve())
+                self.assertEqual(workspace.canvas.image().size().toTuple(), (60, 140))
+            finally:
+                workspace = window._image_edit_workspace
+                if isinstance(workspace, ImageEditWorkspace):
+                    workspace.mark_exported()
+                window.close()
+                self.application.processEvents()
 
     def test_edit_workspace_supports_repeat_crop_center_compare_and_full_dirty_state(self) -> None:
         workspace = ImageEditWorkspace(
@@ -354,6 +617,57 @@ class QtImageToolsTests(unittest.TestCase):
             self.assertFalse(workspace.is_dirty())
             workspace.width_spin.setValue(320)
             self.assertTrue(workspace.is_dirty())
+        finally:
+            workspace.close()
+
+    def test_single_image_workspace_uses_clear_export_and_reset_actions(self) -> None:
+        workspace = ImageEditWorkspace(
+            Path("sample.png"),
+            _test_qimage(),
+            colors=viewer_theme_colors(),
+        )
+        export_only: list[object] = []
+        export_and_open: list[object] = []
+        workspace.quickExportRequested.connect(export_only.append)
+        workspace.saveRequested.connect(export_and_open.append)
+        try:
+            self.assertEqual(workspace.save_button.text(), "导出")
+            self.assertEqual(workspace.quick_export_button.text(), "导出并打开")
+            workspace.format_buttons["JPEG"].click()
+            workspace.edit_quality_slider.setValue(73)
+            workspace.target_size_enabled.click()
+            workspace.target_size_spin.setValue(120)
+            self.assertTrue(workspace.target_size_spin.isEnabled())
+            self.assertEqual(workspace.request().target_size_kb, 120)
+
+            workspace.save_button.click()
+            self.assertEqual(len(export_only), 1)
+            self.assertEqual(export_and_open, [])
+            workspace.quick_export_button.click()
+            self.assertEqual(len(export_and_open), 1)
+
+            workspace.width_spin.setValue(320)
+            with patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.No,
+            ):
+                workspace.reset_button.click()
+            self.assertEqual(workspace.width_spin.value(), 320)
+            with patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ):
+                workspace.reset_button.click()
+            self.assertEqual(workspace.width_spin.value(), 400)
+
+            workspace.format_buttons["JPEG"].click()
+            workspace.edit_quality_slider.setValue(64)
+            workspace.set_result_summary(1, 0, 0)
+            self.assertEqual(workspace.output_format, "JPEG")
+            self.assertEqual(workspace.edit_quality_slider.value(), 64)
+            self.assertIn("当前设置已保留", workspace.status_label.text())
         finally:
             workspace.close()
 
@@ -405,6 +719,65 @@ class QtImageToolsTests(unittest.TestCase):
                 self.assertIs(window._image_edit_workspace, workspace)
                 self.assertFalse(workspace.is_dirty())
             finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_batch_export_uses_each_source_own_crop_position(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.png"
+            second = root / "second.png"
+            output = root / "output"
+            output.mkdir()
+            Image.new("RGB", (120, 80), "#336699").save(first)
+            Image.new("RGB", (80, 120), "#cc6633").save(second)
+            window = ViewerWindow(SettingsStore(root / "settings.json"))
+            try:
+                window.open_path(first)
+                deadline = time.monotonic() + 5
+                while window.current_image is None and time.monotonic() < deadline:
+                    self.application.processEvents()
+                    time.sleep(0.01)
+                window.open_image_edit_workspace()
+                self.application.processEvents()
+                workspace = window._image_edit_workspace
+                self.assertIsInstance(workspace, ImageEditWorkspace)
+                assert isinstance(workspace, ImageEditWorkspace)
+                workspace.add_sources([second])
+                workspace.set_output_directory(output)
+                workspace.filename_suffix.setText("_crop")
+                workspace._apply_crop_ratio("1:1", 1.0)
+                workspace.source_list.setCurrentRow(1)
+
+                deadline = time.monotonic() + 5
+                while (
+                    workspace.active_source_path != second.resolve() and time.monotonic() < deadline
+                ):
+                    self.application.processEvents()
+                    time.sleep(0.01)
+                workspace.canvas._set_crop_rect(QRectF(0, 0, 80, 80))
+                request = workspace.request()
+                crop_boxes = dict(request.source_crop_boxes)
+                self.assertEqual(crop_boxes[first.resolve()], (20, 0, 100, 80))
+                self.assertEqual(crop_boxes[second.resolve()], (0, 0, 80, 80))
+                window._quick_export_image_edit_request(request)
+
+                first_target = output / "first_crop.png"
+                second_target = output / "second_crop.png"
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline:
+                    self.application.processEvents()
+                    if first_target.is_file() and second_target.is_file() and not workspace._busy:
+                        break
+                    time.sleep(0.01)
+                with Image.open(first_target) as result:
+                    self.assertEqual(result.size, (80, 80))
+                with Image.open(second_target) as result:
+                    self.assertEqual(result.size, (80, 80))
+            finally:
+                workspace = window._image_edit_workspace
+                if isinstance(workspace, ImageEditWorkspace):
+                    workspace.mark_exported()
                 window.close()
                 self.application.processEvents()
 
@@ -610,6 +983,50 @@ class QtImageToolsTests(unittest.TestCase):
                     self.assertEqual(result.format, "WEBP")
                     self.assertEqual(result.size, (120, 80))
             finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_workspace_jpeg_target_size_exports_under_limit_and_keeps_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "noise.png"
+            target = root / "noise_edited.jpg"
+            noise = Image.effect_noise((900, 700), 90).convert("RGB")
+            noise.save(source)
+            noise.close()
+            window = ViewerWindow(SettingsStore(root / "settings.json"))
+            try:
+                window.open_path(source)
+                deadline = time.monotonic() + 5
+                while window.current_image is None and time.monotonic() < deadline:
+                    self.application.processEvents()
+                    time.sleep(0.01)
+                window.open_conversion_dialog()
+                deadline = time.monotonic() + 5
+                while window._image_edit_workspace is None and time.monotonic() < deadline:
+                    self.application.processEvents()
+                    time.sleep(0.01)
+                workspace = window._image_edit_workspace
+                self.assertIsInstance(workspace, ImageEditWorkspace)
+                assert isinstance(workspace, ImageEditWorkspace)
+                workspace.format_buttons["JPEG"].click()
+                workspace.edit_quality_slider.setValue(95)
+                workspace.target_size_enabled.setChecked(True)
+                workspace.target_size_spin.setValue(80)
+
+                window._quick_export_image_edit_request(workspace.request())
+                self.application.processEvents()
+
+                self.assertTrue(target.is_file())
+                self.assertLessEqual(target.stat().st_size, 80 * 1024)
+                self.assertIs(window._image_edit_workspace, workspace)
+                self.assertEqual(workspace.output_format, "JPEG")
+                self.assertEqual(workspace.edit_quality_slider.value(), 95)
+                self.assertTrue(workspace.target_size_enabled.isChecked())
+            finally:
+                workspace = window._image_edit_workspace
+                if isinstance(workspace, ImageEditWorkspace):
+                    workspace.mark_exported()
                 window.close()
                 self.application.processEvents()
 

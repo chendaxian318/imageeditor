@@ -147,6 +147,51 @@ class ImageOpsTests(unittest.TestCase):
             self.assertGreater(high_size, target_size)
             self.assertLessEqual(target.stat().st_size, 80 * 1024)
 
+    def test_webp_target_size_respects_the_requested_limit(self) -> None:
+        with TemporaryDirectory() as raw_dir:
+            work = Path(raw_dir)
+            image = Image.effect_noise((900, 700), 90).convert("RGB")
+            target = work / "target.webp"
+            try:
+                save_image(
+                    image,
+                    target,
+                    ExportOptions("WEBP", quality=95, target_size_kb=180),
+                )
+                self.assertLessEqual(target.stat().st_size, 180 * 1024)
+            finally:
+                image.close()
+
+    def test_jpeg_and_webp_quality_controls_change_real_file_size(self) -> None:
+        with TemporaryDirectory() as raw_dir:
+            work = Path(raw_dir)
+            image = Image.effect_noise((900, 700), 90).convert("RGB")
+            try:
+                for output_format, extension in (("JPEG", ".jpg"), ("WEBP", ".webp")):
+                    low = work / f"low{extension}"
+                    high = work / f"high{extension}"
+                    save_image(image, low, ExportOptions(output_format, quality=20))
+                    save_image(image, high, ExportOptions(output_format, quality=90))
+                    self.assertLess(low.stat().st_size, high.stat().st_size)
+            finally:
+                image.close()
+
+    def test_target_size_never_silently_exports_an_oversized_file(self) -> None:
+        with TemporaryDirectory() as raw_dir:
+            work = Path(raw_dir)
+            image = Image.effect_noise((1200, 900), 100).convert("RGB")
+            target = work / "impossible.jpg"
+            try:
+                with self.assertRaisesRegex(ValueError, "无法达到 10 KB"):
+                    save_image(
+                        image,
+                        target,
+                        ExportOptions("JPEG", quality=95, target_size_kb=10),
+                    )
+                self.assertFalse(target.exists())
+            finally:
+                image.close()
+
     def test_advanced_format_options_change_real_encoded_outputs(self) -> None:
         with TemporaryDirectory() as raw_dir:
             work = Path(raw_dir)

@@ -401,7 +401,12 @@ def encode_to_target_size(
     if best_under is not None:
         return best_under
     if best_over is not None:
-        return best_over
+        minimum_kb = max(1, (len(best_over) + 1023) // 1024)
+        requested_kb = max(1, target_bytes // 1024)
+        raise ValueError(
+            f"当前尺寸即使使用最低品质也约为 {minimum_kb} KB，"
+            f"无法达到 {requested_kb} KB。请提高目标大小或缩小输出尺寸。"
+        )
     buffer = BytesIO()
     kwargs = save_kwargs_for(output_format, 1)
     if extra_kwargs:

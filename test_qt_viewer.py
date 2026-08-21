@@ -188,6 +188,38 @@ class QtViewerEmptyStateTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
+    def test_auto_toolbar_stays_visible_while_tools_menu_is_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = ViewerWindow(SettingsStore(Path(directory) / "settings.json"))
+            try:
+                window.config.toolbar_mode = "auto"
+                window._apply_toolbar_mode()
+                window.show()
+                window.show_image_tools_menu()
+                self.application.processEvents()
+
+                menu = window._image_tools_menu
+                self.assertIsNotNone(menu)
+                assert menu is not None
+                self.assertTrue(menu.isVisible())
+                self.assertTrue(window.image_tools_button._selected)
+                self.assertFalse(window._auto_hide_timer.isActive())
+
+                with patch.object(window.toolbar, "animate_visible") as animate_visible:
+                    with patch.object(window, "_toolbar_contains_pointer", return_value=False):
+                        window._hide_toolbar_if_inactive()
+                    animate_visible.assert_not_called()
+                    self.assertFalse(window._auto_hide_timer.isActive())
+
+                menu.close()
+                self.application.processEvents()
+                self.assertIsNone(window._image_tools_menu)
+                self.assertFalse(window.image_tools_button._selected)
+                self.assertTrue(window._auto_hide_timer.isActive())
+            finally:
+                window.close()
+                self.application.processEvents()
+
     def test_zoom_control_uses_clickable_presets_instead_of_manual_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             window = ViewerWindow(SettingsStore(Path(directory) / "settings.json"))
@@ -347,7 +379,7 @@ class QtViewerEmptyStateTests(unittest.TestCase):
                 self.assertEqual(
                     [action.text() for action in image_tools_menu.actions()],
                     [
-                        "处理图片  ·  裁剪、尺寸与格式",
+                        "处理图片 · 裁剪、尺寸与格式",
                         "制图",
                     ],
                 )

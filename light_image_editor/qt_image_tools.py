@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import gcd
 from pathlib import Path
 
 from PIL import Image
@@ -23,11 +24,13 @@ from PySide6.QtGui import (
     QShortcut,
 )
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QButtonGroup,
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -43,10 +46,12 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QSplitter,
@@ -55,6 +60,15 @@ from PySide6.QtWidgets import (
 )
 
 from image_ops import ExportOptions, estimate_save_size, extension_for_format
+
+from .crop_presets import (
+    MAX_DIMENSION,
+    CropPresetCatalog,
+    CropRatioPreset,
+    load_crop_preset_catalog,
+    save_crop_preset_catalog,
+)
+from .qt_viewer_widgets import ViewerCheckBox
 
 FORMAT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("常用格式", ("PNG", "JPEG", "WEBP", "AVIF", "TIFF", "BMP")),
@@ -86,11 +100,6 @@ FORMAT_LABELS = {
     "EMF": "EMF\nWindows 容器",
     "WMF": "WMF\nWindows 容器",
 }
-SIZE_PRESET_GROUPS: tuple[tuple[str, tuple[tuple[int, int], ...]], ...] = (
-    ("正方形", ((512, 512), (108, 108), (28, 28))),
-    ("横屏", ((1440, 1440), (1920, 1080))),
-    ("竖屏", ((1080, 1920), (1080, 2160), (1080, 2280), (1080, 2400))),
-)
 
 
 @dataclass(frozen=True)
@@ -138,10 +147,23 @@ class ImageEditRequest:
     generate_mipmaps: bool = True
     ico_sizes: tuple[int, ...] = (16, 24, 32, 48, 64, 128, 256)
     ktx2_mode: str = "uastc"
+    source_crop_boxes: tuple[tuple[Path, tuple[int, int, int, int] | None], ...] = ()
+
+
+@dataclass
+class _BatchSourceState:
+    original_size: tuple[int, int]
+    base_box: tuple[int, int, int, int]
+    crop_box: tuple[int, int, int, int] | None = None
+    working_revision: int = 0
 
 
 def _dialog_style(colors: dict[str, str]) -> str:
     return f"""
+        QDialog {{
+            color: {colors["text"]}; background: {colors["surface"]};
+            font: 13px 'Microsoft YaHei UI';
+        }}
         QFrame#conversionPanel, QFrame#creationPanel, QFrame#imageEditWorkspace {{
             color: {colors["text"]}; background: {colors["surface"]};
             font: 13px 'Microsoft YaHei UI';
@@ -150,9 +172,36 @@ def _dialog_style(colors: dict[str, str]) -> str:
         QWidget#imageToolSettings {{ background: transparent; }}
         QLabel {{ color: {colors["text"]}; background: transparent; }}
         QLabel#mutedLabel {{ color: {colors["muted"]}; }}
-        QFrame#toolCard, QFrame#toolPanel, QFrame#outputBar, QFrame#ratioLockCard {{
+        QFrame#toolCard, QFrame#toolPanel, QFrame#outputBar, QFrame#ratioLockCard,
+        QFrame#workflowCard, QFrame#customRatioCard, QFrame#ratioValueCard,
+        QFrame#defaultConfigCard, QFrame#compactSection {{
             background: {colors["surface_high"]}; border: 1px solid {colors["border"]};
             border-radius: 12px;
+        }}
+        QLabel#sectionTitle {{
+            color: {colors["text"]}; font: 700 14px 'Microsoft YaHei UI';
+            padding-top: 3px;
+        }}
+        QFrame#ratioPresetPanel {{
+            background: {colors["selected"]}; border: 1px solid {colors["accent"]};
+            border-radius: 11px;
+        }}
+        QFrame#defaultConfigCard[active="true"] {{
+            background: {colors["selected"]}; border-color: {colors["accent"]};
+        }}
+        QLabel#customRatioPreview {{
+            color: {colors["accent"]}; background: {colors["selected"]};
+            border: 1px solid {colors["accent"]}; border-radius: 9px;
+            padding: 7px 10px; font-weight: 600;
+        }}
+        QLabel#defaultConfigStatus {{
+            color: {colors["muted"]}; background: {colors["surface"]};
+            border: 1px solid {colors["border"]}; border-radius: 8px;
+            padding: 3px 8px; font-size: 11px;
+        }}
+        QLabel#defaultConfigStatus[active="true"] {{
+            color: {colors["accent"]}; background: {colors["selected"]};
+            border-color: {colors["accent"]};
         }}
         QFrame#apiSummaryCard {{
             background: {colors["surface_high"]}; border: 1px solid {colors["border"]};
@@ -216,9 +265,17 @@ def _dialog_style(colors: dict[str, str]) -> str:
         }}
         QPushButton:hover {{ background: {colors["hover"]}; }}
         QPushButton:pressed {{ background: {colors["pressed"]}; }}
+        QPushButton:disabled {{
+            color: {colors["muted"]}; background: {colors["surface"]};
+            border-color: {colors["border"]};
+        }}
         QPushButton#primaryButton {{
             color: {colors["accent_text"]}; background: {colors["accent"]};
             border-color: {colors["accent"]}; font-weight: 600;
+        }}
+        QPushButton#primaryButton:disabled {{
+            color: {colors["muted"]}; background: {colors["surface"]};
+            border-color: {colors["border"]};
         }}
         QPushButton#tabButton:checked {{
             color: {colors["accent_text"]}; background: {colors["accent"]};
@@ -228,6 +285,14 @@ def _dialog_style(colors: dict[str, str]) -> str:
         QPushButton#ratioOption:checked {{
             color: {colors["accent"]}; background: {colors["selected"]};
             border-color: {colors["accent"]}; font-weight: 600;
+        }}
+        QPushButton#sizePresetButton {{
+            min-height: 44px; padding: 0 12px; border-radius: 11px;
+            font-weight: 600;
+        }}
+        QPushButton#sizePresetButton:hover {{
+            color: {colors["accent"]}; border-color: {colors["accent"]};
+            background: {colors["hover"]};
         }}
         QPushButton#formatCard {{
             min-height: 52px; padding: 5px 8px; text-align: left;
@@ -240,6 +305,14 @@ def _dialog_style(colors: dict[str, str]) -> str:
         QPushButton#linkButton {{
             color: {colors["accent"]}; background: transparent; border: 0;
             padding: 4px 2px; text-align: left;
+        }}
+        QPushButton#sectionToggle {{
+            color: {colors["text"]}; background: {colors["surface_high"]};
+            border: 1px solid {colors["border"]}; border-radius: 10px;
+            min-height: 38px; padding: 0 12px; text-align: left; font-weight: 600;
+        }}
+        QPushButton#sectionToggle:hover {{
+            background: {colors["hover"]}; border-color: {colors["accent"]};
         }}
         QFrame#localAiCard {{
             background: {colors["surface_high"]}; border: 1px solid {colors["border"]};
@@ -273,11 +346,14 @@ def _dialog_style(colors: dict[str, str]) -> str:
         QProgressBar::chunk {{background: {colors["accent"]}; border-radius: 3px;}}
         QCheckBox {{ color: {colors["text"]}; spacing: 8px; }}
         QCheckBox#ratioLockSwitch {{ font-weight: 600; spacing: 10px; }}
-        QCheckBox#ratioLockSwitch::indicator {{
+        QCheckBox#defaultConfigSwitch {{ font-weight: 700; spacing: 10px; }}
+        QCheckBox#ratioLockSwitch::indicator,
+        QCheckBox#defaultConfigSwitch::indicator {{
             width: 38px; height: 20px; border-radius: 10px;
             background: {colors["border"]}; border: 1px solid {colors["border"]};
         }}
-        QCheckBox#ratioLockSwitch::indicator:checked {{
+        QCheckBox#ratioLockSwitch::indicator:checked,
+        QCheckBox#defaultConfigSwitch::indicator:checked {{
             background: {colors["accent"]}; border-color: {colors["accent"]};
         }}
         QSlider::groove:horizontal {{
@@ -343,6 +419,514 @@ def _style_combo_popup(combo: QComboBox, colors: dict[str, str]) -> None:
     view.setPalette(palette)
     view.viewport().setAutoFillBackground(True)
     view.viewport().setPalette(palette)
+
+
+def _configure_direct_number_input(spin: QSpinBox) -> None:
+    """Use a clean text-first number field instead of ambiguous tiny steppers."""
+
+    spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+    spin.setAccelerated(True)
+    spin.setToolTip("直接输入数值；也可使用上下方向键或鼠标滚轮调整。")
+
+
+class CustomCropRatioDialog(QDialog):
+    """Focused numeric editor for a custom width-to-height crop ratio."""
+
+    def __init__(
+        self,
+        width_ratio: int,
+        height_ratio: int,
+        colors: dict[str, str],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("自定义裁剪比例")
+        self.setModal(True)
+        self.setFixedWidth(420)
+        self.setStyleSheet(_dialog_style(colors))
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+        title = QLabel("自定义裁剪比例", self)
+        title.setStyleSheet("font: 700 18px 'Microsoft YaHei UI';")
+        hint = QLabel("输入宽与高的比例数值，系统会自动约分。", self)
+        hint.setObjectName("mutedLabel")
+        layout.addWidget(title)
+        layout.addWidget(hint)
+
+        ratio_card = QFrame(self)
+        ratio_card.setObjectName("customRatioCard")
+        card_layout = QVBoxLayout(ratio_card)
+        card_layout.setContentsMargins(14, 13, 14, 13)
+        card_layout.setSpacing(10)
+        ratio_row = QHBoxLayout()
+        ratio_row.setSpacing(10)
+        self.width_ratio_spin = QSpinBox(self)
+        self.height_ratio_spin = QSpinBox(self)
+        for spin in (self.width_ratio_spin, self.height_ratio_spin):
+            _configure_direct_number_input(spin)
+            spin.setRange(1, 10000)
+            spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            spin.setMinimumHeight(42)
+        self.width_ratio_spin.setValue(width_ratio)
+        self.height_ratio_spin.setValue(height_ratio)
+
+        width_box = QVBoxLayout()
+        width_label = QLabel("宽", ratio_card)
+        width_label.setObjectName("mutedLabel")
+        width_box.addWidget(width_label)
+        width_box.addWidget(self.width_ratio_spin)
+        separator = QLabel(":", self)
+        separator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        separator.setStyleSheet("font: 700 22px 'Microsoft YaHei UI'; padding-top: 19px;")
+        height_box = QVBoxLayout()
+        height_label = QLabel("高", ratio_card)
+        height_label.setObjectName("mutedLabel")
+        height_box.addWidget(height_label)
+        height_box.addWidget(self.height_ratio_spin)
+        ratio_row.addLayout(width_box, 1)
+        ratio_row.addWidget(separator)
+        ratio_row.addLayout(height_box, 1)
+        card_layout.addLayout(ratio_row)
+
+        self.ratio_preview = QLabel("", ratio_card)
+        self.ratio_preview.setObjectName("customRatioPreview")
+        self.ratio_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(self.ratio_preview)
+        layout.addWidget(ratio_card)
+
+        preset_label = QLabel("常用比例", self)
+        preset_label.setObjectName("mutedLabel")
+        layout.addWidget(preset_label)
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(7)
+        for label, width, height in (
+            ("1:1", 1, 1),
+            ("4:3", 4, 3),
+            ("16:9", 16, 9),
+            ("9:16", 9, 16),
+        ):
+            button = QPushButton(label, self)
+            button.clicked.connect(lambda _checked=False, w=width, h=height: self._set_ratio(w, h))
+            preset_row.addWidget(button, 1)
+        layout.addLayout(preset_row)
+
+        actions = QHBoxLayout()
+        cancel_button = QPushButton("取消", self)
+        apply_button = QPushButton("应用比例", self)
+        apply_button.setObjectName("primaryButton")
+        cancel_button.clicked.connect(self.reject)
+        apply_button.clicked.connect(self.accept)
+        actions.addWidget(cancel_button, 1)
+        actions.addWidget(apply_button, 1)
+        layout.addLayout(actions)
+        self.width_ratio_spin.valueChanged.connect(self._update_ratio_preview)
+        self.height_ratio_spin.valueChanged.connect(self._update_ratio_preview)
+        self._update_ratio_preview()
+
+    def _set_ratio(self, width_ratio: int, height_ratio: int) -> None:
+        self.width_ratio_spin.setValue(width_ratio)
+        self.height_ratio_spin.setValue(height_ratio)
+
+    def _update_ratio_preview(self, *_args: object) -> None:
+        width_ratio, height_ratio = self.ratio_values()
+        divisor = gcd(width_ratio, height_ratio)
+        width_ratio //= divisor
+        height_ratio //= divisor
+        orientation = (
+            "横向"
+            if width_ratio > height_ratio
+            else "竖向"
+            if width_ratio < height_ratio
+            else "正方形"
+        )
+        self.ratio_preview.setText(f"最终比例  {width_ratio}:{height_ratio}  ·  {orientation}")
+
+    def ratio_values(self) -> tuple[int, int]:
+        return self.width_ratio_spin.value(), self.height_ratio_spin.value()
+
+
+class OutputSizePresetDialog(QDialog):
+    """Editor for one exact output size constrained to a crop ratio."""
+
+    def __init__(
+        self,
+        preset: CropRatioPreset,
+        size: tuple[int, int] | None,
+        colors: dict[str, str],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._preset = preset
+        self._syncing = False
+        self.setWindowTitle("编辑输出尺寸" if size else "新增输出尺寸")
+        self.setModal(True)
+        self.setFixedWidth(420)
+        self.setStyleSheet(_dialog_style(colors))
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+        title = QLabel(self.windowTitle(), self)
+        title.setStyleSheet("font: 700 18px 'Microsoft YaHei UI';")
+        hint = QLabel(f"此尺寸归属于 {preset.label}，宽高会按比例联动。", self)
+        hint.setObjectName("mutedLabel")
+        layout.addWidget(title)
+        layout.addWidget(hint)
+
+        card = QFrame(self)
+        card.setObjectName("customRatioCard")
+        card_layout = QFormLayout(card)
+        card_layout.setContentsMargins(14, 13, 14, 13)
+        card_layout.setHorizontalSpacing(12)
+        card_layout.setVerticalSpacing(10)
+        self.width_spin = QSpinBox(card)
+        self.height_spin = QSpinBox(card)
+        for spin in (self.width_spin, self.height_spin):
+            _configure_direct_number_input(spin)
+            spin.setRange(1, MAX_DIMENSION)
+            spin.setMinimumHeight(40)
+        if size is None:
+            width = 1920 if preset.width >= preset.height else 1080
+            height = max(1, round(width * preset.height / preset.width))
+        else:
+            width, height = size
+        self.width_spin.setValue(width)
+        self.height_spin.setValue(height)
+        card_layout.addRow("宽度", self.width_spin)
+        card_layout.addRow("高度", self.height_spin)
+        layout.addWidget(card)
+
+        actions = QHBoxLayout()
+        cancel_button = QPushButton("取消", self)
+        save_button = QPushButton("保存尺寸", self)
+        save_button.setObjectName("primaryButton")
+        cancel_button.clicked.connect(self.reject)
+        save_button.clicked.connect(self.accept)
+        actions.addWidget(cancel_button, 1)
+        actions.addWidget(save_button, 1)
+        layout.addLayout(actions)
+        self.width_spin.valueChanged.connect(self._width_changed)
+        self.height_spin.valueChanged.connect(self._height_changed)
+
+    def _width_changed(self, width: int) -> None:
+        if self._syncing:
+            return
+        self._syncing = True
+        self.height_spin.setValue(max(1, round(width * self._preset.height / self._preset.width)))
+        self._syncing = False
+
+    def _height_changed(self, height: int) -> None:
+        if self._syncing:
+            return
+        self._syncing = True
+        self.width_spin.setValue(max(1, round(height * self._preset.width / self._preset.height)))
+        self._syncing = False
+
+    def size_values(self) -> tuple[int, int]:
+        return self.width_spin.value(), self.height_spin.value()
+
+    def accept(self) -> None:
+        width, height = self.size_values()
+        if width * self._preset.height != height * self._preset.width:
+            QMessageBox.warning(
+                self,
+                "尺寸不符合比例",
+                f"{width} × {height} 不是精确的 {self._preset.label} 比例。",
+            )
+            return
+        super().accept()
+
+
+class CropPresetManagerDialog(QDialog):
+    """Edit and exchange a portable crop-ratio/output-size catalog."""
+
+    def __init__(
+        self,
+        catalog: CropPresetCatalog,
+        colors: dict[str, str],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._colors = dict(colors)
+        self._presets = list(catalog.presets)
+        self.setWindowTitle("比例与尺寸预设")
+        self.setModal(True)
+        self.resize(760, 540)
+        self.setMinimumSize(680, 480)
+        self.setStyleSheet(_dialog_style(colors))
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 18, 20, 18)
+        outer.setSpacing(12)
+        title = QLabel("比例与尺寸预设", self)
+        title.setStyleSheet("font: 700 19px 'Microsoft YaHei UI';")
+        hint = QLabel(
+            "自由添加裁剪比例，并为每个比例维护常用输出尺寸。配置可导出到其他电脑。",
+            self,
+        )
+        hint.setObjectName("mutedLabel")
+        hint.setWordWrap(True)
+        outer.addWidget(title)
+        outer.addWidget(hint)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        splitter.setChildrenCollapsible(False)
+        ratio_card = QFrame(splitter)
+        ratio_card.setObjectName("toolCard")
+        ratio_layout = QVBoxLayout(ratio_card)
+        ratio_layout.setContentsMargins(12, 12, 12, 12)
+        ratio_layout.setSpacing(8)
+        ratio_heading = QLabel("裁剪比例", ratio_card)
+        ratio_heading.setStyleSheet("font-weight: 700;")
+        ratio_layout.addWidget(ratio_heading)
+        self.ratio_list = QListWidget(ratio_card)
+        ratio_layout.addWidget(self.ratio_list, 1)
+        ratio_actions = QHBoxLayout()
+        add_ratio = QPushButton("＋ 新增", ratio_card)
+        edit_ratio = QPushButton("编辑", ratio_card)
+        delete_ratio = QPushButton("删除", ratio_card)
+        add_ratio.clicked.connect(self._add_ratio)
+        edit_ratio.clicked.connect(self._edit_ratio)
+        delete_ratio.clicked.connect(self._delete_ratio)
+        ratio_actions.addWidget(add_ratio)
+        ratio_actions.addWidget(edit_ratio)
+        ratio_actions.addWidget(delete_ratio)
+        ratio_layout.addLayout(ratio_actions)
+
+        size_card = QFrame(splitter)
+        size_card.setObjectName("toolCard")
+        size_layout = QVBoxLayout(size_card)
+        size_layout.setContentsMargins(12, 12, 12, 12)
+        size_layout.setSpacing(8)
+        self.size_heading = QLabel("输出尺寸", size_card)
+        self.size_heading.setStyleSheet("font-weight: 700;")
+        size_layout.addWidget(self.size_heading)
+        self.size_list = QListWidget(size_card)
+        size_layout.addWidget(self.size_list, 1)
+        size_actions = QHBoxLayout()
+        add_size = QPushButton("＋ 新增", size_card)
+        edit_size = QPushButton("编辑", size_card)
+        delete_size = QPushButton("删除", size_card)
+        add_size.clicked.connect(self._add_size)
+        edit_size.clicked.connect(self._edit_size)
+        delete_size.clicked.connect(self._delete_size)
+        size_actions.addWidget(add_size)
+        size_actions.addWidget(edit_size)
+        size_actions.addWidget(delete_size)
+        size_layout.addLayout(size_actions)
+        splitter.addWidget(ratio_card)
+        splitter.addWidget(size_card)
+        splitter.setSizes([290, 390])
+        outer.addWidget(splitter, 1)
+
+        exchange_row = QHBoxLayout()
+        import_button = QPushButton("导入配置", self)
+        export_button = QPushButton("导出配置", self)
+        reset_button = QPushButton("恢复默认", self)
+        import_button.clicked.connect(self._import_catalog)
+        export_button.clicked.connect(self._export_catalog)
+        reset_button.clicked.connect(self._reset_catalog)
+        exchange_row.addWidget(import_button)
+        exchange_row.addWidget(export_button)
+        exchange_row.addWidget(reset_button)
+        exchange_row.addStretch(1)
+        outer.addLayout(exchange_row)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel_button = QPushButton("取消", self)
+        save_button = QPushButton("保存配置", self)
+        save_button.setObjectName("primaryButton")
+        cancel_button.clicked.connect(self.reject)
+        save_button.clicked.connect(self.accept)
+        actions.addWidget(cancel_button)
+        actions.addWidget(save_button)
+        outer.addLayout(actions)
+
+        self.ratio_list.currentRowChanged.connect(self._refresh_sizes)
+        self._refresh_ratios()
+
+    def catalog(self) -> CropPresetCatalog:
+        return CropPresetCatalog(tuple(self._presets))
+
+    def _refresh_ratios(self, selected: int | None = None) -> None:
+        previous = self.ratio_list.currentRow() if selected is None else selected
+        self.ratio_list.clear()
+        for preset in self._presets:
+            count = f"{len(preset.sizes)} 个尺寸" if preset.sizes else "暂无尺寸"
+            item = QListWidgetItem(f"{preset.label}    ·    {count}")
+            item.setData(Qt.ItemDataRole.UserRole, preset.label)
+            self.ratio_list.addItem(item)
+        if self._presets:
+            self.ratio_list.setCurrentRow(min(max(0, previous), len(self._presets) - 1))
+        else:
+            self._refresh_sizes(-1)
+
+    def _refresh_sizes(self, row: int) -> None:
+        self.size_list.clear()
+        if row < 0 or row >= len(self._presets):
+            self.size_heading.setText("输出尺寸")
+            return
+        preset = self._presets[row]
+        self.size_heading.setText(f"{preset.label} 的输出尺寸")
+        for width, height in preset.sizes:
+            item = QListWidgetItem(f"{width} × {height}")
+            item.setData(Qt.ItemDataRole.UserRole, (width, height))
+            self.size_list.addItem(item)
+        if preset.sizes:
+            self.size_list.setCurrentRow(0)
+
+    def _add_ratio(self) -> None:
+        dialog = CustomCropRatioDialog(7, 5, self._colors, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        width, height = dialog.ratio_values()
+        preset = CropRatioPreset(width, height)
+        if any(item.label == preset.label for item in self._presets):
+            QMessageBox.warning(self, "比例已存在", f"比例 {preset.label} 已在配置中。")
+            return
+        self._presets.append(preset)
+        self._refresh_ratios(len(self._presets) - 1)
+
+    def _edit_ratio(self) -> None:
+        row = self.ratio_list.currentRow()
+        if row < 0:
+            return
+        current = self._presets[row]
+        dialog = CustomCropRatioDialog(current.width, current.height, self._colors, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        width, height = dialog.ratio_values()
+        updated = CropRatioPreset(width, height)
+        if updated.label != current.label and any(
+            item.label == updated.label for index, item in enumerate(self._presets) if index != row
+        ):
+            QMessageBox.warning(self, "比例已存在", f"比例 {updated.label} 已在配置中。")
+            return
+        if updated.label != current.label and current.sizes:
+            answer = QMessageBox.question(
+                self,
+                "更改比例",
+                "现有尺寸与新比例不一致，更改后将清空这些尺寸。是否继续？",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        sizes = current.sizes if updated.label == current.label else ()
+        self._presets[row] = CropRatioPreset(updated.width, updated.height, sizes)
+        self._refresh_ratios(row)
+
+    def _delete_ratio(self) -> None:
+        row = self.ratio_list.currentRow()
+        if row < 0:
+            return
+        preset = self._presets[row]
+        answer = QMessageBox.question(
+            self,
+            "删除比例",
+            f"确定删除比例 {preset.label} 及其 {len(preset.sizes)} 个尺寸吗？",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        del self._presets[row]
+        self._refresh_ratios(min(row, len(self._presets) - 1))
+
+    def _add_size(self) -> None:
+        row = self.ratio_list.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "先选择比例", "请先选择或新增一个裁剪比例。")
+            return
+        preset = self._presets[row]
+        dialog = OutputSizePresetDialog(preset, None, self._colors, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        size = dialog.size_values()
+        if size in preset.sizes:
+            QMessageBox.warning(self, "尺寸已存在", f"尺寸 {size[0]} × {size[1]} 已存在。")
+            return
+        self._presets[row] = CropRatioPreset(preset.width, preset.height, (*preset.sizes, size))
+        self._refresh_ratios(row)
+        self.size_list.setCurrentRow(len(self._presets[row].sizes) - 1)
+
+    def _edit_size(self) -> None:
+        ratio_row = self.ratio_list.currentRow()
+        size_row = self.size_list.currentRow()
+        if ratio_row < 0 or size_row < 0:
+            return
+        preset = self._presets[ratio_row]
+        current = preset.sizes[size_row]
+        dialog = OutputSizePresetDialog(preset, current, self._colors, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        size = dialog.size_values()
+        if size != current and size in preset.sizes:
+            QMessageBox.warning(self, "尺寸已存在", f"尺寸 {size[0]} × {size[1]} 已存在。")
+            return
+        sizes = list(preset.sizes)
+        sizes[size_row] = size
+        self._presets[ratio_row] = CropRatioPreset(preset.width, preset.height, tuple(sizes))
+        self._refresh_ratios(ratio_row)
+        self.size_list.setCurrentRow(size_row)
+
+    def _delete_size(self) -> None:
+        ratio_row = self.ratio_list.currentRow()
+        size_row = self.size_list.currentRow()
+        if ratio_row < 0 or size_row < 0:
+            return
+        preset = self._presets[ratio_row]
+        sizes = list(preset.sizes)
+        del sizes[size_row]
+        self._presets[ratio_row] = CropRatioPreset(preset.width, preset.height, tuple(sizes))
+        self._refresh_ratios(ratio_row)
+
+    def _import_catalog(self) -> None:
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "导入比例与尺寸配置",
+            "",
+            "CSImage 配置 (*.csimage-presets.json *.json);;JSON 文件 (*.json)",
+        )
+        if not path:
+            return
+        try:
+            catalog = load_crop_preset_catalog(path)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "无法导入", str(error))
+            return
+        self._presets = list(catalog.presets)
+        self._refresh_ratios(0)
+        QMessageBox.information(self, "导入完成", f"已载入 {len(self._presets)} 个比例。")
+
+    def _export_catalog(self) -> None:
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "导出比例与尺寸配置",
+            "CSImage-比例尺寸预设.csimage-presets.json",
+            "CSImage 配置 (*.csimage-presets.json);;JSON 文件 (*.json)",
+        )
+        if not path:
+            return
+        target = Path(path)
+        if target.suffix.casefold() != ".json":
+            target = target.with_name(f"{target.name}.csimage-presets.json")
+        try:
+            save_crop_preset_catalog(target, self.catalog())
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "无法导出", str(error))
+            return
+        QMessageBox.information(self, "导出完成", f"配置已保存到：\n{target}")
+
+    def _reset_catalog(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "恢复默认配置",
+            "将丢弃当前窗口中的自定义比例和尺寸，是否继续？",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._presets = list(CropPresetCatalog.defaults().presets)
+        self._refresh_ratios(0)
 
 
 class ImageConversionPanel(QFrame):
@@ -503,6 +1087,7 @@ class ImageConversionPanel(QFrame):
         target_size_layout.setContentsMargins(0, 0, 0, 0)
         self.target_size_enabled = QCheckBox("限制文件大小", self.target_size_row)
         self.target_size_spin = QSpinBox(self.target_size_row)
+        _configure_direct_number_input(self.target_size_spin)
         self.target_size_spin.setRange(10, 999_999)
         self.target_size_spin.setValue(500)
         self.target_size_spin.setSuffix(" KB")
@@ -1398,6 +1983,8 @@ class ImageEditWorkspace(QFrame):
     cancelRequested = Signal()
     saveRequested = Signal(object)
     quickExportRequested = Signal(object)
+    sourcePreviewRequested = Signal(object)
+    presetCatalogChanged = Signal(object)
 
     def __init__(
         self,
@@ -1405,18 +1992,36 @@ class ImageEditWorkspace(QFrame):
         image: QImage,
         *,
         colors: dict[str, str],
+        preset_catalog: CropPresetCatalog | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("imageEditWorkspace")
         self._colors = dict(colors)
         self.source_path = source_path.resolve()
+        self._active_source_path = self.source_path
+        self._requested_source_path = self.source_path
         self._original_image = image.copy()
+        self._primary_original_image = image.copy()
         self._initial_source_size = (image.width(), image.height())
+        self._primary_source_size = self._initial_source_size
         self._source_size = self._initial_source_size
+        initial_box = (0, 0, image.width(), image.height())
+        self._active_base_box = initial_box
+        self._source_states: dict[Path, _BatchSourceState] = {
+            self.source_path: _BatchSourceState(
+                self._initial_source_size,
+                initial_box,
+                initial_box,
+            )
+        }
         self._output_directory = source_path.parent.resolve()
         self._sources = [self.source_path]
         self._ratio_buttons: dict[str, QPushButton] = {}
+        self._active_ratio_label = "自由"
+        self._active_ratio_value: float | None = None
+        self._custom_ratio = (1, 1)
+        self._preset_catalog = preset_catalog or CropPresetCatalog.defaults()
         self.size_preset_buttons: dict[tuple[int, int], QPushButton] = {}
         self.format_buttons: dict[str, QPushButton] = {}
         source_format = {
@@ -1460,14 +2065,14 @@ class ImageEditWorkspace(QFrame):
         title_block.setSpacing(2)
         title = QLabel("处理图片", self)
         title.setStyleSheet("font: 700 19px 'Microsoft YaHei UI';")
-        subtitle = QLabel(
+        self.subtitle = QLabel(
             f"{source_path.name}  ·  {image.width()} × {image.height()}  ·  "
             "裁剪、调整尺寸或转换格式，原图不会被覆盖",
             self,
         )
-        subtitle.setObjectName("mutedLabel")
+        self.subtitle.setObjectName("mutedLabel")
         title_block.addWidget(title)
-        title_block.addWidget(subtitle)
+        title_block.addWidget(self.subtitle)
         header.addLayout(title_block)
         header.addStretch(1)
         cancel = QPushButton("退出处理", self)
@@ -1488,13 +2093,14 @@ class ImageEditWorkspace(QFrame):
         canvas_layout.setSpacing(10)
         self.canvas = CropCanvas(image, colors, self)
         canvas_layout.addWidget(self.canvas, 1)
+        canvas_layout.addWidget(self._build_output_preview_card(canvas_column))
         canvas_layout.addWidget(self._build_output_bar(canvas_column))
         self.body_splitter.addWidget(canvas_column)
 
         panel = QFrame(self.body_splitter)
         panel.setObjectName("toolPanel")
         panel.setMinimumWidth(320)
-        panel.setMaximumWidth(760)
+        panel.setMaximumWidth(16_777_215)
         self.settings_panel = panel
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(14, 14, 14, 14)
@@ -1512,6 +2118,11 @@ class ImageEditWorkspace(QFrame):
         self.output_summary = QLabel("", panel)
         self.output_summary.setObjectName("mutedLabel")
         self.output_summary.setWordWrap(True)
+        self.output_summary.setMinimumWidth(0)
+        self.output_summary.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         panel_layout.addWidget(self.output_summary)
 
         self.progress = QProgressBar(panel)
@@ -1521,26 +2132,29 @@ class ImageEditWorkspace(QFrame):
         self.status_label = QLabel("", panel)
         self.status_label.setObjectName("mutedLabel")
         self.status_label.setWordWrap(True)
+        self.status_label.setMinimumWidth(0)
+        self.status_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         panel_layout.addWidget(self.status_label)
 
         footer = QHBoxLayout()
         self.reset_button = QPushButton("重置", panel)
-        self.reset_button.clicked.connect(self._reset_all)
-        self.quick_export_button = QPushButton("快速导出", panel)
-        self.quick_export_button.clicked.connect(
-            lambda: self.quickExportRequested.emit(self.request())
-        )
-        self.save_button = QPushButton("导出并打开", panel)
+        self.reset_button.clicked.connect(self._confirm_reset)
+        self.quick_export_button = QPushButton("导出并打开", panel)
+        self.quick_export_button.clicked.connect(lambda: self.saveRequested.emit(self.request()))
+        self.save_button = QPushButton("导出", panel)
         self.save_button.setObjectName("primaryButton")
-        self.save_button.clicked.connect(lambda: self.saveRequested.emit(self.request()))
+        self.save_button.clicked.connect(lambda: self.quickExportRequested.emit(self.request()))
         footer.addWidget(self.reset_button)
         footer.addWidget(self.quick_export_button)
         footer.addWidget(self.save_button, 1)
         panel_layout.addLayout(footer)
         self.body_splitter.addWidget(panel)
-        self.body_splitter.setStretchFactor(0, 1)
-        self.body_splitter.setStretchFactor(1, 0)
-        self.body_splitter.setSizes([900, 350])
+        self.body_splitter.setStretchFactor(0, 3)
+        self.body_splitter.setStretchFactor(1, 2)
+        self.body_splitter.setSizes([860, 390])
         outer.addWidget(self.body_splitter, 1)
 
         self.canvas.cropChanged.connect(self._crop_changed)
@@ -1559,6 +2173,30 @@ class ImageEditWorkspace(QFrame):
         application = QApplication.instance()
         if application is not None:
             application.installEventFilter(self)
+
+    def _build_output_preview_card(self, parent: QWidget) -> QWidget:
+        card = QFrame(parent)
+        card.setObjectName("toolCard")
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(13, 10, 13, 10)
+        layout.setSpacing(12)
+
+        heading = QLabel("应用后预览", card)
+        heading.setStyleSheet("font-weight: 700;")
+        layout.addWidget(heading)
+
+        self.output_preview_line = QLabel("", card)
+        self.output_preview_line.setStyleSheet("font-weight: 600;")
+        self.output_preview_line.setMinimumWidth(0)
+        self.output_preview_line.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.output_preview_line.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.output_preview_line, 1)
+        return card
 
     def _build_output_bar(self, parent: QWidget) -> QWidget:
         bar = QFrame(parent)
@@ -1587,78 +2225,123 @@ class ImageEditWorkspace(QFrame):
     def _build_settings_page(self, parent: QWidget) -> QWidget:
         page = QWidget(parent)
         page.setObjectName("imageToolSettings")
+        page.setMinimumWidth(0)
+        page.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 4, 4, 4)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
-        source_section = QLabel("处理范围", page)
-        source_section.setStyleSheet("font-weight: 600; font-size: 14px;")
-        layout.addWidget(source_section)
-        source_card = QFrame(page)
-        source_card.setObjectName("toolCard")
-        source_layout = QVBoxLayout(source_card)
+        self.source_section = QLabel("处理图片", page)
+        self.source_section.setObjectName("sectionTitle")
+        layout.addWidget(self.source_section)
+        self.source_card = QFrame(page)
+        self.source_card.setObjectName("toolCard")
+        source_layout = QVBoxLayout(self.source_card)
         source_layout.setContentsMargins(11, 9, 11, 9)
         source_layout.setSpacing(7)
-        self.source_summary = QLabel(source_card)
+        self.source_summary = QLabel(self.source_card)
         self.source_summary.setWordWrap(True)
         source_layout.addWidget(self.source_summary)
-        self.source_list = QListWidget(source_card)
-        self.source_list.setFixedHeight(92)
+        self.source_list = QListWidget(self.source_card)
+        self.source_list.setFixedHeight(118)
         self.source_list.setVisible(False)
         source_layout.addWidget(self.source_list)
+        self.source_hint = QLabel(
+            "单击图片切换预览；每张图片会分别记住裁剪位置。", self.source_card
+        )
+        self.source_hint.setObjectName("mutedLabel")
+        self.source_hint.setWordWrap(True)
+        self.source_hint.setVisible(False)
+        source_layout.addWidget(self.source_hint)
         source_actions = QHBoxLayout()
-        self.add_sources_button = QPushButton("＋ 添加图片", source_card)
+        self.add_sources_button = QPushButton("＋ 添加图片", self.source_card)
         self.add_sources_button.setObjectName("linkButton")
-        self.remove_source_button = QPushButton("移除所选", source_card)
+        self.remove_source_button = QPushButton("移除所选", self.source_card)
         self.remove_source_button.setObjectName("linkButton")
         self.remove_source_button.setVisible(False)
         source_actions.addWidget(self.add_sources_button)
         source_actions.addStretch(1)
         source_actions.addWidget(self.remove_source_button)
         source_layout.addLayout(source_actions)
-        layout.addWidget(source_card)
+        layout.addWidget(self.source_card)
         self._update_source_ui()
+        # The current release intentionally exposes a focused single-image flow.
+        # Keep the queue implementation dormant for later product work.
+        self.source_section.hide()
+        self.source_card.hide()
 
-        ratio_section = QLabel("裁剪比例", page)
-        ratio_section.setStyleSheet("font-weight: 600; font-size: 14px;")
+        ratio_section = QLabel("1  裁剪", page)
+        ratio_section.setObjectName("sectionTitle")
         layout.addWidget(ratio_section)
-        description = QLabel("选择比例后，可在图片上拖动边角或移动裁剪区域。", page)
+        ratio_card = QFrame(page)
+        ratio_card.setObjectName("compactSection")
+        ratio_layout = QVBoxLayout(ratio_card)
+        ratio_layout.setContentsMargins(11, 10, 11, 11)
+        ratio_layout.setSpacing(8)
+        description = QLabel("选择比例后，在预览图上拖动或缩放裁剪框。", ratio_card)
         description.setObjectName("mutedLabel")
         description.setWordWrap(True)
-        layout.addWidget(description)
+        ratio_layout.addWidget(description)
 
-        options: tuple[tuple[str, float | None], ...] = (
-            ("自由", None),
-            ("原图", self._source_size[0] / self._source_size[1]),
-            ("1:1", 1.0),
-            ("5:3", 5 / 3),
-            ("16:9", 16 / 9),
-            ("9:16", 9 / 16),
-            ("4:3", 4 / 3),
-            ("3:4", 3 / 4),
-            ("3:2", 3 / 2),
-            ("2:3", 2 / 3),
-            ("18:9", 2.0),
-            ("9:18", 0.5),
+        self.ratio_card = ratio_card
+        self.ratio_grid = QGridLayout()
+        self.ratio_grid.setHorizontalSpacing(8)
+        self.ratio_grid.setVerticalSpacing(8)
+        ratio_layout.addLayout(self.ratio_grid)
+
+        self.ratio_more_combo = QComboBox(ratio_card)
+        self.ratio_more_combo.setObjectName("ratioMoreCombo")
+        self.ratio_more_combo.setMinimumWidth(0)
+        self.ratio_more_combo.setMinimumContentsLength(8)
+        self.ratio_more_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
-        ratio_grid = QGridLayout()
-        ratio_grid.setHorizontalSpacing(8)
-        ratio_grid.setVerticalSpacing(8)
-        for index, (label, ratio) in enumerate(options):
-            button = QPushButton(label, page)
-            button.setObjectName("ratioOption")
-            button.setCheckable(True)
-            button.clicked.connect(
-                lambda _checked=False, name=label, value=ratio: self._apply_crop_ratio(name, value)
-            )
-            self._ratio_buttons[label] = button
-            ratio_grid.addWidget(button, index // 2, index % 2)
-        layout.addLayout(ratio_grid)
+        _style_combo_popup(self.ratio_more_combo, self._colors)
+        self.ratio_more_combo.currentIndexChanged.connect(self._select_more_crop_ratio)
+        self.custom_ratio_button = QPushButton("自定义…", ratio_card)
+        self.custom_ratio_button.setObjectName("ratioOption")
+        self.custom_ratio_button.setCheckable(True)
+        self.custom_ratio_button.clicked.connect(self._choose_custom_crop_ratio)
+        self._ratio_buttons["自定义"] = self.custom_ratio_button
+        ratio_layout.addWidget(self.ratio_more_combo)
+        self.manage_presets_button = QPushButton("管理比例与尺寸预设…", ratio_card)
+        self.manage_presets_button.setObjectName("linkButton")
+        self.manage_presets_button.clicked.connect(self._manage_crop_presets)
+        ratio_actions = QGridLayout()
+        ratio_actions.setHorizontalSpacing(8)
+        ratio_actions.addWidget(self.custom_ratio_button, 0, 0)
+        ratio_actions.addWidget(self.manage_presets_button, 0, 1)
+        ratio_actions.setColumnStretch(0, 1)
+        ratio_actions.setColumnStretch(1, 1)
+        ratio_layout.addLayout(ratio_actions)
+
+        self.size_preset_panel = QFrame(page)
+        self.size_preset_panel.setObjectName("ratioPresetPanel")
+        preset_layout = QVBoxLayout(self.size_preset_panel)
+        preset_layout.setContentsMargins(11, 9, 11, 10)
+        preset_layout.setSpacing(7)
+        self.size_preset_heading = QLabel("推荐输出尺寸", self.size_preset_panel)
+        self.size_preset_heading.setStyleSheet("font-weight: 700;")
+        preset_layout.addWidget(self.size_preset_heading)
+        self.size_preset_hint = QLabel(
+            "已按当前裁剪比例筛选，选择后会直接更新下方宽高。",
+            self.size_preset_panel,
+        )
+        self.size_preset_hint.setObjectName("mutedLabel")
+        self.size_preset_hint.setWordWrap(True)
+        preset_layout.addWidget(self.size_preset_hint)
+        self.size_preset_grid = QGridLayout()
+        self.size_preset_grid.setHorizontalSpacing(7)
+        self.size_preset_grid.setVerticalSpacing(7)
+        preset_layout.addLayout(self.size_preset_grid)
+        self.size_preset_panel.hide()
+        ratio_layout.addWidget(self.size_preset_panel)
+        self._rebuild_preset_controls()
 
         self.crop_info = QLabel("", page)
         self.crop_info.setObjectName("mutedLabel")
         self.crop_info.setWordWrap(True)
-        layout.addWidget(self.crop_info)
+        ratio_layout.addWidget(self.crop_info)
 
         crop_actions = QHBoxLayout()
         self.center_crop_button = QPushButton("居中裁剪", page)
@@ -1667,93 +2350,108 @@ class ImageEditWorkspace(QFrame):
         self.apply_crop_button.clicked.connect(self._apply_current_crop)
         crop_actions.addWidget(self.center_crop_button)
         crop_actions.addWidget(self.apply_crop_button, 1)
-        layout.addLayout(crop_actions)
+        ratio_layout.addLayout(crop_actions)
         compare_hint = QLabel("按住空格可临时对比打开时的原图。", page)
         compare_hint.setObjectName("mutedLabel")
-        layout.addWidget(compare_hint)
+        ratio_layout.addWidget(compare_hint)
+        layout.addWidget(ratio_card)
 
-        size_section = QLabel("输出尺寸", page)
-        size_section.setStyleSheet("font-weight: 600; font-size: 14px; margin-top: 5px;")
+        size_section = QLabel("2  输出尺寸", page)
+        size_section.setObjectName("sectionTitle")
         layout.addWidget(size_section)
-        size_description = QLabel("保持原尺寸即可只转换格式。", page)
+        size_card = QFrame(page)
+        size_card.setObjectName("compactSection")
+        size_layout = QVBoxLayout(size_card)
+        size_layout.setContentsMargins(11, 10, 11, 11)
+        size_layout.setSpacing(8)
+        size_description = QLabel("不调整尺寸时，将按裁剪区域的大小导出。", size_card)
         size_description.setObjectName("mutedLabel")
-        layout.addWidget(size_description)
+        size_layout.addWidget(size_description)
 
-        form = QFormLayout()
-        form.setVerticalSpacing(10)
-        self.width_spin = QSpinBox(page)
-        self.height_spin = QSpinBox(page)
+        size_grid = QGridLayout()
+        size_grid.setHorizontalSpacing(8)
+        size_grid.setVerticalSpacing(5)
+        self.width_spin = QSpinBox(size_card)
+        self.height_spin = QSpinBox(size_card)
         for spin in (self.width_spin, self.height_spin):
+            _configure_direct_number_input(spin)
             spin.setRange(1, 100000)
         self.width_spin.setValue(self._source_size[0])
         self.height_spin.setValue(self._source_size[1])
-        form.addRow("宽度", self.width_spin)
-        form.addRow("高度", self.height_spin)
-        layout.addLayout(form)
+        width_label = QLabel("宽度", size_card)
+        width_label.setObjectName("mutedLabel")
+        height_label = QLabel("高度", size_card)
+        height_label.setObjectName("mutedLabel")
+        size_grid.addWidget(width_label, 0, 0)
+        size_grid.addWidget(height_label, 0, 2)
+        size_grid.addWidget(self.width_spin, 1, 0)
+        separator = QLabel("×", size_card)
+        separator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        separator.setStyleSheet("font-weight: 700;")
+        size_grid.addWidget(separator, 1, 1)
+        size_grid.addWidget(self.height_spin, 1, 2)
+        size_grid.setColumnStretch(0, 1)
+        size_grid.setColumnStretch(2, 1)
+        size_layout.addLayout(size_grid)
 
         self.ratio_lock_card = QFrame(page)
         self.ratio_lock_card.setObjectName("ratioLockCard")
         lock_layout = QHBoxLayout(self.ratio_lock_card)
         lock_layout.setContentsMargins(11, 8, 11, 8)
-        self.lock_ratio = QCheckBox("锁定宽高比例", self.ratio_lock_card)
-        self.lock_ratio.setObjectName("ratioLockSwitch")
+        self.lock_ratio = ViewerCheckBox("锁定宽高比例", self.ratio_lock_card)
+        self.lock_ratio.setObjectName("clearCheckBox")
         self.lock_ratio.setChecked(True)
         self.lock_ratio.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.lock_ratio_status = QLabel("● 已开启", self.ratio_lock_card)
+        self.lock_ratio_status = QLabel("已锁定", self.ratio_lock_card)
         lock_layout.addWidget(self.lock_ratio)
         lock_layout.addStretch(1)
         lock_layout.addWidget(self.lock_ratio_status)
-        layout.addWidget(self.ratio_lock_card)
+        size_layout.addWidget(self.ratio_lock_card)
+        layout.addWidget(size_card)
 
-        preset_label = QLabel("尺寸预设", page)
-        preset_label.setStyleSheet("font-weight: 600; margin-top: 3px;")
-        layout.addWidget(preset_label)
-        preset_hint = QLabel("锁定宽高比时，选择预设会同步裁剪比例，避免画面拉伸。", page)
-        preset_hint.setObjectName("mutedLabel")
-        preset_hint.setWordWrap(True)
-        layout.addWidget(preset_hint)
-        for group_name, sizes in SIZE_PRESET_GROUPS:
-            group_label = QLabel(group_name, page)
-            group_label.setObjectName("mutedLabel")
-            group_label.setStyleSheet("font-weight: 600;")
-            layout.addWidget(group_label)
-            preset_grid = QGridLayout()
-            preset_grid.setHorizontalSpacing(7)
-            preset_grid.setVerticalSpacing(7)
-            for index, (width, height) in enumerate(sizes):
-                button = QPushButton(f"{width} × {height}", page)
-                button.setObjectName("ratioOption")
-                button.clicked.connect(
-                    lambda _checked=False, w=width, h=height: self._apply_size_preset(w, h)
-                )
-                self.size_preset_buttons[(width, height)] = button
-                preset_grid.addWidget(button, index // 2, index % 2)
-            layout.addLayout(preset_grid)
-
-        format_section = QLabel("输出格式", page)
-        format_section.setStyleSheet("font-weight: 600; font-size: 14px; margin-top: 5px;")
+        format_section = QLabel("3  导出格式", page)
+        format_section.setObjectName("sectionTitle")
         layout.addWidget(format_section)
         self.edit_format_group = QButtonGroup(self)
         self.edit_format_group.setExclusive(True)
+        common_format_grid = QGridLayout()
+        common_format_grid.setHorizontalSpacing(7)
+        for index, output_format in enumerate(("PNG", "JPEG")):
+            button = QPushButton(FORMAT_LABELS[output_format], page)
+            button.setObjectName("formatCard")
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, value=output_format: self._select_output_format(value)
+            )
+            self.edit_format_group.addButton(button)
+            self.format_buttons[output_format] = button
+            common_format_grid.addWidget(button, 0, index)
+        layout.addLayout(common_format_grid)
+
+        self.other_format_combo = QComboBox(page)
+        self.other_format_combo.addItem("更多输出格式…", "")
         for group_name, output_formats in FORMAT_GROUPS:
-            group_label = QLabel(group_name, page)
-            group_label.setObjectName("mutedLabel")
-            group_label.setStyleSheet("font-weight: 600;")
-            layout.addWidget(group_label)
-            format_grid = QGridLayout()
-            format_grid.setHorizontalSpacing(7)
-            format_grid.setVerticalSpacing(7)
-            for index, output_format in enumerate(output_formats):
-                button = QPushButton(FORMAT_LABELS[output_format], page)
-                button.setObjectName("formatCard")
-                button.setCheckable(True)
-                button.clicked.connect(
+            uncommon_formats = tuple(
+                output_format
+                for output_format in output_formats
+                if output_format not in {"PNG", "JPEG"}
+            )
+            if not uncommon_formats:
+                continue
+            for output_format in uncommon_formats:
+                label = FORMAT_LABELS[output_format].replace("\n", " · ")
+                self.other_format_combo.addItem(f"{group_name} · {label}", output_format)
+                hidden_button = QPushButton(page)
+                hidden_button.setCheckable(True)
+                hidden_button.clicked.connect(
                     lambda _checked=False, value=output_format: self._select_output_format(value)
                 )
-                self.edit_format_group.addButton(button)
-                self.format_buttons[output_format] = button
-                format_grid.addWidget(button, index // 2, index % 2)
-            layout.addLayout(format_grid)
+                hidden_button.hide()
+                self.edit_format_group.addButton(hidden_button)
+                self.format_buttons[output_format] = hidden_button
+        _style_combo_popup(self.other_format_combo, self._colors)
+        self.other_format_combo.currentIndexChanged.connect(self._select_other_output_format)
+        layout.addWidget(self.other_format_combo)
 
         self.edit_quality_panel = QWidget(page)
         quality_layout = QVBoxLayout(self.edit_quality_panel)
@@ -1775,12 +2473,17 @@ class ImageEditWorkspace(QFrame):
         self.target_size_row = QWidget(page)
         target_size_layout = QHBoxLayout(self.target_size_row)
         target_size_layout.setContentsMargins(0, 0, 0, 0)
-        self.target_size_enabled = QCheckBox("限制文件大小", self.target_size_row)
+        self.target_size_enabled = ViewerCheckBox("限制文件大小", self.target_size_row)
+        self.target_size_enabled.setToolTip(
+            "仅用于 JPEG 和 WebP。启用后会自动降低品质，确保文件不超过目标大小。"
+        )
         self.target_size_spin = QSpinBox(self.target_size_row)
+        _configure_direct_number_input(self.target_size_spin)
         self.target_size_spin.setRange(10, 999_999)
         self.target_size_spin.setValue(500)
         self.target_size_spin.setSuffix(" KB")
         self.target_size_spin.setEnabled(False)
+        self.target_size_spin.setToolTip("目标文件大小上限；无法达到时会明确提示失败。")
         target_size_layout.addWidget(self.target_size_enabled)
         target_size_layout.addStretch(1)
         target_size_layout.addWidget(self.target_size_spin)
@@ -1838,14 +2541,29 @@ class ImageEditWorkspace(QFrame):
         self.edit_format_notice.setWordWrap(True)
         layout.addWidget(self.edit_format_notice)
 
-        naming_section = QLabel("文件命名", page)
-        naming_section.setStyleSheet("font-weight: 600; font-size: 14px; margin-top: 5px;")
-        layout.addWidget(naming_section)
+        self.naming_toggle = QPushButton("文件命名", page)
+        self.naming_toggle.setObjectName("sectionToggle")
+        self.naming_toggle.setCheckable(True)
+        self.naming_toggle.setMinimumWidth(0)
+        self.naming_toggle.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        layout.addWidget(self.naming_toggle)
+        self.naming_panel = QFrame(page)
+        self.naming_panel.setObjectName("compactSection")
+        naming_panel_layout = QVBoxLayout(self.naming_panel)
+        naming_panel_layout.setContentsMargins(11, 10, 11, 11)
+        naming_panel_layout.setSpacing(8)
+        naming_hint = QLabel("需要添加前后缀或调整重名规则时再展开设置。", self.naming_panel)
+        naming_hint.setObjectName("mutedLabel")
+        naming_hint.setWordWrap(True)
+        naming_panel_layout.addWidget(naming_hint)
         naming_form = QFormLayout()
         naming_form.setVerticalSpacing(9)
-        self.filename_prefix = QLineEdit("", page)
-        self.filename_suffix = QLineEdit("_edited", page)
-        self.conflict_combo = QComboBox(page)
+        self.filename_prefix = QLineEdit("", self.naming_panel)
+        self.filename_suffix = QLineEdit("_edited", self.naming_panel)
+        self.conflict_combo = QComboBox(self.naming_panel)
         self.conflict_combo.addItem("自动编号，不覆盖", "unique")
         self.conflict_combo.addItem("已存在则跳过", "skip")
         self.conflict_combo.addItem("覆盖已有结果", "overwrite")
@@ -1853,7 +2571,9 @@ class ImageEditWorkspace(QFrame):
         naming_form.addRow("前缀", self.filename_prefix)
         naming_form.addRow("后缀", self.filename_suffix)
         naming_form.addRow("重名时", self.conflict_combo)
-        layout.addLayout(naming_form)
+        naming_panel_layout.addLayout(naming_form)
+        self.naming_panel.hide()
+        layout.addWidget(self.naming_panel)
         layout.addStretch(1)
 
         self.width_spin.valueChanged.connect(lambda value: self._size_changed("width", value))
@@ -1876,13 +2596,200 @@ class ImageEditWorkspace(QFrame):
         self.conflict_combo.currentIndexChanged.connect(self._update_summary)
         self.add_sources_button.clicked.connect(self._choose_more_sources)
         self.remove_source_button.clicked.connect(self._remove_selected_sources)
+        self.source_list.currentItemChanged.connect(self._source_selection_changed)
+        self.naming_toggle.toggled.connect(self._toggle_naming_panel)
         self._update_ratio_lock_state(True)
         return page
 
-    def _apply_crop_ratio(self, label: str, ratio: float | None) -> None:
+    @property
+    def preset_catalog(self) -> CropPresetCatalog:
+        return self._preset_catalog
+
+    def _rebuild_preset_controls(self) -> None:
+        """Recreate ratio/size buttons from the validated portable catalog."""
+
+        for label, button in tuple(self._ratio_buttons.items()):
+            if button is self.custom_ratio_button:
+                continue
+            self._ratio_buttons.pop(label, None)
+            self.ratio_grid.removeWidget(button)
+            button.deleteLater()
+        while self.ratio_grid.count():
+            self.ratio_grid.takeAt(0)
+
+        for button in self.size_preset_buttons.values():
+            self.size_preset_grid.removeWidget(button)
+            button.deleteLater()
+        self.size_preset_buttons.clear()
+
+        options: list[tuple[str, float | None]] = [
+            ("自由", None),
+            ("原图", self._source_size[0] / max(1, self._source_size[1])),
+        ]
+        options.extend((preset.label, preset.value) for preset in self._preset_catalog.presets)
+        quick_labels = {"自由", "原图", "1:1", "16:9"}
+        quick_index = 0
+        for label, ratio in options:
+            button = QPushButton(label, self.ratio_card)
+            button.setObjectName("ratioOption")
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, name=label, value=ratio: self._apply_crop_ratio(name, value)
+            )
+            self._ratio_buttons[label] = button
+            if label in quick_labels:
+                self.ratio_grid.addWidget(button, quick_index // 2, quick_index % 2)
+                quick_index += 1
+            else:
+                button.hide()
+        self._ratio_buttons["自定义"] = self.custom_ratio_button
+
+        blocked = self.ratio_more_combo.blockSignals(True)
+        try:
+            self.ratio_more_combo.clear()
+            self.ratio_more_combo.addItem("更多比例", "")
+            for preset in self._preset_catalog.presets:
+                if preset.label not in quick_labels:
+                    self.ratio_more_combo.addItem(preset.label, preset.label)
+        finally:
+            self.ratio_more_combo.blockSignals(blocked)
+
+        for preset in self._preset_catalog.presets:
+            for width, height in preset.sizes:
+                button = QPushButton(f"{width} × {height}", self.size_preset_panel)
+                button.setObjectName("sizePresetButton")
+                button.clicked.connect(
+                    lambda _checked=False, w=width, h=height: self._apply_size_preset(w, h)
+                )
+                button.hide()
+                self.size_preset_buttons[(width, height)] = button
+
+        if self._active_ratio_label not in self._ratio_buttons:
+            self._active_ratio_label = "自由"
+            self._active_ratio_value = None
+        for label, button in self._ratio_buttons.items():
+            button.setChecked(label == self._active_ratio_label)
+        self._update_size_preset_visibility(self._active_ratio_value)
+
+    def _manage_crop_presets(self) -> None:
+        dialog = CropPresetManagerDialog(self._preset_catalog, self._colors, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._replace_preset_catalog(dialog.catalog())
+
+    def _replace_preset_catalog(self, catalog: CropPresetCatalog) -> None:
+        self._preset_catalog = catalog
+        active = catalog.preset(self._active_ratio_label)
+        if self._active_ratio_label not in {"自由", "原图", "自定义"} and active is None:
+            self._active_ratio_label = "自由"
+            self._active_ratio_value = None
+        elif active is not None:
+            self._active_ratio_value = active.value
+        self._rebuild_preset_controls()
+        self._apply_crop_ratio(
+            self._active_ratio_label,
+            self._active_ratio_value,
+            preserve_inactive=True,
+        )
+        self.presetCatalogChanged.emit(catalog)
+        self.status_label.setText("比例与尺寸预设已保存")
+
+    def _select_more_crop_ratio(self, _index: int) -> None:
+        label = str(self.ratio_more_combo.currentData() or "")
+        if not label:
+            return
+        button = self._ratio_buttons.get(label)
+        if button is not None:
+            button.click()
+
+    def _toggle_naming_panel(self, visible: bool) -> None:
+        self.naming_panel.setVisible(visible)
+        self._update_naming_toggle()
+
+    def _update_naming_toggle(self) -> None:
+        if not hasattr(self, "naming_toggle"):
+            return
+        marker = "▴" if self.naming_toggle.isChecked() else "▾"
+        self.naming_toggle.setText(f"文件命名  ·  {self._output_filename()}   {marker}")
+
+    def _apply_crop_ratio(
+        self,
+        label: str,
+        ratio: float | None,
+        *,
+        preserve_inactive: bool = False,
+    ) -> None:
+        if label == "原图" and self._source_size[1] > 0:
+            ratio = self._source_size[0] / self._source_size[1]
+        if not preserve_inactive:
+            for path, state in self._source_states.items():
+                if path != self._active_source_path:
+                    state.crop_box = None
         for name, button in self._ratio_buttons.items():
             button.setChecked(name == label)
+        combo_blocked = self.ratio_more_combo.blockSignals(True)
+        try:
+            combo_index = self.ratio_more_combo.findData(label)
+            self.ratio_more_combo.setCurrentIndex(max(0, combo_index))
+        finally:
+            self.ratio_more_combo.blockSignals(combo_blocked)
+        self._active_ratio_label = label
+        self._active_ratio_value = ratio
         self.canvas.set_aspect_ratio(ratio)
+        self._update_size_preset_visibility(ratio)
+
+    def _update_size_preset_visibility(self, ratio: float | None) -> None:
+        if not hasattr(self, "size_preset_panel"):
+            return
+        for button in self.size_preset_buttons.values():
+            self.size_preset_grid.removeWidget(button)
+            button.hide()
+        matching = (
+            []
+            if ratio is None or ratio <= 0
+            else [
+                (size, button)
+                for size, button in self.size_preset_buttons.items()
+                if abs((size[0] / size[1]) - ratio) < 0.0001
+            ]
+        )
+        for index, (_size, button) in enumerate(matching):
+            self.size_preset_grid.addWidget(button, index // 2, index % 2)
+            button.show()
+        orientation = (
+            "横屏"
+            if ratio is not None and ratio > 1.0001
+            else "竖屏"
+            if ratio is not None and ratio < 0.9999
+            else "正方形"
+        )
+        self.size_preset_heading.setText(f"{self._active_ratio_label} · {orientation}输出尺寸")
+        self.size_preset_hint.setText(
+            f"当前为{orientation}比例；选择尺寸后会直接更新下方宽度和高度。"
+        )
+        self.size_preset_panel.setVisible(bool(matching))
+
+    def _choose_custom_crop_ratio(self) -> None:
+        dialog = CustomCropRatioDialog(
+            self._custom_ratio[0],
+            self._custom_ratio[1],
+            self._colors,
+            self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            for name, button in self._ratio_buttons.items():
+                button.setChecked(name == self._active_ratio_label)
+            return
+        self._apply_custom_crop_ratio(*dialog.ratio_values())
+
+    def _apply_custom_crop_ratio(self, width_ratio: int, height_ratio: int) -> None:
+        divisor = gcd(max(1, width_ratio), max(1, height_ratio))
+        normalized_width = max(1, width_ratio) // divisor
+        normalized_height = max(1, height_ratio) // divisor
+        self._custom_ratio = (normalized_width, normalized_height)
+        self.custom_ratio_button.setText(f"自定义  {normalized_width}:{normalized_height}")
+        self._apply_crop_ratio("自定义", normalized_width / normalized_height)
+        self.status_label.setText(f"已应用自定义裁剪比例 {normalized_width}:{normalized_height}")
 
     def _center_crop(self) -> None:
         self.canvas.center_crop()
@@ -1897,17 +2804,176 @@ class ImageEditWorkspace(QFrame):
         left, top, right, bottom = crop_box
         current = self.canvas.image()
         cropped = current.copy(left, top, right - left, bottom - top)
+        base_left, base_top, _base_right, _base_bottom = self._active_base_box
+        self._active_base_box = (
+            base_left + left,
+            base_top + top,
+            base_left + right,
+            base_top + bottom,
+        )
         self._source_size = (cropped.width(), cropped.height())
         self._working_revision += 1
         self._size_dirty = False
         self.canvas.set_image(cropped)
-        self._apply_crop_ratio("自由", None)
+        self._apply_crop_ratio("自由", None, preserve_inactive=True)
         self._apply_size_percent(100)
+        self._snapshot_active_source_state()
         self.status_label.setText("已应用本次裁剪，可继续设置下一次裁剪")
 
     @property
     def sources(self) -> tuple[Path, ...]:
         return tuple(self._sources)
+
+    @property
+    def active_source_path(self) -> Path:
+        return self._active_source_path
+
+    @property
+    def requested_source_path(self) -> Path:
+        return self._requested_source_path
+
+    def _snapshot_active_source_state(self) -> None:
+        state = self._source_states.get(self._active_source_path)
+        if state is None:
+            state = _BatchSourceState(
+                self._initial_source_size,
+                self._active_base_box,
+            )
+            self._source_states[self._active_source_path] = state
+        state.base_box = self._active_base_box
+        state.crop_box = self.canvas.crop_box()
+        state.working_revision = self._working_revision
+
+    @staticmethod
+    def _compose_source_crop_box(
+        state: _BatchSourceState,
+        fallback_ratio: float | None,
+    ) -> tuple[int, int, int, int] | None:
+        base_left, base_top, base_right, base_bottom = state.base_box
+        crop = state.crop_box
+        if crop is None:
+            base_width = base_right - base_left
+            base_height = base_bottom - base_top
+            if fallback_ratio is None or fallback_ratio <= 0:
+                crop = (0, 0, base_width, base_height)
+            else:
+                crop_width = base_width
+                crop_height = round(crop_width / fallback_ratio)
+                if crop_height > base_height:
+                    crop_height = base_height
+                    crop_width = round(crop_height * fallback_ratio)
+                crop_left = max(0, (base_width - crop_width) // 2)
+                crop_top = max(0, (base_height - crop_height) // 2)
+                crop = (
+                    crop_left,
+                    crop_top,
+                    crop_left + crop_width,
+                    crop_top + crop_height,
+                )
+        left, top, right, bottom = crop
+        result = (
+            base_left + left,
+            base_top + top,
+            base_left + right,
+            base_top + bottom,
+        )
+        full = (0, 0, state.original_size[0], state.original_size[1])
+        return None if result == full else result
+
+    def set_source_preview(self, path: Path, image: QImage) -> None:
+        """Display a loaded batch source and restore its own crop state."""
+
+        normalized = path.resolve()
+        if normalized != self._requested_source_path or normalized not in self._sources:
+            return
+        self._snapshot_active_source_state()
+        self._source_states = {
+            source: state
+            for source, state in self._source_states.items()
+            if source in self._sources
+        }
+        width, height = image.width(), image.height()
+        if width < 1 or height < 1:
+            self.set_source_preview_error(normalized, "图片没有可显示的像素")
+            return
+        state = self._source_states.get(normalized)
+        if state is None or state.original_size != (width, height):
+            full_box = (0, 0, width, height)
+            state = _BatchSourceState((width, height), full_box)
+            self._source_states[normalized] = state
+
+        base_left, base_top, base_right, base_bottom = state.base_box
+        base_left = max(0, min(base_left, width - 1))
+        base_top = max(0, min(base_top, height - 1))
+        base_right = max(base_left + 1, min(base_right, width))
+        base_bottom = max(base_top + 1, min(base_bottom, height))
+        self._active_base_box = (base_left, base_top, base_right, base_bottom)
+        working = image.copy(
+            base_left,
+            base_top,
+            base_right - base_left,
+            base_bottom - base_top,
+        )
+
+        self._active_source_path = normalized
+        self._requested_source_path = normalized
+        self._original_image = image.copy()
+        self._initial_source_size = (width, height)
+        self._source_size = (working.width(), working.height())
+        self._working_revision = state.working_revision
+        ratio = self._active_ratio_value
+        if self._active_ratio_label == "原图" and self._source_size[1] > 0:
+            ratio = self._source_size[0] / self._source_size[1]
+            self._active_ratio_value = ratio
+
+        signals_blocked = self.canvas.blockSignals(True)
+        try:
+            self.canvas.set_image(working)
+            self.canvas._aspect_ratio = ratio
+            if state.crop_box is None:
+                if ratio is None:
+                    self.canvas.reset_crop()
+                else:
+                    self.canvas.set_aspect_ratio(ratio)
+            else:
+                left, top, right, bottom = state.crop_box
+                self.canvas._set_crop_rect(QRectF(left, top, right - left, bottom - top))
+        finally:
+            self.canvas.blockSignals(signals_blocked)
+        self._crop_changed(self.canvas.crop_box())
+        self.subtitle.setText(
+            f"{normalized.name}  ·  {width} × {height}  ·  "
+            "裁剪位置按图片分别记忆，输出设置应用到整个批次"
+        )
+        self.status_label.setText(f"当前处理：{normalized.name}")
+        self._update_source_ui()
+        self._update_summary()
+
+    def set_source_preview_error(self, path: Path, message: str) -> None:
+        if path.resolve() != self._requested_source_path:
+            return
+        self._requested_source_path = self._active_source_path
+        self.status_label.setText(f"无法切换到 {path.name}：{message}")
+        self._update_source_ui()
+
+    def _source_selection_changed(
+        self,
+        current: QListWidgetItem | None,
+        _previous: QListWidgetItem | None,
+    ) -> None:
+        if current is None or self._busy:
+            return
+        raw_path = current.data(Qt.ItemDataRole.UserRole)
+        if not raw_path:
+            return
+        path = Path(str(raw_path)).resolve()
+        self.remove_source_button.setEnabled(path != self.source_path)
+        if path == self._active_source_path:
+            self._requested_source_path = path
+            return
+        self._requested_source_path = path
+        self.status_label.setText(f"正在载入 {path.name}…")
+        self.sourcePreviewRequested.emit(path)
 
     def add_sources(self, paths: list[Path]) -> None:
         known = {str(path).casefold() for path in self._sources}
@@ -1943,29 +3009,64 @@ class ImageEditWorkspace(QFrame):
             for item in self.source_list.selectedItems()
         }
         selected.discard(self.source_path)
+        if not selected:
+            self.status_label.setText("初始图片会保留在处理队列中")
+            return
+        active_removed = self._active_source_path in selected
         self._sources = [path for path in self._sources if path not in selected]
+        for path in selected:
+            self._source_states.pop(path, None)
+        if self._requested_source_path in selected:
+            self._requested_source_path = self.source_path
         self._update_source_ui()
         self._update_summary()
+        if active_removed:
+            self.status_label.setText(f"正在返回 {self.source_path.name}…")
+            self.sourcePreviewRequested.emit(self.source_path)
 
     def _update_source_ui(self) -> None:
         count = len(self._sources)
-        self.source_summary.setText(
-            self.source_path.name if count == 1 else f"批量处理 · 共 {count} 张图片"
-        )
-        self.source_list.clear()
-        for path in self._sources:
-            item = QListWidgetItem(path.name, self.source_list)
-            item.setData(Qt.ItemDataRole.UserRole, str(path))
-            if path == self.source_path:
-                item.setToolTip("当前预览图片，不能从队列移除")
+        if count == 1:
+            self.source_summary.setText(self.source_path.name)
+        else:
+            self.source_summary.setText(
+                f"批量处理 · 共 {count} 张图片\n当前：{self._active_source_path.name}"
+            )
+        previous_block = self.source_list.blockSignals(True)
+        try:
+            self.source_list.clear()
+            selected_item: QListWidgetItem | None = None
+            selection_path = (
+                self._requested_source_path
+                if self._requested_source_path in self._sources
+                else self._active_source_path
+            )
+            for path in self._sources:
+                item = QListWidgetItem(path.name, self.source_list)
+                item.setData(Qt.ItemDataRole.UserRole, str(path))
+                if path == self.source_path:
+                    item.setToolTip("初始图片 · 单击切换预览 · 始终保留在队列中")
+                else:
+                    item.setToolTip("单击切换预览与裁剪；可从队列移除")
+                if path == selection_path:
+                    selected_item = item
+            if selected_item is not None:
+                self.source_list.setCurrentItem(selected_item)
+        finally:
+            self.source_list.blockSignals(previous_block)
         self.source_list.setVisible(count > 1)
+        self.source_hint.setVisible(count > 1)
         self.remove_source_button.setVisible(count > 1)
+        self.remove_source_button.setEnabled(selection_path != self.source_path)
 
     def _update_ratio_lock_state(self, checked: bool) -> None:
         self.ratio_lock_card.setProperty("active", checked)
-        self.lock_ratio_status.setText("● 已开启" if checked else "○ 已关闭")
+        self.lock_ratio_status.setText("已锁定" if checked else "未锁定")
+        self.lock_ratio_status.setProperty("active", checked)
         self.lock_ratio_status.setStyleSheet(
-            "font-weight: 600;" if checked else "font-weight: 400;"
+            f"font-weight: 600; color: {self._colors['accent']};"
+            if checked
+            else f"font-weight: 400; color: {self._colors['muted']};"
         )
         style = self.ratio_lock_card.style()
         style.unpolish(self.ratio_lock_card)
@@ -1991,11 +3092,27 @@ class ImageEditWorkspace(QFrame):
     def _open_output_directory(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._output_directory)))
 
+    def _confirm_reset(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "重置处理设置",
+            "确定恢复图片、裁剪、尺寸、格式和文件命名的初始设置吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._reset_all()
+
     def _reset_all(self) -> None:
-        self._source_size = self._initial_source_size
+        self._active_source_path = self.source_path
+        self._requested_source_path = self.source_path
+        self._original_image = self._primary_original_image.copy()
+        self._initial_source_size = self._primary_source_size
+        self._source_size = self._primary_source_size
+        self._active_base_box = (0, 0, *self._primary_source_size)
         self._working_revision = 0
         self._size_dirty = False
-        self.canvas.set_image(self._original_image)
+        self.canvas.set_image(self._primary_original_image)
         self._apply_crop_ratio("自由", None)
         self._apply_size_percent(100)
         self._select_output_format(self._initial_output_format)
@@ -2011,6 +3128,13 @@ class ImageEditWorkspace(QFrame):
         self.filename_suffix.setText("_edited")
         self.conflict_combo.setCurrentIndex(0)
         self._sources = [self.source_path]
+        self._source_states = {
+            self.source_path: _BatchSourceState(
+                self._primary_source_size,
+                self._active_base_box,
+                self._active_base_box,
+            )
+        }
         self._output_directory = self.source_path.parent.resolve()
         self.output_path_edit.setText(str(self._output_directory))
         self.output_path_edit.setToolTip(str(self._output_directory))
@@ -2025,10 +3149,25 @@ class ImageEditWorkspace(QFrame):
                 return output_format
         return self._initial_output_format
 
+    def _select_other_output_format(self, _index: int) -> None:
+        output_format = self.other_format_combo.currentData()
+        if isinstance(output_format, str) and output_format:
+            self._select_output_format(output_format)
+
     def _select_output_format(self, output_format: str) -> None:
         if output_format not in self.format_buttons:
             output_format = "PNG"
         self.format_buttons[output_format].setChecked(True)
+        combo_blocked = self.other_format_combo.blockSignals(True)
+        try:
+            combo_index = (
+                self.other_format_combo.findData(output_format)
+                if output_format not in {"PNG", "JPEG"}
+                else 0
+            )
+            self.other_format_combo.setCurrentIndex(max(0, combo_index))
+        finally:
+            self.other_format_combo.blockSignals(combo_blocked)
         self.edit_quality_panel.setVisible(output_format in {"JPEG", "WEBP", "AVIF", "KTX2"})
         self.target_size_row.setVisible(output_format in {"JPEG", "WEBP"})
         self.edit_animation_row.setVisible(output_format in {"GIF", "APNG"})
@@ -2052,7 +3191,7 @@ class ImageEditWorkspace(QFrame):
         self._update_summary()
 
     def _output_filename(self, source: Path | None = None) -> str:
-        source = source or self.source_path
+        source = source or self._active_source_path
         prefix = self.filename_prefix.text().strip()
         suffix = self.filename_suffix.text().strip()
         extension = extension_for_format(self.output_format)
@@ -2091,26 +3230,18 @@ class ImageEditWorkspace(QFrame):
     def _apply_size_preset(self, width: int, height: int) -> None:
         if self.lock_ratio.isChecked():
             ratio = width / height
-            known_ratios = {
-                "1:1": 1.0,
-                "16:9": 16 / 9,
-                "9:16": 9 / 16,
-                "9:18": 0.5,
-            }
-            matching_label = next(
+            matching_preset = next(
                 (
-                    label
-                    for label, known_ratio in known_ratios.items()
-                    if abs(known_ratio - ratio) < 0.0001
+                    preset
+                    for preset in self._preset_catalog.presets
+                    if (width, height) in preset.sizes or abs(preset.value - ratio) < 0.0001
                 ),
                 None,
             )
-            if matching_label is None:
-                for button in self._ratio_buttons.values():
-                    button.setChecked(False)
-                self.canvas.set_aspect_ratio(ratio)
+            if matching_preset is None:
+                self._apply_custom_crop_ratio(width, height)
             else:
-                self._apply_crop_ratio(matching_label, ratio)
+                self._apply_crop_ratio(matching_preset.label, matching_preset.value)
         self._syncing_size = True
         self.width_spin.setValue(width)
         self.height_spin.setValue(height)
@@ -2145,15 +3276,36 @@ class ImageEditWorkspace(QFrame):
         if self.output_format in {"JPEG", "WEBP"} and self.target_size_enabled.isChecked():
             target_note = f"  ·  ≤ {self.target_size_spin.value()} KB"
         batch_note = f"  ·  {len(self._sources)} 张" if len(self._sources) > 1 else ""
+        display_format = "JPG" if self.output_format == "JPEG" else self.output_format
         self.output_summary.setText(
-            f"输出：{self.width_spin.value()} × {self.height_spin.value()}  ·  "
-            f"{self.output_format}{target_note}{batch_note}\n"
-            f"文件：{self._output_filename()}（重名时自动编号）"
+            f"{self._output_filename()}\n"
+            f"{self.width_spin.value()} × {self.height_spin.value()}  ·  "
+            f"{display_format}{target_note}{batch_note}"
         )
+        active_source = self._active_source_path
+        preview_text = (
+            f"{self._output_filename(active_source)}  ·  "
+            f"{self.width_spin.value()} × {self.height_spin.value()}  ·  {display_format}"
+        )
+        batch_preview = f" · 批量共 {len(self._sources)} 张" if len(self._sources) > 1 else ""
+        self.output_preview_line.setText(preview_text + batch_preview)
+        self.output_preview_line.setToolTip(preview_text + batch_preview)
+        self._update_naming_toggle()
 
     def request(self) -> ImageEditRequest:
+        self._snapshot_active_source_state()
         crop_box = self.canvas.crop_box()
         full_box = (0, 0, self._source_size[0], self._source_size[1])
+        crop_aspect_ratio = (
+            (crop_box[2] - crop_box[0]) / (crop_box[3] - crop_box[1])
+            if (crop_box != full_box or self._working_revision > 0)
+            else self._active_ratio_value
+        )
+        source_crop_boxes = tuple(
+            (path, self._compose_source_crop_box(state, crop_aspect_ratio))
+            for path in self._sources
+            if (state := self._source_states.get(path)) is not None
+        )
         return ImageEditRequest(
             crop_box=None if crop_box == full_box else crop_box,
             width=self.width_spin.value(),
@@ -2170,17 +3322,14 @@ class ImageEditWorkspace(QFrame):
                 if self.output_format in {"JPEG", "WEBP"} and self.target_size_enabled.isChecked()
                 else None
             ),
-            crop_aspect_ratio=(
-                (crop_box[2] - crop_box[0]) / (crop_box[3] - crop_box[1])
-                if (crop_box != full_box or self._working_revision > 0)
-                else None
-            ),
+            crop_aspect_ratio=crop_aspect_ratio,
             resize_enabled=self._size_dirty,
             animation_mode=str(self.edit_animation_mode.currentData()),
             tga_rle=self.edit_tga_rle.isChecked(),
             dds_pixel_format=str(self.edit_dds_pixel_format.currentData()),
             generate_mipmaps=self.edit_mipmap_enabled.isChecked(),
             ktx2_mode=str(self.edit_ktx2_mode.currentData()),
+            source_crop_boxes=source_crop_boxes,
         )
 
     def _state_signature(self) -> tuple[object, ...]:
@@ -2205,6 +3354,7 @@ class ImageEditWorkspace(QFrame):
             request.generate_mipmaps,
             request.ico_sizes,
             request.ktx2_mode,
+            request.source_crop_boxes,
         )
 
     def is_dirty(self) -> bool:
@@ -2216,6 +3366,7 @@ class ImageEditWorkspace(QFrame):
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
+        self.source_list.setEnabled(not busy)
         for button in (
             self.reset_button,
             self.quick_export_button,
@@ -2246,7 +3397,8 @@ class ImageEditWorkspace(QFrame):
             parts.append(f"跳过 {skipped}")
         if failed:
             parts.append(f"失败 {failed}")
-        self.status_label.setText("处理完成 · " + "，".join(parts))
+        prefix = "已导出，当前设置已保留" if success and not failed else "处理完成"
+        self.status_label.setText(prefix + " · " + "，".join(parts))
         if failed == 0:
             self._clean_signature = self._state_signature()
 

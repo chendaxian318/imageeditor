@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
 
 from image_ops import ConflictPolicy, ExportOptions, extension_for_format, save_image
 
+from .crop_presets import CropPresetCatalog
 from .document import metadata_from_image
 from .image_loader import ImageLoader, decode_image
 from .navigation import NavigationSession
@@ -207,6 +208,7 @@ class _UiBridge(QObject):
     conversionFinished = Signal(object)
     imageEditProgress = Signal(int, int, str)
     imageEditFinished = Signal(object)
+    imageEditPreviewLoaded = Signal(object)
     localImageToolFinished = Signal(object)
     creationFinished = Signal(object)
 
@@ -291,6 +293,15 @@ class ViewerWindow(QMainWindow):
         super().__init__()
         self.store = store or SettingsStore()
         self.config, self._settings_base = QtViewerConfig.load(self.store)
+        try:
+            preset_payload = self._settings_base.get("viewer_crop_size_presets")
+            self._crop_preset_catalog = (
+                CropPresetCatalog.from_json(preset_payload)
+                if preset_payload is not None
+                else CropPresetCatalog.defaults()
+            )
+        except ValueError:
+            self._crop_preset_catalog = CropPresetCatalog.defaults()
         set_viewer_theme(self.config.theme)
         self.navigation = NavigationSession([])
         self.image_loader = ImageLoader()
@@ -331,6 +342,10 @@ class ViewerWindow(QMainWindow):
         self._side_panel_width: int | None = None
         self._creation_result: Image.Image | None = None
         self._creation_result_target: Path | None = None
+        self._creation_working_image: Image.Image | None = None
+        self._creation_history: list[bytes | None] = []
+        self._creation_step_labels: list[str] = []
+        self._creation_pending_label = ""
         self._creation_preview_active = False
 
         self.bridge = _UiBridge()
@@ -345,6 +360,7 @@ class ViewerWindow(QMainWindow):
         self.bridge.conversionFinished.connect(self._finish_conversion_request)
         self.bridge.imageEditProgress.connect(self._update_image_edit_progress)
         self.bridge.imageEditFinished.connect(self._finish_image_edit_batch)
+        self.bridge.imageEditPreviewLoaded.connect(self._finish_image_edit_source_preview)
         self.bridge.localImageToolFinished.connect(self._finish_local_image_tool)
         self.bridge.creationFinished.connect(self._finish_creation_request)
 
@@ -554,6 +570,8 @@ class ViewerWindow(QMainWindow):
             "QMenu::item {padding: 6px 24px 6px 10px; border-radius: 6px;}"
             "QMenu::item:selected {background: #3d5266;}"
         )
+        self.zoom_menu.aboutToShow.connect(lambda: self._toolbar_popup_opened(self.zoom_button))
+        self.zoom_menu.aboutToHide.connect(lambda: self._toolbar_popup_closed(self.zoom_button))
         for percent in ZOOM_PRESETS:
             action = self.zoom_menu.addAction(f"{percent}%")
             action.setData(percent)
@@ -776,6 +794,13 @@ class ViewerWindow(QMainWindow):
                     return
             else:
                 self._close_image_edit_workspace()
+        if self._creation_panel is not None:
+            if confirm:
+                self._request_close_creation_panel()
+                if self._creation_panel is not None:
+                    return
+            else:
+                self._close_creation_panel()
         session = NavigationSession.from_activation(paths)
         if not session.files:
             return
@@ -1377,11 +1402,14 @@ class ViewerWindow(QMainWindow):
     @staticmethod
     def _style_tool_menu(menu: QMenu) -> None:
         colors = viewer_theme_colors()
+        menu.setMinimumWidth(252)
+        menu.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         menu.setStyleSheet(
             f"QMenu {{color: {colors['text']}; background: {colors['surface_high']}; "
             f"border: 1px solid {colors['border']}; padding: 7px; "
             "font: 12px 'Microsoft YaHei UI';}"
-            "QMenu::item {padding: 8px 30px 8px 11px; border-radius: 7px;}"
+            "QMenu::item {padding: 8px 18px; margin: 0; min-height: 20px; "
+            "border-radius: 7px;}"
             f"QMenu::item:selected {{background: {colors['selected']};}}"
             f"QMenu::item:disabled {{color: {colors['disabled']};}}"
             f"QMenu::separator {{height: 1px; background: {colors['border']}; margin: 5px;}}"
@@ -1392,7 +1420,7 @@ class ViewerWindow(QMainWindow):
         can_process = path is not None and self.current_image is not None
         can_edit = can_process and path is not None and path.suffix.casefold() != PDF_EXTENSION
         process_action = menu.addAction(
-            "处理图片  ·  裁剪、尺寸与格式",
+            "处理图片 · 裁剪、尺寸与格式",
             self.open_image_edit_workspace,
         )
         process_action.setEnabled(can_edit)
@@ -1402,16 +1430,25 @@ class ViewerWindow(QMainWindow):
     def show_image_tools_menu(self) -> None:
         if self._image_edit_workspace is not None:
             return
+        if self._image_tools_menu is not None and self._image_tools_menu.isVisible():
+            self._image_tools_menu.close()
+            return
         menu = QMenu(self)
         menu.setObjectName("imageToolsMenu")
         self._style_tool_menu(menu)
         self._populate_image_tools_menu(menu)
         self._image_tools_menu = menu
-        menu.aboutToHide.connect(lambda: setattr(self, "_image_tools_menu", None))
+        menu.aboutToShow.connect(lambda: self._toolbar_popup_opened(self.image_tools_button))
+        menu.aboutToHide.connect(lambda: self._image_tools_menu_closed(menu))
         position = self.image_tools_button.mapToGlobal(
             QPoint(0, self.image_tools_button.height() + 6)
         )
         menu.popup(position)
+
+    def _image_tools_menu_closed(self, menu: QMenu) -> None:
+        if self._image_tools_menu is menu:
+            self._image_tools_menu = None
+        self._toolbar_popup_closed(self.image_tools_button)
 
     def show_image_context_menu(self, global_position: QPoint) -> None:
         menu = self._image_context_menu()
@@ -1785,7 +1822,7 @@ class ViewerWindow(QMainWindow):
             if self._image_edit_workspace is not None:
                 return
         if self._creation_panel is not None:
-            self._close_creation_panel()
+            self._request_close_creation_panel()
             if self._creation_panel is not None:
                 return
         self._close_conversion_panel()
@@ -1959,6 +1996,10 @@ class ViewerWindow(QMainWindow):
             QTimer.singleShot(0, lambda path=saved[0]: self.open_path(path))
 
     def open_creation_panel(self) -> None:
+        if self._creation_panel is not None:
+            self._creation_panel.show()
+            self._creation_panel.raise_()
+            return
         source = self.navigation.current
         if source is None or self.current_image is None:
             return
@@ -1998,18 +2039,14 @@ class ViewerWindow(QMainWindow):
             from .internal_default_image_api import (
                 IMAGE_API_DISPLAY_NAME,
                 IMAGE_API_ENDPOINT,
-                IMAGE_API_KEY,
                 IMAGE_API_MODEL,
             )
         except ImportError:
             pass
         else:
-            company_default = bool(IMAGE_API_KEY.strip())
-            if company_default:
-                endpoint = IMAGE_API_ENDPOINT
-                model = IMAGE_API_MODEL
-                active_api_key = IMAGE_API_KEY
-                provider_display_name = IMAGE_API_DISPLAY_NAME
+            endpoint = IMAGE_API_ENDPOINT
+            model = IMAGE_API_MODEL
+            provider_display_name = IMAGE_API_DISPLAY_NAME
         panel = ImageTextCreationPanel(
             source,
             source_size,
@@ -2023,10 +2060,13 @@ class ViewerWindow(QMainWindow):
             colors=viewer_theme_colors(),
             parent=self.root,
         )
-        panel.closeRequested.connect(self._close_creation_panel)
+        panel.closeRequested.connect(self._request_close_creation_panel)
         panel.generateRequested.connect(self._start_creation_request)
         panel.previewRequested.connect(self._preview_creation_result)
         panel.saveRequested.connect(self._save_creation_result)
+        panel.continueRequested.connect(self._accept_creation_result)
+        panel.discardRequested.connect(self._discard_creation_result)
+        panel.undoStepRequested.connect(self._undo_creation_step)
         panel.settingsChanged.connect(self._remember_creation_settings)
         panel.credentialSaveRequested.connect(self._save_creation_credential)
         panel.credentialDeleteRequested.connect(self._delete_creation_credential)
@@ -2076,24 +2116,84 @@ class ViewerWindow(QMainWindow):
         if self._creation_result is not None:
             self._creation_result.close()
             self._creation_result = None
+        if self._creation_working_image is not None:
+            self._creation_working_image.close()
+            self._creation_working_image = None
+        self._creation_history.clear()
+        self._creation_step_labels.clear()
+        self._creation_pending_label = ""
         self._creation_result_target = None
         self._layout_overlays()
         if restore_view and was_previewing and self.navigation.current is not None:
             self.load_current()
 
-    def _start_creation_request(self, request: object) -> None:
-        self._creation_executor.submit(self._run_creation_request, request)
+    def _request_close_creation_panel(self) -> None:
+        panel = self._creation_panel
+        if panel is None or bool(getattr(panel, "_busy", False)):
+            return
+        if self._creation_result is not None or self._creation_working_image is not None:
+            decision = QMessageBox.question(
+                self,
+                "退出制图",
+                "当前连续处理结果尚未保存，确定放弃并退出吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if decision != QMessageBox.StandardButton.Yes:
+                return
+        self._close_creation_panel()
 
-    def _run_creation_request(self, request: object) -> None:
+    def _start_creation_request(self, request: object) -> None:
+        working_image = self._creation_working_image
+        if working_image is None:
+            self._creation_executor.submit(self._run_creation_request, request, None, None)
+            return
+        temporary_directory = Path(tempfile.mkdtemp(prefix="csimage-creation-chain-"))
+        source_override = temporary_directory / "working.png"
+        try:
+            working_image.save(source_override, "PNG")
+        except Exception as error:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
+            self.bridge.creationFinished.emit(
+                {"result": None, "error": f"无法准备当前工作图：{error}"}
+            )
+            return
+        self._creation_executor.submit(
+            self._run_creation_request,
+            request,
+            source_override,
+            temporary_directory,
+        )
+
+    def _run_creation_request(
+        self,
+        request: object,
+        source_override: Path | None,
+        temporary_directory: Path | None,
+    ) -> None:
         from .image_model_api import ImageTextEditApiRequest, edit_image_text
 
         try:
             if not isinstance(request, ImageTextEditApiRequest):
                 raise TypeError("图片文字改写请求无效。")
+            if source_override is not None:
+                request = ImageTextEditApiRequest(
+                    source_path=source_override,
+                    endpoint=request.endpoint,
+                    model=request.model,
+                    api_key=request.api_key,
+                    original_text=request.original_text,
+                    replacement_text=request.replacement_text,
+                    instruction=request.instruction,
+                    quality=request.quality,
+                )
             result = edit_image_text(request)
             payload: dict[str, object] = {"result": result, "error": None}
         except Exception as error:
             payload = {"result": None, "error": str(error)}
+        finally:
+            if temporary_directory is not None:
+                shutil.rmtree(temporary_directory, ignore_errors=True)
         self.bridge.creationFinished.emit(payload)
 
     def _finish_creation_request(self, payload: object) -> None:
@@ -2121,24 +2221,109 @@ class ViewerWindow(QMainWindow):
             self._creation_result.close()
         self._creation_result = image
         source = self.navigation.current
+        self._creation_pending_label = "文字改写"
+        result_suffix = "制图结果" if self._creation_working_image is not None else "文字改写"
         self._creation_result_target = (
-            source.with_name(f"{source.stem}_文字改写.png") if source is not None else None
+            source.with_name(f"{source.stem}_{result_suffix}.png") if source is not None else None
         )
         getattr(panel, "set_result")(png_bytes)
         self._preview_creation_result(True)
 
     def _preview_creation_result(self, show_result: bool) -> None:
-        if show_result and self._creation_result is not None:
-            self.image_view.set_image(pil_to_qimage(self._creation_result), fit=True)
+        preview = self._creation_result or self._creation_working_image
+        if show_result and preview is not None:
+            self.image_view.set_image(pil_to_qimage(preview), fit=True)
             self._creation_preview_active = True
             return
         if self.current_image is not None:
             self.image_view.set_image(pil_to_qimage(self.current_image), fit=True)
         self._creation_preview_active = False
 
+    @staticmethod
+    def _encode_creation_image(image: Image.Image) -> bytes:
+        buffer = BytesIO()
+        image.save(buffer, "PNG")
+        return buffer.getvalue()
+
+    @staticmethod
+    def _decode_creation_image(payload: bytes) -> Image.Image:
+        with Image.open(BytesIO(payload)) as decoded:
+            decoded.load()
+            return decoded.copy()
+
+    def _show_creation_working_image(self) -> None:
+        image = self._creation_working_image or self.current_image
+        if image is not None:
+            self.image_view.set_image(pil_to_qimage(image), fit=True)
+        self._creation_preview_active = self._creation_working_image is not None
+
+    def _refresh_creation_working_state(self, status: str) -> None:
+        panel = self._creation_panel
+        if panel is None:
+            return
+        working = self._creation_working_image
+        png_bytes = self._encode_creation_image(working) if working is not None else None
+        getattr(panel, "set_working_state")(
+            png_bytes,
+            tuple(self._creation_step_labels),
+            working.size if working is not None else None,
+            can_undo=bool(self._creation_history),
+            status=status,
+        )
+
+    def _accept_creation_result(self) -> None:
+        result = self._creation_result
+        if result is None:
+            return
+        previous = self._creation_working_image
+        previous_bytes = self._encode_creation_image(previous) if previous is not None else None
+        self._creation_history.append(previous_bytes)
+        if len(self._creation_history) > 8:
+            self._creation_history.pop(0)
+        if previous is not None:
+            previous.close()
+        self._creation_working_image = result
+        self._creation_result = None
+        self._creation_step_labels.append(self._creation_pending_label or "图像处理")
+        self._creation_pending_label = ""
+        source = self.navigation.current
+        self._creation_result_target = (
+            source.with_name(f"{source.stem}_制图结果.png") if source is not None else None
+        )
+        self._refresh_creation_working_state(
+            "本步已采用，可以继续改文字、去背景或高清优化；最后统一保存。"
+        )
+        self._show_creation_working_image()
+
+    def _discard_creation_result(self) -> None:
+        if self._creation_result is not None:
+            self._creation_result.close()
+            self._creation_result = None
+        self._creation_pending_label = ""
+        self._refresh_creation_working_state("已放弃本步候选，当前工作图保持不变。")
+        self._show_creation_working_image()
+
+    def _undo_creation_step(self) -> None:
+        if self._creation_result is not None or not self._creation_history:
+            return
+        previous_bytes = self._creation_history.pop()
+        if self._creation_working_image is not None:
+            self._creation_working_image.close()
+        self._creation_working_image = (
+            self._decode_creation_image(previous_bytes) if previous_bytes is not None else None
+        )
+        if self._creation_step_labels:
+            self._creation_step_labels.pop()
+        self._creation_result_target = None
+        source = self.navigation.current
+        if self._creation_working_image is not None and source is not None:
+            self._creation_result_target = source.with_name(f"{source.stem}_制图结果.png")
+        self._refresh_creation_working_state("已撤回上一步，可以从当前工作图继续处理。")
+        self._show_creation_working_image()
+
     def _save_creation_result(self) -> None:
         source = self.navigation.current
-        result = self._creation_result
+        result = self._creation_result or self._creation_working_image
         if source is None or result is None:
             return
         suggested_target = self._creation_result_target or source.with_name(
@@ -2226,7 +2411,7 @@ class ViewerWindow(QMainWindow):
         if self.markup_toolbar.isVisible():
             self.leave_markup()
         if self._creation_panel is not None:
-            self._close_creation_panel()
+            self._request_close_creation_panel()
             if self._creation_panel is not None:
                 return
         if self._conversion_panel is not None:
@@ -2255,11 +2440,14 @@ class ViewerWindow(QMainWindow):
             source,
             pil_to_qimage(image),
             colors=viewer_theme_colors(),
+            preset_catalog=self._crop_preset_catalog,
             parent=self.root,
         )
         workspace.cancelRequested.connect(self._request_close_image_edit_workspace)
         workspace.saveRequested.connect(self._save_image_edit_request)
         workspace.quickExportRequested.connect(self._quick_export_image_edit_request)
+        workspace.sourcePreviewRequested.connect(self._request_image_edit_source_preview)
+        workspace.presetCatalogChanged.connect(self._save_crop_preset_catalog)
         self._image_edit_workspace = workspace
         self.image_view.hide()
         for widget in (
@@ -2277,6 +2465,47 @@ class ViewerWindow(QMainWindow):
         self._layout_overlays()
         workspace.show()
         workspace.raise_()
+
+    def _save_crop_preset_catalog(self, value: object) -> None:
+        if not isinstance(value, CropPresetCatalog):
+            return
+        self._crop_preset_catalog = value
+        self._settings_base["viewer_crop_size_presets"] = value.to_json()
+        self.config.save(self.store, self._settings_base)
+
+    def _request_image_edit_source_preview(self, path_value: object) -> None:
+        workspace = self._image_edit_workspace
+        if workspace is None:
+            return
+        path = Path(str(path_value)).resolve()
+
+        def completed(future: Future[Image.Image], requested_path: Path = path) -> None:
+            try:
+                image = future.result()
+                payload: dict[str, object] = {"path": requested_path, "image": image}
+            except BaseException as error:
+                payload = {"path": requested_path, "error": str(error)}
+            self.bridge.imageEditPreviewLoaded.emit(payload)
+
+        self.image_loader.load(path).add_done_callback(completed)
+
+    def _finish_image_edit_source_preview(self, result: object) -> None:
+        payload = cast(dict[str, object], result)
+        path = Path(str(payload["path"]))
+        image = payload.get("image")
+        workspace = self._image_edit_workspace
+        if not isinstance(image, Image.Image):
+            if workspace is not None:
+                getattr(workspace, "set_source_preview_error")(
+                    path,
+                    str(payload.get("error", "无法读取图片")),
+                )
+            return
+        try:
+            if workspace is not None:
+                getattr(workspace, "set_source_preview")(path, pil_to_qimage(image))
+        finally:
+            image.close()
 
     def _close_image_edit_workspace(self, restore_view: bool = True) -> None:
         workspace = self._image_edit_workspace
@@ -2373,6 +2602,9 @@ class ViewerWindow(QMainWindow):
                 working_message=working_message,
             )
 
+        if self._creation_working_image is not None:
+            prepare(self._creation_working_image)
+            return
         if (
             self._progressive_preview is not None
             and not self._full_image_active
@@ -2450,6 +2682,7 @@ class ViewerWindow(QMainWindow):
                 "output": suggested_output_path.resolve(),
                 "png_bytes": png_bytes,
                 "operation": operation,
+                "resolution": resolution,
                 "result": result,
                 "error": "",
             }
@@ -2458,6 +2691,7 @@ class ViewerWindow(QMainWindow):
                 "output": suggested_output_path.resolve(),
                 "png_bytes": b"",
                 "operation": operation,
+                "resolution": resolution,
                 "result": {},
                 "error": str(error),
             }
@@ -2492,16 +2726,26 @@ class ViewerWindow(QMainWindow):
         if self._creation_result is not None:
             self._creation_result.close()
         self._creation_result = image
-        self._creation_result_target = Path(str(payload["output"])).resolve()
         details = cast(dict[str, object], payload.get("result") or {})
         model = str(details.get("model") or "本地模型")
         operation = str(payload.get("operation") or "")
         result_name = "透明背景候选图" if operation == "remove-background" else "高清候选图"
+        self._creation_pending_label = (
+            "智能去背景"
+            if operation == "remove-background"
+            else f"高清优化 {payload.get('resolution') or ''}".strip()
+        )
+        source = self.navigation.current
+        self._creation_result_target = (
+            source.with_name(f"{source.stem}_制图结果.png")
+            if source is not None and self._creation_working_image is not None
+            else Path(str(payload["output"])).resolve()
+        )
         getattr(panel, "set_result")(
             png_bytes,
             title=result_name,
-            status="处理完成但尚未保存；可先对比原图与结果，确认后再另存为。",
-            conversation_message=f"{result_name}已生成（{model}），当前仅供预览。",
+            status="本步候选已生成；可放弃、直接保存，或采用后继续下一步。",
+            conversation_message=f"{result_name}已生成（{model}），采用后可继续处理。",
         )
 
     @staticmethod
@@ -2551,6 +2795,7 @@ class ViewerWindow(QMainWindow):
             QMessageBox.warning(self, "文件名设置无效", str(error))
             return
         image = qimage_to_pil(getattr(workspace, "source_image")())
+        preview_source = Path(getattr(workspace, "active_source_path", source)).resolve()
         sources = tuple(Path(path) for path in getattr(request, "source_paths", ()))
         if not sources:
             sources = (source.resolve(),)
@@ -2559,12 +2804,12 @@ class ViewerWindow(QMainWindow):
             self._conversion_executor.submit(
                 self._run_image_edit_batch,
                 request,
-                source.resolve(),
+                preview_source,
                 image,
                 open_after,
             )
             return
-        self._run_image_edit_batch(request, source.resolve(), image, open_after)
+        self._run_image_edit_batch(request, preview_source, image, open_after)
 
     @staticmethod
     def _center_crop_box(
@@ -2615,23 +2860,30 @@ class ViewerWindow(QMainWindow):
         saved: list[Path] = []
         skipped: list[Path] = []
         failures: list[tuple[Path, str]] = []
+        source_crop_boxes = {
+            Path(path).resolve(): crop_box
+            for path, crop_box in getattr(request, "source_crop_boxes", ())
+        }
         try:
             for index, source in enumerate(sources):
                 self.bridge.imageEditProgress.emit(index, len(sources), source.name)
                 decoded: Image.Image | None = None
                 working: Image.Image | None = None
                 try:
-                    is_current = source == current_source
+                    is_current = len(sources) == 1 and source == current_source
                     if is_current:
                         working = current_image.copy()
                         crop_box = getattr(request, "crop_box", None)
                     else:
                         decoded = decode_image(source)
                         working = decoded
-                        crop_box = self._center_crop_box(
-                            working.size,
-                            getattr(request, "crop_aspect_ratio", None),
-                        )
+                        if source in source_crop_boxes:
+                            crop_box = source_crop_boxes[source]
+                        else:
+                            crop_box = self._center_crop_box(
+                                working.size,
+                                getattr(request, "crop_aspect_ratio", None),
+                            )
                     target = self._image_edit_target(source, request)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     try:
@@ -2850,6 +3102,35 @@ class ViewerWindow(QMainWindow):
         position = self.toolbar.mapFromGlobal(QCursor.pos())
         return self.toolbar.rect().contains(position)
 
+    def _toolbar_popup_is_open(self) -> bool:
+        return self.zoom_menu.isVisible() or (
+            self._image_tools_menu is not None and self._image_tools_menu.isVisible()
+        )
+
+    def _toolbar_popup_opened(self, button: ViewerIconButton) -> None:
+        button.set_selected(True)
+        if (
+            not self.config.toolbar_visible
+            or self.config.toolbar_mode != "auto"
+            or self._clean_mode
+        ):
+            return
+        self._auto_hide_timer.stop()
+        self.toolbar.animate_visible(True)
+
+    def _toolbar_popup_closed(self, button: ViewerIconButton) -> None:
+        button.set_selected(False)
+        QTimer.singleShot(0, self._resume_toolbar_auto_hide)
+
+    def _resume_toolbar_auto_hide(self) -> None:
+        if (
+            self.config.toolbar_visible
+            and self.config.toolbar_mode == "auto"
+            and not self._clean_mode
+            and not self._toolbar_popup_is_open()
+        ):
+            self._auto_hide_timer.start()
+
     def _toolbar_hover_changed(self, hovered: bool) -> None:
         if (
             not self.config.toolbar_visible
@@ -2860,6 +3141,8 @@ class ViewerWindow(QMainWindow):
         if hovered:
             self._auto_hide_timer.stop()
             self.toolbar.animate_visible(True)
+        elif self._toolbar_popup_is_open():
+            self._auto_hide_timer.stop()
         else:
             self._auto_hide_timer.start()
 
@@ -2869,6 +3152,9 @@ class ViewerWindow(QMainWindow):
             or self.config.toolbar_mode != "auto"
             or self._clean_mode
         ):
+            return
+        if self._toolbar_popup_is_open():
+            self._auto_hide_timer.stop()
             return
         if self._toolbar_contains_pointer():
             self._auto_hide_timer.start()
@@ -2883,7 +3169,10 @@ class ViewerWindow(QMainWindow):
             and y < 150
         ):
             self.toolbar.animate_visible(True)
-            self._auto_hide_timer.start()
+            if self._toolbar_popup_is_open():
+                self._auto_hide_timer.stop()
+            else:
+                self._auto_hide_timer.start()
 
     def toggle_clean_mode(self) -> None:
         if self._image_edit_workspace is not None:
@@ -3172,7 +3461,7 @@ class ViewerWindow(QMainWindow):
             self._request_close_image_edit_workspace()
             return
         if self._creation_panel is not None:
-            self._close_creation_panel()
+            self._request_close_creation_panel()
             return
         if self._conversion_panel is not None:
             self._close_conversion_panel()
@@ -3205,6 +3494,19 @@ class ViewerWindow(QMainWindow):
                 self,
                 "退出图片处理",
                 "当前裁剪、尺寸或格式设置尚未导出，确定退出吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if decision != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        if self._creation_panel is not None and (
+            self._creation_result is not None or self._creation_working_image is not None
+        ):
+            decision = QMessageBox.question(
+                self,
+                "退出制图",
+                "当前连续处理结果尚未保存，确定放弃并退出 CSImage 吗？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
